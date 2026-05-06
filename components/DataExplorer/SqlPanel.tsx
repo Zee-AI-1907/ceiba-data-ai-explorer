@@ -11,7 +11,10 @@ import {
   FileQuestion,
   History,
   Database,
+  FileDown,
+  Sheet,
 } from 'lucide-react'
+import * as XLSX from 'xlsx'
 import { clsx } from 'clsx'
 import { SqlHighlight } from './SqlHighlight'
 
@@ -288,23 +291,50 @@ export function SqlPanel({
         </button>
       </div>
 
-      {/* Results tabs */}
-      <div className="flex border-b border-[#2a2a31] px-4 bg-[#0d0d10] flex-shrink-0">
-        {(['results', 'history'] as ResultsTab[]).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setResultsTab(tab)}
-            className={clsx(
-              'flex items-center gap-1.5 px-1 py-2.5 text-[11px] font-semibold tracking-wider uppercase mr-5 border-b-2 transition-colors',
-              resultsTab === tab
-                ? 'text-[#e8e8ea] border-[#7c68ff]'
-                : 'text-[#6c6c74] border-transparent hover:text-[#a0a0a7]'
-            )}
-          >
-            {tab === 'results' ? <FileQuestion size={11} /> : <History size={11} />}
-            {tab === 'results' ? 'Results' : 'Query History'}
-          </button>
-        ))}
+      {/* Results tabs + export buttons */}
+      <div className="flex items-center border-b border-[#2a2a31] px-4 bg-[#0d0d10] flex-shrink-0">
+        {/* Tabs */}
+        <div className="flex flex-1">
+          {(['results', 'history'] as ResultsTab[]).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setResultsTab(tab)}
+              className={clsx(
+                'flex items-center gap-1.5 px-1 py-2.5 text-[11px] font-semibold tracking-wider uppercase mr-5 border-b-2 transition-colors',
+                resultsTab === tab
+                  ? 'text-[#e8e8ea] border-[#7c68ff]'
+                  : 'text-[#6c6c74] border-transparent hover:text-[#a0a0a7]'
+              )}
+            >
+              {tab === 'results' ? <FileQuestion size={11} /> : <History size={11} />}
+              {tab === 'results' ? 'Results' : 'Query History'}
+            </button>
+          ))}
+        </div>
+
+        {/* Export buttons — only visible when results exist */}
+        {results && results.rows.length > 0 && resultsTab === 'results' && (
+          <div className="flex items-center gap-1.5 py-1.5">
+            {/* CSV export */}
+            <button
+              onClick={() => exportCSV(results)}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-[7px] bg-[#16161a] border border-[#2a2a31] text-[11px] font-semibold text-[#4dcc88] hover:bg-[#4dcc8815] hover:border-[#4dcc8840] transition-all"
+              title="Export as CSV"
+            >
+              <FileDown size={11} />
+              CSV
+            </button>
+            {/* Excel export */}
+            <button
+              onClick={() => exportExcel(results)}
+              className="flex items-center gap-1.5 px-3 py-1 rounded-[7px] bg-[#16161a] border border-[#2a2a31] text-[11px] font-semibold text-[#4c8dff] hover:bg-[#4c8dff15] hover:border-[#4c8dff40] transition-all"
+              title="Export as Excel"
+            >
+              <Sheet size={11} />
+              Excel
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Results area */}
@@ -322,6 +352,49 @@ export function SqlPanel({
       </div>
     </div>
   )
+}
+
+// ── Export helpers ─────────────────────────────────────────────────────────
+
+function exportCSV(results: { columns: Column[]; rows: Row[] }) {
+  // Build header row from column labels
+  const header = results.columns.map((c) => `"${c.label}"`).join(',')
+  // Build data rows, escaping quotes inside values
+  const dataRows = results.rows.map((row) =>
+    results.columns
+      .map((c) => {
+        const val = row[c.key] == null ? '' : String(row[c.key])
+        return `"${val.replace(/"/g, '""')}"`
+      })
+      .join(',')
+  )
+  const csv = [header, ...dataRows].join('\n')
+  triggerDownload(csv, 'ceiba-results.csv', 'text/csv;charset=utf-8;')
+}
+
+function exportExcel(results: { columns: Column[]; rows: Row[] }) {
+  // Build worksheet data: first row = headers, then data rows
+  const wsData = [
+    results.columns.map((c) => c.label),
+    ...results.rows.map((row) =>
+      results.columns.map((c) => (row[c.key] == null ? '' : row[c.key]))
+    ),
+  ]
+  const ws = XLSX.utils.aoa_to_sheet(wsData)
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'Results')
+  // Write and trigger download as .xlsx
+  XLSX.writeFile(wb, 'ceiba-results.xlsx')
+}
+
+function triggerDownload(content: string, filename: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
 }
 
 function ResultsEmptyState({ isRunning }: { isRunning: boolean }) {
