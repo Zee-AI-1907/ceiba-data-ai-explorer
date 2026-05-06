@@ -29,3 +29,6 @@ next-env.d.ts
 # Audit logs (PHI — never commit)
 logs/
 logs/privacy-requests.log
+
+# License/billing data (contains customer PII — never commit)
+data/

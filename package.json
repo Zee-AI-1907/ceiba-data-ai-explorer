@@ -12,6 +12,7 @@
     "qa:fix": "node scripts/qa-fix.mjs"
   },
   "dependencies": {
+    "@stripe/stripe-js": "^9.4.0",
     "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
     "lucide-react": "^0.378.0",
@@ -22,6 +23,7 @@
     "react": "^18",
     "react-dom": "^18",
     "recharts": "^3.8.1",
+    "stripe": "^22.1.1",
     "tailwind-merge": "^2.3.0",
     "xlsx": "^0.18.5"
   },

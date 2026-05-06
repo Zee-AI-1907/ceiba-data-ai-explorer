@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import Link from 'next/link'
-import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle, LogOut } from 'lucide-react'
+import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle, LogOut, CreditCard } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useSession, signOut } from 'next-auth/react'
 import {
@@ -14,7 +14,7 @@ import {
   clearAll,
 } from '@/lib/notificationStore'
 
-type ActivePage = 'dashboards' | 'charts' | 'datasets' | 'sql' | 'alerts' | 'reports' | 'audit'
+type ActivePage = 'dashboards' | 'charts' | 'datasets' | 'sql' | 'alerts' | 'reports' | 'audit' | 'billing'
 
 interface DataNavProps {
   activePage: ActivePage
@@ -22,14 +22,15 @@ interface DataNavProps {
   isAdmin?: boolean
 }
 
-const navLinks: { key: ActivePage; label: string; href: string; hasDrop?: boolean; adminOnly?: boolean }[] = [
+const navLinks: { key: ActivePage; label: string; href: string; hasDrop?: boolean; adminOnly?: boolean; icon?: React.ElementType }[] = [
   { key: 'dashboards', label: 'Dashboards', href: '/dashboards' },
   { key: 'charts',     label: 'Charts',     href: '/charts' },
   { key: 'datasets',   label: 'Datasets',   href: '/datasets' },
   { key: 'sql',        label: 'SQL',        href: '/data-explorer', hasDrop: true },
   { key: 'alerts',     label: 'Alerts',     href: '/alerts' },
   { key: 'reports',    label: 'Reports',    href: '/reports' },
-  { key: 'audit',      label: 'Audit Log',  href: '/audit', adminOnly: true },
+  { key: 'audit',      label: 'Audit Log',  href: '/audit',    adminOnly: true },
+  { key: 'billing',    label: 'Billing',    href: '/billing',  adminOnly: true, icon: CreditCard },
 ]
 
 function timeAgo(iso: string): string {
