@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { chartCache, hashKey } from '@/lib/cache'
-import { requireAuth } from '@/lib/apiAuth'
+import { requireAuthWithPermission } from '@/lib/apiAuth'
 
 // ─── Token-optimized chart suggestion endpoint ───────────────────────────────
 // Strategy:
@@ -33,7 +33,7 @@ Otherwise, return ONLY valid JSON chart config with NO explanation:
 Rules: pie/donut need valueKey+categoryKey. bigNumber needs one numeric column. bar/line/area need xKey+yKey.`
 
 export async function POST(req: NextRequest) {
-  const { error } = await requireAuth(req)
+  const { error } = await requireAuthWithPermission(req, 'query:run')
   if (error) return error
 
   const apiKey = process.env.OPENAI_API_KEY

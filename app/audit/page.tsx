@@ -2,8 +2,8 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { clsx } from 'clsx'
-import { ShieldCheck, Download, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react'
-import type { AuditEvent, AuditAction, AuditSeverity } from '@/lib/auditLog'
+import { ShieldCheck, ShieldAlert, ShieldOff, Download, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react'
+import type { AuditEvent, AuditAction, AuditSeverity, IntegrityResult } from '@/lib/auditLog'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -63,6 +63,8 @@ export default function AuditLogPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState(1)
+  const [integrityResult, setIntegrityResult] = useState<IntegrityResult | null>(null)
+  const [verifying, setVerifying] = useState(false)
 
   const fetchEvents = useCallback(async () => {
     setLoading(true)
@@ -86,6 +88,22 @@ export default function AuditLogPage() {
 
   const totalPages = Math.max(1, Math.ceil(events.length / PAGE_SIZE))
   const pageEvents = events.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  async function handleVerifyIntegrity() {
+    setVerifying(true)
+    setIntegrityResult(null)
+    try {
+      const res = await fetch('/api/audit?action=verify')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json() as IntegrityResult
+      setIntegrityResult(data)
+    } catch (e) {
+      setIntegrityResult({ valid: false, totalEntries: 0, tamperedAt: undefined })
+      console.error('[audit] integrity check failed:', e)
+    } finally {
+      setVerifying(false)
+    }
+  }
 
   function handleExportCSV() {
     const csv = eventsToCSV(events)
@@ -120,6 +138,14 @@ export default function AuditLogPage() {
             Refresh
           </button>
           <button
+            onClick={handleVerifyIntegrity}
+            disabled={verifying}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#16161a] border border-[#2a2a31] text-[11px] text-[#a0a0a7] hover:text-[#e8e8ea] hover:border-[#3a3a45] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+          >
+            <ShieldCheck size={11} className={verifying ? 'animate-pulse' : ''} />
+            {verifying ? 'Verifying…' : 'Verify Integrity'}
+          </button>
+          <button
             onClick={handleExportCSV}
             disabled={events.length === 0}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-[8px] bg-[#7c68ff] text-white text-[11px] font-semibold hover:bg-[#9080ff] disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-[0_2px_8px_rgba(124,104,255,0.3)]"
@@ -144,6 +170,24 @@ export default function AuditLogPage() {
           Total: {events.length}
         </div>
       </div>
+
+      {/* Integrity result banner */}
+      {integrityResult && (
+        <div
+          className={clsx(
+            'mb-4 px-4 py-3 rounded-[10px] border text-[12px] flex items-center gap-2',
+            integrityResult.valid
+              ? 'bg-[#4dcc8815] border-[#4dcc8840] text-[#4dcc88]'
+              : 'bg-[#ff5c6c15] border-[#ff5c6c40] text-[#ff5c6c]',
+          )}
+        >
+          {integrityResult.valid ? (
+            <><ShieldAlert size={13} /> ✓ Log intact ({integrityResult.totalEntries} entries)</>
+          ) : (
+            <><ShieldOff size={13} /> ⚠ Tampering detected{integrityResult.tamperedAt ? ` at entry ${integrityResult.tamperedAt}` : ''}</>
+          )}
+        </div>
+      )}
 
       {/* Error state */}
       {error && (

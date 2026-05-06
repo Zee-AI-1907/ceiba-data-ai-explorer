@@ -1,8 +1,19 @@
 import type { Metadata } from 'next'
+import { Inter } from 'next/font/google'
 import '../styles/globals.css'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import MobileNav from '@/components/MobileNav'
 import AuthProvider from '@/components/AuthProvider'
+import CookieConsent from '@/components/CookieConsent'
+import RetentionEnforcer from '@/components/RetentionEnforcer'
+
+// G-006: Self-hosted via next/font/google (downloaded at build time, served from
+// same origin — no Google IP leakage at runtime).
+const inter = Inter({
+  subsets: ['latin'],
+  weight: ['300', '400', '500', '600', '700'],
+  display: 'swap',
+})
 
 export const metadata: Metadata = {
   title: 'Ceiba Data AI Explorer',
@@ -16,20 +27,15 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
-          rel="stylesheet"
-        />
-      </head>
-      <body className="bg-[#0b0b0c] text-[#e8e8ea] antialiased">
+      <body className={`${inter.className} bg-[#0b0b0c] text-[#e8e8ea] antialiased`}>
         <AuthProvider>
+          {/* G-003: enforce retention on every page load */}
+          <RetentionEnforcer />
           <ErrorBoundary>
             {children}
           </ErrorBoundary>
           <MobileNav />
+          <CookieConsent />
         </AuthProvider>
       </body>
     </html>

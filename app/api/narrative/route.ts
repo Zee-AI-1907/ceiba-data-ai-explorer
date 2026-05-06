@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { logWithSession } from '@/lib/auditLog'
 import { scrubPHI } from '@/lib/phiScrubber'
-import { requireAuth } from '@/lib/apiAuth'
+import { requireAuthWithPermission } from '@/lib/apiAuth'
 
 const NARRATIVE_SYSTEM_PROMPT = `You are a clinical data analyst. Given a dataset and the user's original question, write a concise 2-4 sentence plain-English narrative summary.
 Highlight the top finding, any notable outliers, and one actionable insight.
@@ -30,7 +30,7 @@ interface NarrativeRequest {
 }
 
 export async function POST(req: NextRequest) {
-  const { error } = await requireAuth(req)
+  const { error } = await requireAuthWithPermission(req, 'narrative:generate')
   if (error) return error
 
   const apiKey = process.env.OPENAI_API_KEY

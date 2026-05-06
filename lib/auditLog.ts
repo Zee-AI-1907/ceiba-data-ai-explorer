@@ -1,5 +1,12 @@
 /**
  * auditLog.ts — Server-side append-only PHI access audit logger.
+ *
+ * H-007: Tamper-evident hash chaining.
+ *   Each entry carries:
+ *     previousHash — SHA-256 hash of the previous raw JSON line
+ *                    (genesis entry uses '0'.repeat(64))
+ *     hash         — SHA-256 of (previousHash + JSON.stringify(entryWithoutHash))
+ *
  * IMPORTANT: This module is SERVER-ONLY. Never import it in client components.
  */
 
@@ -45,11 +52,14 @@ export type AuditEvent = {
   userAgent?: string
   sessionId?: string
   severity: AuditSeverity
+  /** SHA-256 hash of the previous log line (genesis = '0'.repeat(64)) */
+  previousHash: string
+  /** SHA-256 of (previousHash + JSON.stringify(entryWithoutHash)) */
+  hash: string
 }
 
 // ── Log file path ─────────────────────────────────────────────────────────────
 
-// Resolve relative to the project root (process.cwd() in Next.js = project root)
 const LOG_DIR = path.join(process.cwd(), 'logs')
 const LOG_FILE = path.join(LOG_DIR, 'audit.log')
 
@@ -59,17 +69,53 @@ function ensureLogDir(): void {
   }
 }
 
+// ── Hash helpers ──────────────────────────────────────────────────────────────
+
+const GENESIS_HASH = '0'.repeat(64)
+
+function sha256(data: string): string {
+  return crypto.createHash('sha256').update(data, 'utf8').digest('hex')
+}
+
+/**
+ * Compute the tamper-chain hash for an entry.
+ * entryWithoutHash = the full event object minus the `hash` field.
+ */
+function computeEntryHash(
+  previousHash: string,
+  entryWithoutHash: Omit<AuditEvent, 'hash'>,
+): string {
+  return sha256(previousHash + JSON.stringify(entryWithoutHash))
+}
+
+/**
+ * Read the last non-empty line and return its sha256 hash.
+ * Returns GENESIS_HASH if the file is empty or does not exist.
+ */
+function getLastLineHash(): string {
+  try {
+    ensureLogDir()
+    if (!fs.existsSync(LOG_FILE)) return GENESIS_HASH
+    const content = fs.readFileSync(LOG_FILE, 'utf8')
+    const lines = content.split('\n').filter((l) => l.trim())
+    if (lines.length === 0) return GENESIS_HASH
+    const lastLine = lines[lines.length - 1]
+    return sha256(lastLine)
+  } catch {
+    return GENESIS_HASH
+  }
+}
+
 // ── Write ─────────────────────────────────────────────────────────────────────
 
 /**
  * logWithSession — Preferred audit helper.
  * Extracts userId, userEmail, ipAddress, and userAgent from the incoming
  * request and the current NextAuth session, then calls logAuditEvent.
- * Use this in all API routes instead of calling logAuditEvent directly.
  */
 export async function logWithSession(
   request: Request,
-  event: Omit<AuditEvent, 'id' | 'timestamp' | 'userId' | 'userEmail' | 'ipAddress' | 'userAgent'>
+  event: Omit<AuditEvent, 'id' | 'timestamp' | 'userId' | 'userEmail' | 'ipAddress' | 'userAgent' | 'previousHash' | 'hash'>
 ): Promise<void> {
   const session = await getServerSession(authOptions)
   const forwarded = request.headers.get('x-forwarded-for')
@@ -85,19 +131,28 @@ export async function logWithSession(
 }
 
 /**
- * Append a single audit event to audit.log (JSON-lines format).
- * Uses synchronous I/O to guarantee the write completes before the response.
+ * Append a single audit event to audit.log (JSON-lines format) with
+ * tamper-evident hash chaining.
  */
 export function logAuditEvent(
-  event: Omit<AuditEvent, 'id' | 'timestamp'>
+  event: Omit<AuditEvent, 'id' | 'timestamp' | 'previousHash' | 'hash'>
 ): void {
   try {
     ensureLogDir()
-    const fullEvent: AuditEvent = {
+
+    const previousHash = getLastLineHash()
+
+    // Build event without hash first
+    const withoutHash: Omit<AuditEvent, 'hash'> = {
       ...event,
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
+      previousHash,
     }
+
+    const hash = computeEntryHash(previousHash, withoutHash)
+
+    const fullEvent: AuditEvent = { ...withoutHash, hash }
     const line = JSON.stringify(fullEvent) + '\n'
     fs.appendFileSync(LOG_FILE, line, 'utf8')
   } catch (err) {
@@ -176,4 +231,65 @@ export function searchAuditLog(filters: AuditLogFilters = {}): AuditEvent[] {
   }
 
   return events.reverse()
+}
+
+// ── Integrity verification ────────────────────────────────────────────────────
+
+export type IntegrityResult = {
+  valid: boolean
+  tamperedAt?: number
+  totalEntries: number
+}
+
+/**
+ * Verify the full audit log chain.
+ * Re-derives each entry's expected hash and confirms it matches the stored hash.
+ * Also verifies each entry's previousHash matches the SHA-256 of the prior raw line.
+ */
+export function verifyAuditLogIntegrity(): IntegrityResult {
+  try {
+    ensureLogDir()
+    if (!fs.existsSync(LOG_FILE)) {
+      return { valid: true, totalEntries: 0 }
+    }
+
+    const content = fs.readFileSync(LOG_FILE, 'utf8')
+    const lines = content.split('\n').filter((l) => l.trim())
+
+    if (lines.length === 0) {
+      return { valid: true, totalEntries: 0 }
+    }
+
+    let expectedPreviousHash = GENESIS_HASH
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      let entry: AuditEvent
+      try {
+        entry = JSON.parse(line) as AuditEvent
+      } catch {
+        return { valid: false, tamperedAt: i + 1, totalEntries: lines.length }
+      }
+
+      // Verify previousHash linkage
+      if (entry.previousHash !== expectedPreviousHash) {
+        return { valid: false, tamperedAt: i + 1, totalEntries: lines.length }
+      }
+
+      // Re-compute expected hash
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { hash: storedHash, ...withoutHash } = entry
+      const expectedHash = computeEntryHash(entry.previousHash, withoutHash)
+      if (storedHash !== expectedHash) {
+        return { valid: false, tamperedAt: i + 1, totalEntries: lines.length }
+      }
+
+      // Next entry's previousHash = SHA-256 of this raw line
+      expectedPreviousHash = sha256(line)
+    }
+
+    return { valid: true, totalEntries: lines.length }
+  } catch {
+    return { valid: false, totalEntries: 0 }
+  }
 }
