@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import Link from 'next/link'
-import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle } from 'lucide-react'
+import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle, LogOut } from 'lucide-react'
 import { clsx } from 'clsx'
+import { useSession, signOut } from 'next-auth/react'
 import {
   AppNotification,
   getNotifications,
@@ -13,19 +14,22 @@ import {
   clearAll,
 } from '@/lib/notificationStore'
 
-type ActivePage = 'dashboards' | 'charts' | 'datasets' | 'sql' | 'alerts' | 'reports'
+type ActivePage = 'dashboards' | 'charts' | 'datasets' | 'sql' | 'alerts' | 'reports' | 'audit'
 
 interface DataNavProps {
   activePage: ActivePage
+  /** Show the admin-only Audit Log link. Defaults to false. */
+  isAdmin?: boolean
 }
 
-const navLinks: { key: ActivePage; label: string; href: string; hasDrop?: boolean }[] = [
+const navLinks: { key: ActivePage; label: string; href: string; hasDrop?: boolean; adminOnly?: boolean }[] = [
   { key: 'dashboards', label: 'Dashboards', href: '/dashboards' },
   { key: 'charts',     label: 'Charts',     href: '/charts' },
   { key: 'datasets',   label: 'Datasets',   href: '/datasets' },
   { key: 'sql',        label: 'SQL',        href: '/data-explorer', hasDrop: true },
   { key: 'alerts',     label: 'Alerts',     href: '/alerts' },
   { key: 'reports',    label: 'Reports',    href: '/reports' },
+  { key: 'audit',      label: 'Audit Log',  href: '/audit', adminOnly: true },
 ]
 
 function timeAgo(iso: string): string {
@@ -44,12 +48,32 @@ const severityBorder: Record<string, string> = {
   info: 'border-l-[#4c8dff]',
 }
 
-export default function DataNav({ activePage }: DataNavProps) {
+function getInitials(name: string): string {
+  return name
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0])
+    .join('')
+    .toUpperCase()
+}
+
+const roleColor: Record<string, string> = {
+  admin: '#7c68ff',
+  clinician: '#4dcc88',
+  analyst: '#4c8dff',
+}
+
+export default function DataNav({ activePage, isAdmin = false }: DataNavProps) {
   const [sqlOpen, setSqlOpen] = useState(false)
   const [notifOpen, setNotifOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notifications, setNotifications] = useState<AppNotification[]>([])
   const [unread, setUnread] = useState(0)
+  const { data: session } = useSession()
+  const userName = session?.user?.name ?? ''
+  const userRole = (session?.user as { role?: string })?.role ?? 'analyst'
+  const avatarColor = roleColor[userRole] ?? '#6c6c74'
 
   const refreshNotifications = useCallback(() => {
     setNotifications(getNotifications())
@@ -94,7 +118,7 @@ export default function DataNav({ activePage }: DataNavProps) {
 
         {/* Nav links - hidden on mobile */}
         <div className="hidden md:flex items-stretch flex-1">
-          {navLinks.map((link) => {
+          {navLinks.filter((link) => !link.adminOnly || isAdmin).map((link) => {
             const isActive = activePage === link.key
 
             if (link.hasDrop) {
@@ -200,6 +224,27 @@ export default function DataNav({ activePage }: DataNavProps) {
             <Settings size={11} />
             Settings
           </button>
+
+          {/* User avatar + sign out */}
+          {userName && (
+            <div className="hidden md:flex items-center gap-2 ml-1 pl-2 border-l border-[#2a2a31]">
+              <div
+                className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0"
+                style={{ backgroundColor: avatarColor }}
+                title={`${userName} (${userRole})`}
+              >
+                {getInitials(userName)}
+              </div>
+              <span className="text-[12px] text-[#a0a0a7] max-w-[100px] truncate">{userName}</span>
+              <button
+                onClick={() => signOut({ callbackUrl: '/login' })}
+                title="Sign out"
+                className="w-6 h-6 rounded-[6px] flex items-center justify-center text-[#44444b] hover:text-[#ff5c6c] hover:bg-[#ff5c6c10] transition-all"
+              >
+                <LogOut size={12} />
+              </button>
+            </div>
+          )}
         </div>
       </nav>
 
@@ -208,7 +253,7 @@ export default function DataNav({ activePage }: DataNavProps) {
            the viewport top regardless of the page's positioned ancestors. */}
       {mobileMenuOpen && (
         <div className="md:hidden fixed top-11 left-0 right-0 bg-[#111114] border-b border-[#2a2a31] shadow-xl z-50">
-          {navLinks.map((link) => (
+          {navLinks.filter((link) => !link.adminOnly || isAdmin).map((link) => (
             <Link
               key={link.key}
               href={link.href}

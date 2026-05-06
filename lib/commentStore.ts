@@ -1,4 +1,4 @@
-// Comment Store — localStorage-backed
+// Comment Store — obfuscated-localStorage-backed
 
 export type Comment = {
   id: string
@@ -12,7 +12,9 @@ export type Comment = {
   resolved: boolean
 }
 
-const COMMENTS_KEY = 'ceiba_comments'
+import { secureGetSync, secureSetSync } from '@/lib/secureStorage'
+
+const COMMENTS_KEY = 'comments'
 
 // Seed comments — only written once on first load
 const SEED_COMMENTS: Comment[] = [
@@ -64,30 +66,22 @@ const SEED_COMMENTS: Comment[] = [
 
 function seed(): void {
   if (typeof window === 'undefined') return
-  if (!localStorage.getItem(COMMENTS_KEY)) {
-    localStorage.setItem(COMMENTS_KEY, JSON.stringify(SEED_COMMENTS))
+  if (secureGetSync<Comment[]>(COMMENTS_KEY) === null) {
+    secureSetSync(COMMENTS_KEY, SEED_COMMENTS)
   }
 }
 
 export function getComments(resourceType: Comment['resourceType'], resourceId: string): Comment[] {
   if (typeof window === 'undefined') return []
   seed()
-  try {
-    const all: Comment[] = JSON.parse(localStorage.getItem(COMMENTS_KEY) || '[]')
-    return all.filter((c) => c.resourceType === resourceType && c.resourceId === resourceId)
-  } catch {
-    return []
-  }
+  const all = secureGetSync<Comment[]>(COMMENTS_KEY) ?? []
+  return all.filter((c) => c.resourceType === resourceType && c.resourceId === resourceId)
 }
 
 export function getAllComments(): Comment[] {
   if (typeof window === 'undefined') return []
   seed()
-  try {
-    return JSON.parse(localStorage.getItem(COMMENTS_KEY) || '[]')
-  } catch {
-    return []
-  }
+  return secureGetSync<Comment[]>(COMMENTS_KEY) ?? []
 }
 
 export function addComment(
@@ -100,7 +94,7 @@ export function addComment(
     createdAt: new Date().toISOString(),
   }
   all.push(newComment)
-  localStorage.setItem(COMMENTS_KEY, JSON.stringify(all))
+  secureSetSync(COMMENTS_KEY, all)
   return newComment
 }
 
@@ -109,13 +103,13 @@ export function resolveComment(id: string): void {
   const idx = all.findIndex((c) => c.id === id)
   if (idx >= 0) {
     all[idx].resolved = true
-    localStorage.setItem(COMMENTS_KEY, JSON.stringify(all))
+    secureSetSync(COMMENTS_KEY, all)
   }
 }
 
 export function deleteComment(id: string): void {
   const all = getAllComments().filter((c) => c.id !== id)
-  localStorage.setItem(COMMENTS_KEY, JSON.stringify(all))
+  secureSetSync(COMMENTS_KEY, all)
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-// Alert Store — localStorage-backed persistence
+// Alert Store — obfuscated-localStorage-backed persistence
 
 export type AlertOperator = '>' | '<' | '>=' | '<=' | '=='
 
@@ -33,15 +33,13 @@ export type Alert = {
   createdAt: string
 }
 
-const ALERTS_KEY = 'ceiba_alerts'
+import { secureGetSync, secureSetSync } from '@/lib/secureStorage'
+
+const ALERTS_KEY = 'alerts'
 
 export function getAlerts(): Alert[] {
   if (typeof window === 'undefined') return []
-  try {
-    return JSON.parse(localStorage.getItem(ALERTS_KEY) || '[]')
-  } catch {
-    return []
-  }
+  return secureGetSync<Alert[]>(ALERTS_KEY) ?? []
 }
 
 export function getAlert(id: string): Alert | null {
@@ -53,12 +51,12 @@ export function saveAlert(alert: Alert): void {
   const idx = alerts.findIndex((a) => a.id === alert.id)
   if (idx >= 0) alerts[idx] = alert
   else alerts.unshift(alert)
-  localStorage.setItem(ALERTS_KEY, JSON.stringify(alerts))
+  secureSetSync(ALERTS_KEY, alerts)
 }
 
 export function deleteAlert(id: string): void {
   const alerts = getAlerts().filter((a) => a.id !== id)
-  localStorage.setItem(ALERTS_KEY, JSON.stringify(alerts))
+  secureSetSync(ALERTS_KEY, alerts)
 }
 
 export function toggleAlertStatus(id: string): void {
@@ -66,7 +64,7 @@ export function toggleAlertStatus(id: string): void {
   const idx = alerts.findIndex((a) => a.id === id)
   if (idx >= 0) {
     alerts[idx].status = alerts[idx].status === 'Active' ? 'Paused' : 'Active'
-    localStorage.setItem(ALERTS_KEY, JSON.stringify(alerts))
+    secureSetSync(ALERTS_KEY, alerts)
   }
 }
 

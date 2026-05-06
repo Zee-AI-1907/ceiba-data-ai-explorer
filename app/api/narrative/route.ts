@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { logAuditEvent } from '@/lib/auditLog'
+import { scrubPHI } from '@/lib/phiScrubber'
 
 const NARRATIVE_SYSTEM_PROMPT = `You are a clinical data analyst. Given a dataset and the user's original question, write a concise 2-4 sentence plain-English narrative summary.
 Highlight the top finding, any notable outliers, and one actionable insight.
@@ -43,8 +45,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No data provided' }, { status: 400 })
   }
 
+  // Log narrative generation (WARNING — PHI data is being sent to external AI)
+  logAuditEvent({
+    action: 'NARRATIVE_GENERATED',
+    resourceType: 'patient_data',
+    detail: `Narrative requested for ${rows.length} rows, question: ${String(question ?? '').slice(0, 200)}`,
+    rowsAffected: rows.length,
+    severity: 'WARNING',
+    userId: 'system',
+    userEmail: 'system',
+    ipAddress: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? undefined,
+  })
+
+  // Scrub PHI before sending to OpenAI
+  const { scrubbedRows } = scrubPHI(rows, columns)
+
   // Build a concise data summary to send to the LLM (cap at 50 rows to control tokens)
-  const sampleRows = rows.slice(0, 50)
+  const sampleRows = scrubbedRows.slice(0, 50)
   const columnList = columns.map((c) => `${c.label}${c.type ? ` (${c.type})` : ''}`).join(', ')
   const rowSummary = JSON.stringify(sampleRows)
 

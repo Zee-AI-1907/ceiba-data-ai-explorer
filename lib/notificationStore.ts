@@ -1,4 +1,4 @@
-// Notification Store — localStorage-backed
+// Notification Store — obfuscated-localStorage-backed
 
 export type NotificationSeverity = 'critical' | 'warning' | 'info'
 
@@ -10,7 +10,9 @@ export type AppNotification = {
   read: boolean
 }
 
-const NOTIFICATIONS_KEY = 'ceiba_notifications'
+import { secureGetSync, secureSetSync } from '@/lib/secureStorage'
+
+const NOTIFICATIONS_KEY = 'notifications'
 
 const SEED_NOTIFICATIONS: AppNotification[] = [
   {
@@ -45,19 +47,15 @@ const SEED_NOTIFICATIONS: AppNotification[] = [
 
 function seed(): void {
   if (typeof window === 'undefined') return
-  if (!localStorage.getItem(NOTIFICATIONS_KEY)) {
-    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(SEED_NOTIFICATIONS))
+  if (secureGetSync<AppNotification[]>(NOTIFICATIONS_KEY) === null) {
+    secureSetSync(NOTIFICATIONS_KEY, SEED_NOTIFICATIONS)
   }
 }
 
 export function getNotifications(): AppNotification[] {
   if (typeof window === 'undefined') return []
   seed()
-  try {
-    return JSON.parse(localStorage.getItem(NOTIFICATIONS_KEY) || '[]')
-  } catch {
-    return []
-  }
+  return secureGetSync<AppNotification[]>(NOTIFICATIONS_KEY) ?? []
 }
 
 export function getUnreadCount(): number {
@@ -69,17 +67,17 @@ export function markAsRead(id: string): void {
   const idx = notifications.findIndex((n) => n.id === id)
   if (idx >= 0) {
     notifications[idx].read = true
-    localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications))
+    secureSetSync(NOTIFICATIONS_KEY, notifications)
   }
 }
 
 export function markAllRead(): void {
   const notifications = getNotifications().map((n) => ({ ...n, read: true }))
-  localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications))
+  secureSetSync(NOTIFICATIONS_KEY, notifications)
 }
 
 export function clearAll(): void {
-  localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify([]))
+  secureSetSync(NOTIFICATIONS_KEY, [])
 }
 
 export function addNotification(notif: Omit<AppNotification, 'id' | 'timestamp' | 'read'>): void {
@@ -90,5 +88,5 @@ export function addNotification(notif: Omit<AppNotification, 'id' | 'timestamp' 
     timestamp: new Date().toISOString(),
     read: false,
   })
-  localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications))
+  secureSetSync(NOTIFICATIONS_KEY, notifications)
 }

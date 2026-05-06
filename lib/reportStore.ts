@@ -1,4 +1,4 @@
-// Report Store — localStorage-backed persistence
+// Report Store — obfuscated-localStorage-backed persistence
 
 export type ReportScheduleFrequency = 'Daily' | 'Weekly' | 'Monthly'
 
@@ -20,15 +20,13 @@ export type ScheduledReport = {
   nextDelivery: string          // ISO datetime string, computed on save
 }
 
-const REPORTS_KEY = 'ceiba_reports'
+import { secureGetSync, secureSetSync } from '@/lib/secureStorage'
+
+const REPORTS_KEY = 'reports'
 
 export function getReports(): ScheduledReport[] {
   if (typeof window === 'undefined') return []
-  try {
-    return JSON.parse(localStorage.getItem(REPORTS_KEY) || '[]')
-  } catch {
-    return []
-  }
+  return secureGetSync<ScheduledReport[]>(REPORTS_KEY) ?? []
 }
 
 export function getReport(id: string): ScheduledReport | null {
@@ -40,12 +38,12 @@ export function saveReport(report: ScheduledReport): void {
   const idx = reports.findIndex((r) => r.id === report.id)
   if (idx >= 0) reports[idx] = report
   else reports.unshift(report)
-  localStorage.setItem(REPORTS_KEY, JSON.stringify(reports))
+  secureSetSync(REPORTS_KEY, reports)
 }
 
 export function deleteReport(id: string): void {
   const reports = getReports().filter((r) => r.id !== id)
-  localStorage.setItem(REPORTS_KEY, JSON.stringify(reports))
+  secureSetSync(REPORTS_KEY, reports)
 }
 
 /** Compute the next delivery datetime (ISO string) based on frequency + time */

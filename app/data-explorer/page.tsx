@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react'
 import { clsx } from 'clsx'
+import PHIWarning from '@/components/PHIWarning'
 
 // ──────────────────────────────────────────────
 // Sample data
@@ -499,6 +500,9 @@ export default function DataExplorerPage() {
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden">
+        {/* PHI compliance warning banner */}
+        <PHIWarning />
+
         {/* Ward Rounds Mode banner - mobile only */}
         {showWardRounds && (
           <div className="md:hidden flex items-center justify-between px-4 py-2 bg-[#7c68ff12] border-b border-[#7c68ff25] flex-shrink-0">

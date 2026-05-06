@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { logAuditEvent } from '@/lib/auditLog'
 
 const SYSTEM_PROMPT = `You are a clinical data assistant for Ceiba Health. You help clinicians understand their healthcare data, interpret results, and make data-driven decisions.
 
@@ -17,6 +18,17 @@ export async function POST(req: NextRequest) {
   if (!apiKey) return NextResponse.json({ error: 'No API key' }, { status: 500 })
 
   const { message, context } = await req.json()
+
+  // Log data view access
+  logAuditEvent({
+    action: 'DATA_VIEW',
+    resourceType: 'patient_data',
+    detail: `Chat query: ${String(message ?? '').slice(0, 300)}`,
+    severity: 'INFO',
+    userId: 'system',
+    userEmail: 'system',
+    ipAddress: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? undefined,
+  })
 
   // context = optional summary of current query results to give LLM awareness
   const userContent = context
