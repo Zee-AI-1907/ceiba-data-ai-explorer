@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import Link from 'next/link'
 import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle, LogOut, CreditCard } from 'lucide-react'
 import { clsx } from 'clsx'
-import { useSession, signOut } from 'next-auth/react'
+import { useUser, useClerk } from '@clerk/nextjs'
 import {
   AppNotification,
   getNotifications,
@@ -71,9 +71,10 @@ export default function DataNav({ activePage, isAdmin = false }: DataNavProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notifications, setNotifications] = useState<AppNotification[]>([])
   const [unread, setUnread] = useState(0)
-  const { data: session } = useSession()
-  const userName = session?.user?.name ?? ''
-  const userRole = (session?.user as { role?: string })?.role ?? 'analyst'
+  const { user } = useUser()
+  const { signOut } = useClerk()
+  const userName = user?.fullName ?? user?.firstName ?? ''
+  const userRole = (user?.publicMetadata as Record<string, string>)?.role ?? 'analyst'
   const avatarColor = roleColor[userRole] ?? '#6c6c74'
 
   const refreshNotifications = useCallback(() => {
@@ -238,7 +239,7 @@ export default function DataNav({ activePage, isAdmin = false }: DataNavProps) {
               </div>
               <span className="text-[12px] text-[#a0a0a7] max-w-[100px] truncate">{userName}</span>
               <button
-                onClick={() => signOut({ callbackUrl: '/login' })}
+                onClick={() => signOut({ redirectUrl: '/sign-in' })}
                 title="Sign out"
                 className="w-6 h-6 rounded-[6px] flex items-center justify-center text-[#44444b] hover:text-[#ff5c6c] hover:bg-[#ff5c6c10] transition-all"
               >

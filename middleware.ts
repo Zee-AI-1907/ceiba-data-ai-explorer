@@ -1,47 +1,26 @@
-import { getToken } from 'next-auth/jwt'
-import { NextRequest, NextResponse } from 'next/server'
+import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
+import { NextResponse } from 'next/server'
 
-const PUBLIC_PATHS = [
-  '/login',
-  '/mfa',
-  '/api/auth',
-  '/api/billing/webhook', // Stripe calls this — no user auth
-  '/suspended',
-  '/_next',
-  '/favicon.ico',
-  '/public',
-]
+const isPublicRoute = createRouteMatcher([
+  '/sign-in(.*)',
+  '/sign-up(.*)',
+  '/suspended(.*)',
+  '/privacy(.*)',
+  '/api/billing/webhook(.*)',
+  '/api/privacy/request(.*)',
+])
 
-export async function middleware(req: NextRequest) {
-  const { pathname } = req.nextUrl
-
-  // Allow public paths
-  if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
-    return NextResponse.next()
+export default clerkMiddleware(async (auth, req) => {
+  if (!isPublicRoute(req)) {
+    await auth.protect()
   }
 
-  // ── 1. Auth check ────────────────────────────────────────────────────────
-  const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET })
-
-  if (!token) {
-    // API routes return 401 JSON; page routes redirect to login
-    if (pathname.startsWith('/api/')) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-    const loginUrl = new URL('/login', req.url)
-    loginUrl.searchParams.set('callbackUrl', pathname)
-    return NextResponse.redirect(loginUrl)
-  }
-
-  // ── 2. License check ─────────────────────────────────────────────────────
-  // For MVP: read licenses.json from the filesystem.
-  // Edge runtime cannot use `fs`, so we call our own internal API instead.
-  // To avoid circular calls we do a lightweight inline check via fetch only
-  // when not already on an API route (prevents request loops).
-  //
+  // ── License check ─────────────────────────────────────────────────────────
+  // Only run for page routes (not API), after auth check.
   // We catch all errors so a missing/malformed licenses.json never hard-blocks
   // access — fail open for resilience.
-  if (!pathname.startsWith('/api/')) {
+  const { pathname } = req.nextUrl
+  if (!isPublicRoute(req) && !pathname.startsWith('/api/')) {
     try {
       const licenseCheckUrl = new URL('/api/billing/licenses/status', req.url)
       const res = await fetch(licenseCheckUrl.toString(), {
@@ -65,12 +44,8 @@ export async function middleware(req: NextRequest) {
       // Fail open — don't block users if license check errors
     }
   }
-
-  return NextResponse.next()
-}
+})
 
 export const config = {
-  matcher: [
-    '/((?!_next/static|_next/image|favicon\\.ico|public).*)',
-  ],
+  matcher: ['/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)', '/(api|trpc)(.*)'],
 }

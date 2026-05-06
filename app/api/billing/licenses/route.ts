@@ -1,26 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getToken } from 'next-auth/jwt'
+import { auth } from '@clerk/nextjs/server'
 import { getLicenses, createLicense } from '@/lib/licenseStore'
 import type { BillingCycle, LicenseStatus } from '@/lib/licenseStore'
 import type { PricingTier } from '@/lib/stripe'
 
-async function requireAdmin(req: NextRequest) {
-  const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET })
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  if ((token as { role?: string }).role !== 'admin') {
+async function requireAdmin() {
+  const { userId, sessionClaims } = await auth()
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const role = (sessionClaims?.publicMetadata as Record<string, string>)?.role
+  if (role !== 'admin') {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
   return null
 }
 
 export async function GET(req: NextRequest) {
-  const denied = await requireAdmin(req)
+  void req
+  const denied = await requireAdmin()
   if (denied) return denied
   return NextResponse.json(getLicenses())
 }
 
 export async function POST(req: NextRequest) {
-  const denied = await requireAdmin(req)
+  const denied = await requireAdmin()
   if (denied) return denied
 
   const body = await req.json() as {

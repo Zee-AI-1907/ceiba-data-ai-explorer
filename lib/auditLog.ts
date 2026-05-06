@@ -13,8 +13,7 @@
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { auth } from '@clerk/nextjs/server'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -117,14 +116,15 @@ export async function logWithSession(
   request: Request,
   event: Omit<AuditEvent, 'id' | 'timestamp' | 'userId' | 'userEmail' | 'ipAddress' | 'userAgent' | 'previousHash' | 'hash'>
 ): Promise<void> {
-  const session = await getServerSession(authOptions)
+  const { userId, sessionClaims } = await auth()
+  const email = (sessionClaims?.email as string) ?? 'unknown'
   const forwarded = request.headers.get('x-forwarded-for')
   const ip = forwarded?.split(',')[0]?.trim() ?? request.headers.get('x-real-ip') ?? 'unknown'
   const userAgent = request.headers.get('user-agent') ?? undefined
   logAuditEvent({
     ...event,
-    userId: session?.user?.id ?? session?.user?.email ?? 'unauthenticated',
-    userEmail: session?.user?.email ?? 'unknown',
+    userId: userId ?? 'unauthenticated',
+    userEmail: email,
     ipAddress: ip,
     userAgent,
   })

@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getToken } from 'next-auth/jwt'
+import { auth } from '@clerk/nextjs/server'
 import { getLicense, updateLicense } from '@/lib/licenseStore'
 
-async function requireAdmin(req: NextRequest) {
-  const token = await getToken({ req, secret: process.env.NEXTAUTH_SECRET })
-  if (!token) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  if ((token as { role?: string }).role !== 'admin') {
+async function requireAdmin() {
+  const { userId, sessionClaims } = await auth()
+  if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const role = (sessionClaims?.publicMetadata as Record<string, string>)?.role
+  if (role !== 'admin') {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
   return null
@@ -15,7 +16,7 @@ export async function GET(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const denied = await requireAdmin(req)
+  const denied = await requireAdmin()
   if (denied) return denied
 
   const license = getLicense(params.id)
@@ -27,7 +28,7 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const denied = await requireAdmin(req)
+  const denied = await requireAdmin()
   if (denied) return denied
 
   const license = getLicense(params.id)
