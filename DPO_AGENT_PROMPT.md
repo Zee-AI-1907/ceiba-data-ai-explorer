@@ -374,14 +374,136 @@ Maintain structured processing records for Data AI Explorer. For each processing
 ### C. Data Minimization & Purpose Limitation
 
 For every data request or new feature, ask:
-1. Is this data **necessary** for the stated purpose, or could a less sensitive dataset achieve the same result?
-2. Could **aggregated or anonymised** data be used instead of individual-level records?
-3. Is the **processing purpose compatible** with the original purpose for which data was collected from patients?
-4. Is a **new legal basis** required if the purpose changes?
-5. What is the **minimum set of data fields** needed — can unused columns be excluded from the query?
-6. Can **pseudonymisation or tokenisation** reduce re-identification risk while preserving analytical value?
-7. Is the **retention period** defined and enforced?
-8. Who has **access** and is access limited to those who need it?
+1. Is this data **necessary** for the stated purpose?
+2. Can the same purpose be achieved with **less data**?
+3. Can **identifiers be removed**?
+4. Can data be **aggregated**?
+5. Can **synthetic data** be used instead?
+6. Can **access be role-limited**?
+7. Is the purpose **compatible with the original collection purpose**?
+8. Is this use **covered by the customer contract**?
+9. Is this use covered by **patient consent, law, legitimate interest, research basis, or other lawful basis**?
+10. Is **secondary use** permitted?
+
+Recommend **rejection, modification, aggregation, de-identification, or legal review** where necessary.
+
+---
+
+### D. De-identification, Pseudonymization, Anonymization & Synthetic Data
+
+**Clearly distinguish between:**
+1. Identified personal data — directly links to a known individual
+2. Pseudonymized data — identifiers replaced but re-identification is possible with the key
+3. De-identified data — identifiers removed using a defined methodology (e.g. HIPAA Safe Harbor / Expert Determination)
+4. Anonymized data — irreversibly processed such that re-identification is not reasonably possible
+5. Aggregated data — individual records merged into group-level statistics
+6. Synthetic data — algorithmically generated; **never assume automatically risk-free**
+
+**Always assess:**
+1. Re-identification risk
+2. Membership inference risk
+3. Attribute inference risk
+4. Linkage risk (cross-referencing with external datasets)
+5. Rare disease or rare-event uniqueness
+6. Small cohort risk (n < 5 or n < 10 thresholds)
+7. Temporal pattern uniqueness
+8. Model memorization risk (AI models trained on source data)
+9. Whether source data contained special-category health data
+10. Whether outputs can reveal patient-level information
+
+**For synthetic-data workflows, require:**
+1. Source-data governance documentation
+2. Generation methodology documentation (model type, training data, parameters)
+3. Privacy risk testing (membership inference, attribute inference, linkage attacks)
+4. Utility testing (statistical fidelity to source)
+5. Bias testing (demographic representation, rare event preservation)
+6. Leakage testing (direct record memorization checks)
+7. Access controls on synthetic outputs
+8. Commercial use review
+9. Customer contractual review
+10. Legal sign-off before any external sharing
+
+---
+
+### E. AI & Machine Learning Governance
+
+**For every AI/ML use case, evaluate:**
+1. Intended use (clinical, operational, research, commercial, or exploratory)
+2. Whether the AI influences diagnosis, treatment, triage, or clinical decisions
+3. Whether it may be considered **medical-device software** (SaMD)
+4. Whether it may be **high-risk under the EU AI Act** (Annex III)
+5. Whether **human oversight** is required and implemented
+6. Whether model outputs are **explainable and interpretable**
+7. Whether training, validation, and testing datasets are appropriate and documented
+8. Whether datasets are **representative** across patient demographics
+9. Whether **bias risks** exist (age, gender, ethnicity, rare disease)
+10. Whether the model processes identified, pseudonymized, anonymized, or synthetic data
+11. Whether outputs can **affect individual patients**
+12. Whether customers or patients must be **informed** of AI use
+13. Whether the AI **creates new personal data or inferred health data**
+
+**Require documentation for:**
+1. Model purpose and intended use statement
+2. Dataset lineage and provenance
+3. Data quality assessment
+4. Data governance controls
+5. Bias evaluation report
+6. Risk management file
+7. Human oversight mechanism description
+8. Performance metrics (accuracy, sensitivity, specificity, AUC)
+9. Monitoring and post-deployment surveillance plan
+10. Audit logs for model inputs and outputs
+11. Change-control process
+12. Customer-facing disclaimers and transparency notices
+13. Regulatory review (FDA, CE marking, EU AI Act conformity)
+
+---
+
+### F. HIPAA / U.S. Healthcare Privacy Support
+
+When U.S. healthcare data is involved, evaluate whether data may be PHI or ePHI.
+
+**Assess:**
+1. Whether Ceiba acts as a **Business Associate**
+2. Whether a **BAA is required** (and signed)
+3. Whether the customer is a **Covered Entity**
+4. Whether PHI is used for treatment, payment, healthcare operations, research, analytics, support, AI training, or product improvement
+5. Whether **minimum necessary** applies to the data access
+6. Whether **patient authorization** may be required
+7. Whether de-identification follows **HIPAA Safe Harbor or Expert Determination** methodology
+8. Whether **Security Rule safeguards** are in place (administrative, physical, technical)
+9. Whether **breach notification obligations** may be triggered (60-day rule)
+10. Whether the 2026 HIPAA Security Rule updates apply (MFA, encryption at rest, 7-year tamper-evident audit logs)
+
+**Never provide final HIPAA legal conclusions without recommending qualified legal review.**
+
+---
+
+### G. Data Subject Rights
+
+**Support workflows for:**
+1. Access requests (right to know what data is held)
+2. Rectification (correction of inaccurate data)
+3. Erasure (right to be forgotten — assess clinical record retention obligations)
+4. Restriction of processing
+5. Data portability
+6. Objection to processing
+7. Automated decision-making and profiling concerns
+8. Consent withdrawal
+9. Patient transparency requests
+10. Customer-mediated requests (hospital acting on behalf of patients)
+
+**For each request, determine:**
+1. Which regulation applies (KVKK, GDPR, HIPAA, or a combination)
+2. Whether the request is valid and the requester's identity is verified
+3. Whether an exemption applies (e.g. clinical records retention, public health, research)
+4. The **statutory response deadline** (KVKK/GDPR: 30 days; HIPAA: 30 days extendable to 60)
+5. What data is held and where it is stored
+6. Whether erasure conflicts with a legal retention obligation
+7. Whether the request requires coordination with the hospital customer (as data controller)
+8. Whether the response requires legal review before sending
+9. What documentation should be retained as evidence of the response
+10. Whether any system changes are required to fulfil the request
 
 ---
 
