@@ -72,12 +72,12 @@ Transform raw healthcare data into actionable clinical and operational insights.
 - `?` button in navigation bar
 
 ### 🔐 Authentication & Security
-- NextAuth v4 login with 3 demo roles (admin/analyst/clinician)
-- Real TOTP MFA via otplib — QR code setup at `/mfa/setup`
-- 15-minute session timeout with 1-minute warning
-- All 8 API routes protected with session + RBAC enforcement
+- **Clerk** authentication — sign-in at `/sign-in`, sign-up at `/sign-up`
+- Role-based access via Clerk `publicMetadata.role` (admin/analyst/clinician)
+- MFA, SSO, and session management handled by Clerk dashboard
+- All API routes protected with Clerk `auth()` + RBAC enforcement
 - Rate limiting: 5 failed logins → 15-minute lockout
-- Security headers: HSTS, CSP, X-Frame-Options, nosniff
+- Security headers: HSTS, CSP (Clerk domains allowed), X-Frame-Options, nosniff
 
 ### 🛡️ HIPAA & Compliance
 - PHI scrubbing before every OpenAI call (names, IDs, Turkish TC Kimlik)
@@ -114,13 +114,14 @@ Transform raw healthcare data into actionable clinical and operational insights.
 
 ## Demo Credentials
 
-| User | Email | Password | Role | MFA |
-|---|---|---|---|---|
-| Dr. Afsin Alp | afsin@ceiba.com | ceiba2026 | Admin | TOTP app |
-| Ege Apak | ege@ceiba.com | ceiba2026 | Analyst | TOTP app |
-| Clinical Lead | clinical@ceiba.com | ceiba2026 | Clinician | TOTP app |
+Authentication is handled by **Clerk**. Create and manage users in the Clerk Dashboard.
+Set `publicMetadata.role` to one of: `admin`, `analyst`, `clinician`.
 
-MFA Secret: `WHRTRD3ORPCZ7WO2YYZ6TPLAPLS3R3LL` (scan QR at `/mfa/setup`)
+| Role | Access Level |
+|---|---|
+| admin | Full access including Audit Log and Billing |
+| analyst | Data explorer, charts, dashboards, reports |
+| clinician | Read-only data explorer and dashboards |
 
 ---
 
@@ -128,9 +129,11 @@ MFA Secret: `WHRTRD3ORPCZ7WO2YYZ6TPLAPLS3R3LL` (scan QR at `/mfa/setup`)
 
 ```
 Ceiba Data AI Explorer
-├── /login                ← Auth + MFA
-├── /mfa                  ← TOTP verification
-├── /mfa/setup            ← QR code authenticator setup
+├── /sign-in              ← Clerk authentication
+├── /sign-up              ← Clerk registration
+├── /suspended            ← Subscription suspended page
+├── /billing              ← Billing dashboard (admin only)
+│   └── /billing/new      ← Add new customer
 ├── /data-explorer        ← AI chat + SQL + results + narrative + voice
 ├── /charts               ← Chart library
 │   └── /charts/new       ← Chart Builder
@@ -153,7 +156,7 @@ Ceiba Data AI Explorer
 ## Technology Stack
 
 - **Frontend:** Next.js 14 (App Router), TypeScript, Tailwind CSS, Recharts
-- **Auth:** NextAuth v4, bcryptjs, otplib (TOTP MFA)
+- **Auth:** Clerk (`@clerk/nextjs`) — managed auth, SSO, MFA via Clerk dashboard
 - **AI:** OpenAI GPT (chat, SQL generation, narratives, chart suggestions)
 - **Database:** TeleHealth.DB (clinical ops), Eclinics.DB (ICU/critical care) via Trino
 - **Security:** AES-GCM encryption, SHA-256 audit chaining, RBAC, rate limiting

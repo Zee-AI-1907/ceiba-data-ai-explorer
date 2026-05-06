@@ -60,7 +60,7 @@ export default function NewCustomerPage() {
   if (created) {
     return (
       <div className="flex flex-col min-h-screen bg-[#0d0d10]">
-        <DataNav activePage="audit" isAdmin />
+        <DataNav activePage="billing" isAdmin />
         <div className="flex-1 flex items-center justify-center p-6">
           <div className="max-w-md w-full bg-[#16161a] border border-[#2a2a31] rounded-2xl p-8 text-center">
             <div className="w-14 h-14 rounded-2xl bg-[#4dcc8815] border border-[#4dcc8830] flex items-center justify-center mx-auto mb-5">
@@ -107,7 +107,7 @@ export default function NewCustomerPage() {
 
   return (
     <div className="flex flex-col min-h-screen bg-[#0d0d10]">
-      <DataNav activePage="audit" isAdmin />
+      <DataNav activePage="billing" isAdmin />
 
       <div className="flex-1 p-6 max-w-2xl mx-auto w-full">
         {/* Back link */}

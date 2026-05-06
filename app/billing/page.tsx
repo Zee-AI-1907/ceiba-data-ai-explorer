@@ -78,7 +78,7 @@ export default function BillingDashboard() {
 
   return (
     <div className="flex flex-col min-h-screen bg-[#0d0d10]">
-      <DataNav activePage="audit" isAdmin />
+      <DataNav activePage="billing" isAdmin />
 
       <div className="flex-1 p-6 max-w-7xl mx-auto w-full">
 
