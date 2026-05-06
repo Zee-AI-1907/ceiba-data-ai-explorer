@@ -5,9 +5,13 @@ import {
   PieChart, Pie, Cell,
   AreaChart, Area,
 } from 'recharts'
+import { useState } from 'react'
 import { X, ChevronUp, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react'
 import { clsx } from 'clsx'
 import type { CanvasWidget, WidgetSize } from '@/lib/dashboardStore'
+import { CommentButton } from '@/components/Comments/CommentButton'
+import { CommentThread } from '@/components/Comments/CommentThread'
+import { slugify } from '@/lib/commentStore'
 
 // ─── Mock data ───────────────────────────────────────────────────────────────
 
@@ -203,8 +207,8 @@ function ChartContent({ widget }: { widget: CanvasWidget }) {
 
 const SIZE_SPANS: Record<WidgetSize, string> = {
   small:  'col-span-1 row-span-1',
-  medium: 'col-span-2 row-span-1',
-  large:  'col-span-2 row-span-2',
+  medium: 'col-span-1 md:col-span-2 row-span-1',
+  large:  'col-span-1 md:col-span-2 row-span-1 md:row-span-2',
 }
 
 const SIZE_HEIGHT: Record<WidgetSize, string> = {
@@ -253,6 +257,8 @@ export function DashboardWidget({
 }: Props) {
   const badgeColor = TYPE_BADGE_COLORS[widget.chartType] ?? '#a0a0a7'
   const sizeIdx = SIZE_LABELS.indexOf(widget.size)
+  const [commentsOpen, setCommentsOpen] = useState(false)
+  const widgetResourceId = slugify(widget.chartName)
 
   return (
     <div
@@ -277,21 +283,42 @@ export function DashboardWidget({
           </span>
           <span className="text-[12px] font-semibold text-[#e8e8ea] truncate">{widget.chartName}</span>
         </div>
-        {editMode && (
-          <button
-            onClick={onRemove}
-            className="w-5 h-5 flex items-center justify-center rounded-[4px] text-[#44444b] hover:text-[#ff5c6c] hover:bg-[#ff5c6c15] transition-colors flex-shrink-0 ml-1"
-            title="Remove"
-          >
-            <X size={11} />
-          </button>
-        )}
+        <div className="flex items-center gap-1 flex-shrink-0 ml-1">
+          <CommentButton
+            resourceType="widget"
+            resourceId={widgetResourceId}
+            isOpen={commentsOpen}
+            onClick={() => setCommentsOpen((v) => !v)}
+          />
+          {editMode && (
+            <button
+              onClick={onRemove}
+              className="w-5 h-5 flex items-center justify-center rounded-[4px] text-[#44444b] hover:text-[#ff5c6c] hover:bg-[#ff5c6c15] transition-colors"
+              title="Remove"
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Chart area */}
       <div className={clsx('flex-1 px-2 pb-2 min-h-0', SIZE_HEIGHT[widget.size])}>
         <ChartContent widget={widget} />
       </div>
+
+      {/* Inline comment thread */}
+      {commentsOpen && (
+        <div className="px-2 pb-2">
+          <CommentThread
+            resourceType="widget"
+            resourceId={widgetResourceId}
+            resourceLabel={widget.chartName}
+            onClose={() => setCommentsOpen(false)}
+            mode="inline"
+          />
+        </div>
+      )}
 
       {/* Edit controls */}
       {editMode && (

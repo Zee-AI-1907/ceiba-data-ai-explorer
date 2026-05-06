@@ -7,7 +7,7 @@ import { DashboardCanvas } from '@/components/Dashboard/DashboardCanvas'
 import { ChartLibraryPanel, type ChartLibraryItem } from '@/components/Dashboard/ChartLibraryPanel'
 import { DashboardFilters } from '@/components/Dashboard/DashboardFilters'
 import { saveCanvasDashboard, type CanvasWidget, type CanvasDashboard, type DashboardFilter, type WidgetSize } from '@/lib/dashboardStore'
-import { ArrowLeft, Save, Globe, Eye, Pencil } from 'lucide-react'
+import { ArrowLeft, Save, Globe, Eye, Pencil, Plus, X } from 'lucide-react'
 import { clsx } from 'clsx'
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
@@ -39,6 +39,8 @@ export default function NewDashboardPage() {
   const [filters, setFilters]     = useState<DashboardFilter[]>([])
   const [toast, setToast]         = useState<string | null>(null)
   const [status, setStatus]       = useState<'Draft' | 'Published'>('Draft')
+  // Mobile: slide-up chart library sheet
+  const [showMobileSheet, setShowMobileSheet] = useState(false)
 
   // Track which chart IDs are already on canvas
   const addedIds = new Set(widgets.map((w) => w.chartId))
@@ -197,11 +199,14 @@ export default function NewDashboardPage() {
 
       {/* ── Body: sidebar + canvas ────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
+        {/* Chart library panel — desktop only; mobile uses FAB sheet */}
         {editMode && (
-          <ChartLibraryPanel
-            onAddChart={handleAddChart}
-            addedIds={addedIds}
-          />
+          <div className="hidden md:flex">
+            <ChartLibraryPanel
+              onAddChart={handleAddChart}
+              addedIds={addedIds}
+            />
+          </div>
         )}
 
         <DashboardCanvas
@@ -212,6 +217,50 @@ export default function NewDashboardPage() {
           onSizeChange={handleSizeChange}
         />
       </div>
+
+      {/* Mobile FAB */}
+      {editMode && (
+        <button
+          onClick={() => setShowMobileSheet(true)}
+          className="md:hidden fixed bottom-20 right-4 z-40 w-14 h-14 rounded-full bg-[#7c68ff] text-white shadow-[0_4px_20px_rgba(124,104,255,0.5)] flex items-center justify-center hover:bg-[#9080ff] transition-all active:scale-95"
+          aria-label="Add chart"
+        >
+          <Plus size={22} />
+        </button>
+      )}
+
+      {/* Mobile slide-up chart library sheet */}
+      {showMobileSheet && (
+        <>
+          <div
+            className="md:hidden fixed inset-0 z-50 bg-black/50"
+            onClick={() => setShowMobileSheet(false)}
+          />
+          <div
+            className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#111114] border-t border-[#2a2a31] rounded-t-[16px] shadow-2xl flex flex-col"
+            style={{ maxHeight: '70vh' }}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-[#2a2a31] flex-shrink-0">
+              <span className="text-[14px] font-bold text-[#e8e8ea]">Add Charts</span>
+              <button
+                onClick={() => setShowMobileSheet(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-full bg-[#16161a] border border-[#2a2a31] text-[#6c6c74] hover:text-[#e8e8ea] transition-colors"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <ChartLibraryPanel
+                onAddChart={(chart) => {
+                  handleAddChart(chart)
+                  setShowMobileSheet(false)
+                }}
+                addedIds={addedIds}
+              />
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Toast */}
       {toast && <Toast message={toast} onDone={() => setToast(null)} />}

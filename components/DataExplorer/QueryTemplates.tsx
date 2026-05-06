@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 
 type Template = {
   icon: string
@@ -48,6 +49,84 @@ type Props = {
   onSelect: (query: string) => void
 }
 
+type ScrollerProps = {
+  templates: Template[]
+  onSelect: (query: string) => void
+}
+
+function TemplateScroller({ templates, onSelect }: ScrollerProps) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [canScrollLeft, setCanScrollLeft] = useState(false)
+  const [canScrollRight, setCanScrollRight] = useState(false)
+
+  const checkScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    setCanScrollLeft(el.scrollLeft > 4)
+    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 4)
+  }
+
+  useEffect(() => {
+    checkScroll()
+    const el = scrollRef.current
+    el?.addEventListener('scroll', checkScroll)
+    // re-check when templates change
+    const ro = new ResizeObserver(checkScroll)
+    if (el) ro.observe(el)
+    return () => { el?.removeEventListener('scroll', checkScroll); ro.disconnect() }
+  }, [templates])
+
+  const scroll = (dir: 'left' | 'right') => {
+    scrollRef.current?.scrollBy({ left: dir === 'right' ? 160 : -160, behavior: 'smooth' })
+  }
+
+  return (
+    <div className="relative flex items-center">
+      {/* Left arrow */}
+      {canScrollLeft && (
+        <button
+          onClick={() => scroll('left')}
+          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full bg-[#1f1f25] border border-[#2a2a31] text-[#6c6c74] hover:text-[#e8e8ea] hover:border-[#3a3a45] transition-all z-10 mr-1"
+        >
+          <ChevronLeft size={12} />
+        </button>
+      )}
+
+      {/* Scrollable row */}
+      <div
+        ref={scrollRef}
+        className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide flex-1 min-w-0"
+      >
+        {templates.map((t) => (
+          <button
+            key={t.label}
+            onClick={() => onSelect(t.query)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#16161a] border border-[#2a2a31] text-[11px] text-[#a0a0a7] whitespace-nowrap hover:border-[#7c68ff60] hover:text-[#e8e8ea] hover:bg-[#7c68ff10] cursor-pointer transition-all flex-shrink-0"
+          >
+            <span>{t.icon}</span>
+            <span className="font-medium">{t.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Right fade gradient — hints at more content */}
+      {canScrollRight && (
+        <div className="absolute right-7 top-0 bottom-1 w-12 bg-gradient-to-l from-[#111114] to-transparent pointer-events-none" />
+      )}
+
+      {/* Right arrow */}
+      {canScrollRight && (
+        <button
+          onClick={() => scroll('right')}
+          className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded-full bg-[#1f1f25] border border-[#2a2a31] text-[#6c6c74] hover:text-[#e8e8ea] hover:border-[#3a3a45] transition-all z-10 ml-1"
+        >
+          <ChevronRight size={12} />
+        </button>
+      )}
+    </div>
+  )
+}
+
 export function QueryTemplates({ onSelect }: Props) {
   const [activeCategory, setActiveCategory] = useState<CategoryFilter>('All')
 
@@ -74,19 +153,8 @@ export function QueryTemplates({ onSelect }: Props) {
         ))}
       </div>
 
-      {/* Template chips */}
-      <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
-        {filtered.map((t) => (
-          <button
-            key={t.label}
-            onClick={() => onSelect(t.query)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#16161a] border border-[#2a2a31] text-[11px] text-[#a0a0a7] whitespace-nowrap hover:border-[#7c68ff60] hover:text-[#e8e8ea] hover:bg-[#7c68ff10] cursor-pointer transition-all flex-shrink-0"
-          >
-            <span>{t.icon}</span>
-            <span className="font-medium">{t.label}</span>
-          </button>
-        ))}
-      </div>
+      {/* Template chips — horizontally scrollable with arrow controls */}
+      <TemplateScroller templates={filtered} onSelect={onSelect} />
     </div>
   )
 }

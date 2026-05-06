@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import DataNav from '@/components/DataNav'
 import { getDashboards, fetchDashboards, type Dashboard as StoredDashboard } from '@/lib/store'
-import { Star, ChevronDown, Plus, Download, Search, Pencil, Trash2, Share2, ArrowUpDown, ArrowDown, LayoutDashboard } from 'lucide-react'
+import { Star, ChevronDown, Plus, Download, Search, Pencil, Trash2, Share2, ArrowUpDown, ArrowDown, LayoutDashboard, MoreVertical } from 'lucide-react'
 import { clsx } from 'clsx'
 
 const DASHBOARDS = [
@@ -111,15 +111,23 @@ export default function DashboardsPage() {
 
       {/* Filter bar */}
       <div className="flex items-end gap-3 px-6 py-3 border-b border-[#1f1f25] flex-wrap">
+        {/* QA fix: replaced JSX fragments in array (no keys) with explicit keyed buttons */}
         <div className="flex items-center gap-1.5 self-end mb-0.5">
-          {[
-            <><rect x="1" y="1" width="5" height="5" rx="0.5" fill="currentColor"/><rect x="8" y="1" width="5" height="5" rx="0.5" fill="currentColor"/><rect x="1" y="8" width="5" height="5" rx="0.5" fill="currentColor"/><rect x="8" y="8" width="5" height="5" rx="0.5" fill="currentColor"/></>,
-            <><rect x="1" y="2" width="12" height="1.5" rx="0.5" fill="currentColor"/><rect x="1" y="6.25" width="12" height="1.5" rx="0.5" fill="currentColor"/><rect x="1" y="10.5" width="12" height="1.5" rx="0.5" fill="currentColor"/></>,
-          ].map((icon, i) => (
-            <button key={i} className="w-7 h-7 flex items-center justify-center border border-[#2a2a31] rounded-[7px] text-[#6c6c74] hover:bg-[#16161a] hover:text-[#a0a0a7] transition-colors">
-              <svg width="13" height="13" viewBox="0 0 14 14" fill="none">{icon}</svg>
-            </button>
-          ))}
+          <button className="w-7 h-7 flex items-center justify-center border border-[#2a2a31] rounded-[7px] text-[#6c6c74] hover:bg-[#16161a] hover:text-[#a0a0a7] transition-colors">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+              <rect x="1" y="1" width="5" height="5" rx="0.5" fill="currentColor"/>
+              <rect x="8" y="1" width="5" height="5" rx="0.5" fill="currentColor"/>
+              <rect x="1" y="8" width="5" height="5" rx="0.5" fill="currentColor"/>
+              <rect x="8" y="8" width="5" height="5" rx="0.5" fill="currentColor"/>
+            </svg>
+          </button>
+          <button className="w-7 h-7 flex items-center justify-center border border-[#2a2a31] rounded-[7px] text-[#6c6c74] hover:bg-[#16161a] hover:text-[#a0a0a7] transition-colors">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+              <rect x="1" y="2" width="12" height="1.5" rx="0.5" fill="currentColor"/>
+              <rect x="1" y="6.25" width="12" height="1.5" rx="0.5" fill="currentColor"/>
+              <rect x="1" y="10.5" width="12" height="1.5" rx="0.5" fill="currentColor"/>
+            </svg>
+          </button>
         </div>
 
         <div className="flex flex-col gap-1">
@@ -141,8 +149,35 @@ export default function DashboardsPage() {
         ))}
       </div>
 
-      {/* Table */}
-      <div className="flex-1 overflow-x-auto">
+      {/* Mobile card list */}
+      <div className="md:hidden flex-1 overflow-y-auto pb-16">
+        {allDashboards.map((row, i) => (
+          <div
+            key={i}
+            className="flex items-center justify-between px-4 py-3.5 border-b border-[#1f1f25] active:bg-[#16161a] cursor-pointer"
+            onClick={() => handleRowClick((row as { id?: string }).id)}
+          >
+            <div className="flex-1 min-w-0 mr-3">
+              <p className="text-[13px] font-medium text-[#4c8dff] truncate mb-1">{row.name}</p>
+              <div className="flex items-center gap-2">
+                <span className={clsx(
+                  'text-[10px] font-semibold px-1.5 py-0.5 rounded-[5px]',
+                  row.status === 'Published'
+                    ? 'bg-[#4dcc8820] text-[#4dcc88]'
+                    : 'bg-[#6c6c7420] text-[#6c6c74]'
+                )}>{row.status}</span>
+                <span className="text-[11px] text-[#6c6c74]">{row.modified}</span>
+              </div>
+            </div>
+            <button className="w-11 h-11 flex items-center justify-center text-[#44444b] hover:text-[#a0a0a7] flex-shrink-0">
+              <MoreVertical size={16} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Table - desktop only */}
+      <div className="hidden md:block flex-1 overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="border-b border-[#2a2a31] bg-[#111114]">

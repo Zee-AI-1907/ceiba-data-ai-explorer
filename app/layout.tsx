@@ -1,5 +1,7 @@
 import type { Metadata } from 'next'
 import '../styles/globals.css'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
+import MobileNav from '@/components/MobileNav'
 
 export const metadata: Metadata = {
   title: 'Ceiba Data AI Explorer',
@@ -21,7 +23,12 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body className="bg-[#0b0b0c] text-[#e8e8ea] antialiased">{children}</body>
+      <body className="bg-[#0b0b0c] text-[#e8e8ea] antialiased">
+        <ErrorBoundary>
+          {children}
+        </ErrorBoundary>
+        <MobileNav />
+      </body>
     </html>
   )
 }

@@ -7,6 +7,7 @@ import { SqlPanel } from '@/components/DataExplorer/SqlPanel'
 import { ChartPreview, ChartConfig } from '@/components/DataExplorer/ChartPreview'
 import { SaveToDashboardModal } from '@/components/DataExplorer/SaveToDashboardModal'
 import { saveChart, persistChart, type SavedChart } from '@/lib/store'
+import { type NarrativeResult } from '@/components/DataExplorer/NarrativePanel'
 import {
   Database,
   ChevronDown,
@@ -15,7 +16,9 @@ import {
   Save,
   CheckCircle2,
   LayoutDashboard,
+  X,
 } from 'lucide-react'
+import { clsx } from 'clsx'
 
 // ──────────────────────────────────────────────
 // Sample data
@@ -63,6 +66,25 @@ export default function DataExplorerPage() {
   const [activeResultTab, setActiveResultTab] = useState<'results' | 'chart'>('results')
   const [isGeneratingChart, setIsGeneratingChart] = useState(false)
   const [chartSaved, setChartSaved] = useState(false)
+
+  // ── Mobile state ──────────────────────────────────────────────────────────
+  type MobileTab = 'chat' | 'sql' | 'results'
+  const [mobileTab, setMobileTab] = useState<MobileTab>('chat')
+  const [showWardRounds, setShowWardRounds] = useState(false)
+
+  useEffect(() => {
+    const dismissed = sessionStorage.getItem('wardRoundsDismissed') === 'true'
+    if (!dismissed) setShowWardRounds(true)
+  }, [])
+
+  const dismissWardRounds = () => {
+    sessionStorage.setItem('wardRoundsDismissed', 'true')
+    setShowWardRounds(false)
+  }
+
+  // ── Narrative state ───────────────────────────────────────────────────────
+  const [narrative, setNarrative] = useState<NarrativeResult | null>(null)
+  const [isGeneratingNarrative, setIsGeneratingNarrative] = useState(false)
   const [savedChartObj, setSavedChartObj] = useState<SavedChart | null>(null)
   const [showDashboardModal, setShowDashboardModal] = useState(false)
   const [dashboardToast, setDashboardToast] = useState<string | null>(null)
@@ -72,12 +94,12 @@ export default function DataExplorerPage() {
     setActiveQueryId(id)
     setActiveQueryLabel('New Query')
     setSql('')
+    // QA fix: removed duplicate setMessages([]) and setResults(null) calls that overwrote INITIAL_MESSAGES
     setMessages(INITIAL_MESSAGES)
     setResults(null)
     setChartConfig(null)
     setChartSaved(false)
-    setMessages([])
-    setResults(null)
+    setNarrative(null)
   }
 
   const handleQuerySelect = (q: SavedQuery) => {
@@ -88,6 +110,7 @@ export default function DataExplorerPage() {
     setResults(null)
     setChartConfig(null)
     setChartSaved(false)
+    setNarrative(null)
   }
 
   // Save query to sidebar history after run
@@ -108,11 +131,42 @@ export default function DataExplorerPage() {
   }
 
 
+  // ── Narrative generation ─────────────────────────────────────────────────
+  const generateNarrative = async (
+    columns: { key: string; label: string; type?: string }[],
+    rows: Record<string, unknown>[],
+    question: string
+  ) => {
+    setIsGeneratingNarrative(true)
+    setNarrative(null)
+    try {
+      const res = await fetch('/api/narrative', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ columns, rows, question }),
+      })
+      if (!res.ok) return // fail silently
+      const data = await res.json()
+      if (data.narrative) {
+        setNarrative({
+          narrative: data.narrative,
+          highlights: data.highlights ?? [],
+          anomalies: data.anomalies ?? [],
+        })
+      }
+    } catch {
+      // fail silently — narrative is non-critical
+    } finally {
+      setIsGeneratingNarrative(false)
+    }
+  }
+
   const handleRun = useCallback(async () => {
     if (isRunning || !sql.trim()) return
     setIsRunning(true)
     setResults(null)
     setRunTime('00:00:00.00')
+    setNarrative(null)
 
     const start = Date.now()
     const timer = setInterval(() => {
@@ -136,6 +190,11 @@ export default function DataExplorerPage() {
       } else {
         setResults({ columns: data.columns, rows: data.rows })
         saveQueryToHistory('success')
+        // Auto-generate narrative after successful query
+        if (data.rows && data.rows.length > 0) {
+          const lastUserMsg = messages.filter((m) => m.role === 'user').slice(-1)[0]?.content ?? ''
+          generateNarrative(data.columns, data.rows, lastUserMsg)
+        }
       }
     } catch (e) {
       setResults({ columns: [{ key: 'error', label: 'Error' }], rows: [{ error: String(e) }] })
@@ -419,27 +478,65 @@ export default function DataExplorerPage() {
   )
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#0b0b0c]">
-      {/* Sidebar */}
-      <Sidebar
-        activePage="data-explorer"
-        activeQueryId={activeQueryId}
-        onQuerySelect={handleQuerySelect}
-        onNewQuery={handleNewQuery}
-      />
+    <div className="flex h-[100dvh] overflow-hidden bg-[#0b0b0c]">
+      {/* Sidebar - hidden on mobile */}
+      <div className="hidden md:flex">
+        <Sidebar
+          activePage="data-explorer"
+          activeQueryId={activeQueryId}
+          onQuerySelect={handleQuerySelect}
+          onNewQuery={handleNewQuery}
+        />
+      </div>
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Top bar removed */}
+        {/* Ward Rounds Mode banner - mobile only */}
+        {showWardRounds && (
+          <div className="md:hidden flex items-center justify-between px-4 py-2 bg-[#7c68ff12] border-b border-[#7c68ff25] flex-shrink-0">
+            <span className="text-[12px] text-[#7c68ff] font-semibold">📋 Ward Rounds Mode</span>
+            <button
+              onClick={dismissWardRounds}
+              className="w-6 h-6 flex items-center justify-center rounded-full text-[#7c68ff] hover:bg-[#7c68ff20] transition-colors"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
 
-        {/* Query tabs removed — history lives in the sidebar */}
+        {/* Mobile tab switcher */}
+        <div className="md:hidden flex items-stretch border-b border-[#2a2a31] bg-[#0d0d10] flex-shrink-0">
+          {([
+            { key: 'chat' as MobileTab, label: '💬 Chat' },
+            { key: 'sql' as MobileTab, label: '🗄 SQL' },
+            { key: 'results' as MobileTab, label: '📊 Results' },
+          ]).map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setMobileTab(tab.key)}
+              className={clsx(
+                'flex-1 py-2.5 text-[12px] font-semibold transition-colors border-b-2',
+                mobileTab === tab.key
+                  ? 'text-[#7c68ff] border-[#7c68ff]'
+                  : 'text-[#6c6c74] border-transparent hover:text-[#a0a0a7]'
+              )}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
 
-        {/* Workspace: chat + SQL side by side */}
+        {/* Workspace: chat + SQL side by side (desktop), or tabs (mobile) */}
         <div className="flex-1 flex overflow-hidden">
           {/* Chat panel */}
           <div
-            className="flex flex-col border-r border-[#2a2a31] flex-shrink-0"
-            style={{ width: '38%', minWidth: 300 }}
+            className={clsx(
+              'flex flex-col overflow-hidden',
+              // Mobile: only show when chat tab active, full width
+              mobileTab !== 'chat' ? 'hidden md:flex' : 'flex w-full',
+              // Desktop: fixed 38% width with border
+              'md:w-[38%] md:min-w-[300px] md:flex-shrink-0 md:border-r md:border-[#2a2a31]'
+            )}
           >
             <ChatPanel
               messages={messages}
@@ -451,11 +548,19 @@ export default function DataExplorerPage() {
             />
           </div>
 
-          {/* Pane divider hint */}
-          <div className="pane-divider w-px flex-shrink-0" />
+          {/* Pane divider hint - desktop only */}
+          <div className="pane-divider w-px flex-shrink-0 hidden md:block" />
 
           {/* SQL panel + Chart tab wrapper */}
-          <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+          <div
+            className={clsx(
+              'flex flex-col overflow-hidden min-w-0',
+              // Mobile: hide when chat tab active
+              mobileTab === 'chat' ? 'hidden md:flex' : 'flex flex-1',
+              // Desktop: always flex-1
+              'md:flex-1'
+            )}
+          >
             {/* Results/Chart tab switcher (only when chart exists) */}
             {chartConfig && (
               <div className="flex items-center justify-between px-4 py-1.5 bg-[#0d0d10] border-b border-[#2a2a31] flex-shrink-0">
@@ -464,7 +569,7 @@ export default function DataExplorerPage() {
                     <button
                       key={tab}
                       onClick={() => setActiveResultTab(tab)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-[7px] text-[11px] font-semibold transition-all ${
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-[7px] text-[11px] font-semibold transition-all min-h-[44px] ${
                         activeResultTab === tab
                           ? 'bg-[#7c68ff20] text-[#7c68ff] border border-[#7c68ff40]'
                           : 'text-[#6c6c74] hover:text-[#a0a0a7]'
@@ -524,6 +629,10 @@ export default function DataExplorerPage() {
                 isStreaming={isSqlStreaming}
                 selectedDb={selectedDb}
                 onDbChange={setSelectedDb}
+                narrative={narrative}
+                isGeneratingNarrative={isGeneratingNarrative}
+                onNarrativeDismiss={() => setNarrative(null)}
+                forceSqlOpen={mobileTab === 'sql'}
               />
             )}
           </div>

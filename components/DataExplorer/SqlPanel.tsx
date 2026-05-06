@@ -17,6 +17,7 @@ import {
 import * as XLSX from 'xlsx'
 import { clsx } from 'clsx'
 import { SqlHighlight } from './SqlHighlight'
+import { NarrativePanel, NarrativeResult } from './NarrativePanel'
 
 type ResultsTab = 'results' | 'history'
 
@@ -36,6 +37,12 @@ type Props = {
   isStreaming?: boolean
   selectedDb?: 'telehealth' | 'eclinics'
   onDbChange?: (db: 'telehealth' | 'eclinics') => void
+  narrative?: NarrativeResult | null
+  isGeneratingNarrative?: boolean
+  onNarrativeRequest?: (columns: Column[], rows: Row[], question: string) => void
+  onNarrativeDismiss?: () => void
+  /** When true, forces SQL editor open (used for mobile SQL tab) */
+  forceSqlOpen?: boolean
 }
 
 const LIMIT_OPTIONS = [100, 500, 1000, 5000, 10000]
@@ -58,6 +65,10 @@ export function SqlPanel({
   isStreaming = false,
   selectedDb = 'telehealth',
   onDbChange,
+  narrative,
+  isGeneratingNarrative,
+  onNarrativeDismiss,
+  forceSqlOpen = false,
 }: Props) {
   const [resultsTab, setResultsTab] = useState<ResultsTab>('results')
   const [editing, setEditing] = useState(false)
@@ -167,7 +178,7 @@ export function SqlPanel({
       </div>
 
       {/* SQL Editor — hidden by default, toggle via toolbar button */}
-      {sqlEditorOpen && (
+      {(forceSqlOpen || sqlEditorOpen) && (
         <div className="flex-1 overflow-auto relative" style={{ minHeight: 0, maxHeight: '50%' }}>
           {editing ? (
             <textarea
@@ -250,20 +261,20 @@ export function SqlPanel({
 
         {/* SQL toggle */}
         <button
-          onClick={() => setSqlEditorOpen((o) => !o)}
-          title={sqlEditorOpen ? 'Hide SQL' : 'Show SQL'}
+          onClick={() => !forceSqlOpen && setSqlEditorOpen((o) => !o)}
+          title={(forceSqlOpen || sqlEditorOpen) ? 'Hide SQL' : 'Show SQL'}
           className={clsx(
             'flex items-center gap-1 px-2.5 py-1.5 rounded-[8px] border text-[11px] font-medium transition-all',
-            sqlEditorOpen
+            (forceSqlOpen || sqlEditorOpen)
               ? 'bg-[#7c68ff20] border-[#7c68ff50] text-[#7c68ff] hover:bg-[#7c68ff30]'
               : 'bg-[#16161a] border-[#2a2a31] text-[#6c6c74] hover:text-[#a0a0a7] hover:border-[#3a3a45]'
           )}
         >
           <ChevronDown
             size={11}
-            className={clsx('transition-transform duration-200', sqlEditorOpen ? 'rotate-180' : '')}
+            className={clsx('transition-transform duration-200', (forceSqlOpen || sqlEditorOpen) ? 'rotate-180' : '')}
           />
-          {sqlEditorOpen ? 'Hide SQL' : 'SQL'}
+          {(forceSqlOpen || sqlEditorOpen) ? 'Hide SQL' : 'SQL'}
         </button>
 
         <div className="flex-1" />
@@ -336,6 +347,16 @@ export function SqlPanel({
           </div>
         )}
       </div>
+
+      {/* AI Narrative Panel */}
+      {(isGeneratingNarrative || narrative) && (
+        <NarrativePanel
+          narrative={narrative}
+          isGenerating={isGeneratingNarrative}
+          onRegenerate={undefined}
+          onDismiss={onNarrativeDismiss}
+        />
+      )}
 
       {/* Results area */}
       <div className="flex-1 overflow-auto min-h-0 bg-[#0d0d10]">

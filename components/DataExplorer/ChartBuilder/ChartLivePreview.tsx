@@ -8,6 +8,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer,
 } from 'recharts'
+import { useMemo } from 'react'
 import { ChartType } from './ChartTypeSelector'
 
 const COLORS = ['#7c68ff', '#4c8dff', '#4dcc88', '#f4a942', '#ff5c6c', '#4ec9c9']
@@ -221,38 +222,30 @@ export default function ChartLivePreview({ chartType, title, metrics, dimensions
 
   const chartTitle = title || 'Untitled Chart'
 
+  // QA fix: stabilise mock data with useMemo so re-renders don't regenerate random values
+  const stableMockKey = `${chartType}:${dim0}:${met0}`
+  const mockBarLine = useMemo(() => mockBarLineData(dim0, met0), [stableMockKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const mockPie     = useMemo(() => mockPieData(dim0, met0),     [stableMockKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const mockBigNum  = useMemo(() => Math.floor(Math.random() * 50000 + 1000), [stableMockKey]) // eslint-disable-line react-hooks/exhaustive-deps
+  const mockTableDs = useMemo(() => {
+    const effectiveDims = dimensions.length > 0 ? dimensions : ['department']
+    const effectiveMets = metrics.length > 0   ? metrics    : ['count']
+    return mockTableData(effectiveDims, effectiveMets)
+  }, [stableMockKey]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const renderChart = () => {
     switch (chartType) {
-      case 'bar': {
-        const data = mockBarLineData(dim0, met0)
-        return <BarView data={data} xKey={dim0} yKey={met0} />
-      }
-      case 'line': {
-        const data = mockBarLineData(dim0, met0)
-        return <LineView data={data} xKey={dim0} yKey={met0} />
-      }
-      case 'area': {
-        const data = mockBarLineData(dim0, met0)
-        return <AreaView data={data} xKey={dim0} yKey={met0} />
-      }
-      case 'pie': {
-        const data = mockPieData(dim0, met0)
-        return <PieView data={data} nameKey={dim0} valueKey={met0} />
-      }
-      case 'bigNumber': {
-        const value = Math.floor(Math.random() * 50000 + 1000)
-        return <BigNumberView value={value} label={met0} />
-      }
+      case 'bar':       return <BarView  data={mockBarLine} xKey={dim0} yKey={met0} />
+      case 'line':      return <LineView data={mockBarLine} xKey={dim0} yKey={met0} />
+      case 'area':      return <AreaView data={mockBarLine} xKey={dim0} yKey={met0} />
+      case 'pie':       return <PieView  data={mockPie}     nameKey={dim0} valueKey={met0} />
+      case 'bigNumber': return <BigNumberView value={mockBigNum} label={met0} />
       case 'table': {
         const allCols = [...dimensions, ...metrics]
-        const effectiveDims = dimensions.length > 0 ? dimensions : ['department']
-        const effectiveMets = metrics.length > 0 ? metrics : ['count']
-        const data = mockTableData(effectiveDims, effectiveMets)
         const cols = allCols.length > 0 ? allCols : ['department', 'count']
-        return <TableView data={data} columns={cols} />
+        return <TableView data={mockTableDs} columns={cols} />
       }
-      default:
-        return null
+      default:          return null
     }
   }
 

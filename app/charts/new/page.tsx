@@ -3,7 +3,8 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { ArrowLeft, Save, CheckCircle2, ChevronRight } from 'lucide-react'
+import { ArrowLeft, Save, CheckCircle2, ChevronRight, ChevronLeft } from 'lucide-react'
+import { clsx } from 'clsx'
 import DataNav from '@/components/DataNav'
 import DatasetPicker, { ColumnDef, ColumnRole } from '@/components/DataExplorer/ChartBuilder/DatasetPicker'
 import ConfigPanel, { FilterDef } from '@/components/DataExplorer/ChartBuilder/ConfigPanel'
@@ -25,6 +26,10 @@ export default function NewChartPage() {
 
   // Toast
   const [toast, setToast] = useState<{ visible: boolean; message: string }>({ visible: false, message: '' })
+
+  // Mobile wizard step (0 = Dataset, 1 = Configure, 2 = Preview)
+  const [mobileStep, setMobileStep] = useState(0)
+  const MOBILE_STEPS = ['Dataset', 'Configure', 'Preview']
 
   const metrics = Object.entries(columnRoles)
     .filter(([, role]) => role === 'metric')
@@ -131,10 +136,44 @@ export default function NewChartPage() {
         </div>
       </div>
 
-      {/* 3-column layout */}
+      {/* Mobile step indicator */}
+      <div className="md:hidden flex items-center px-4 py-3 border-b border-[#1f1f25] bg-[#0d0d10] flex-shrink-0">
+        {MOBILE_STEPS.map((step, idx) => (
+          <div key={step} className="flex items-center">
+            <button
+              onClick={() => setMobileStep(idx)}
+              className={clsx(
+                'flex items-center gap-1.5 text-[12px] font-semibold transition-colors',
+                mobileStep === idx ? 'text-[#7c68ff]' : mobileStep > idx ? 'text-[#4dcc88]' : 'text-[#44444b]'
+              )}
+            >
+              <span
+                className={clsx(
+                  'w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold',
+                  mobileStep === idx ? 'bg-[#7c68ff] text-white' : mobileStep > idx ? 'bg-[#4dcc8840] text-[#4dcc88]' : 'bg-[#2a2a31] text-[#44444b]'
+                )}
+              >
+                {mobileStep > idx ? '✓' : idx + 1}
+              </span>
+              {step}
+            </button>
+            {idx < MOBILE_STEPS.length - 1 && (
+              <ChevronRight size={13} className="mx-2 text-[#2a2a31] flex-shrink-0" />
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* 3-column layout - desktop: all 3 visible; mobile: one step at a time */}
       <div className="flex flex-1 overflow-hidden" style={{ height: 'calc(100vh - 110px)' }}>
         {/* Left: Dataset & Column Picker (~25%) */}
-        <div className="w-[25%] min-w-[200px] border-r border-[#1f1f25] flex flex-col overflow-hidden">
+        <div className={clsx(
+          'border-r border-[#1f1f25] flex flex-col overflow-hidden',
+          // Mobile: show only on step 0
+          mobileStep === 0 ? 'flex w-full' : 'hidden',
+          // Desktop: always visible at 25%
+          'md:flex md:w-[25%] md:min-w-[200px]'
+        )}>
           <DatasetPicker
             selectedDataset={selectedDataset}
             onSelectDataset={handleSelectDataset}
@@ -144,7 +183,13 @@ export default function NewChartPage() {
         </div>
 
         {/* Center: Config Panel (~30%) */}
-        <div className="w-[30%] min-w-[240px] border-r border-[#1f1f25] flex flex-col overflow-hidden">
+        <div className={clsx(
+          'border-r border-[#1f1f25] flex flex-col overflow-hidden',
+          // Mobile: show only on step 1
+          mobileStep === 1 ? 'flex w-full' : 'hidden',
+          // Desktop: always visible at 30%
+          'md:flex md:w-[30%] md:min-w-[240px]'
+        )}>
           <ConfigPanel
             chartType={chartType}
             onChartTypeChange={setChartType}
@@ -165,7 +210,13 @@ export default function NewChartPage() {
         </div>
 
         {/* Right: Live Preview (~45%) */}
-        <div className="flex-1 flex flex-col overflow-hidden bg-[#0d0d10]">
+        <div className={clsx(
+          'flex flex-col overflow-hidden bg-[#0d0d10]',
+          // Mobile: show only on step 2
+          mobileStep === 2 ? 'flex flex-1' : 'hidden',
+          // Desktop: always visible as flex-1
+          'md:flex md:flex-1'
+        )}>
           <div className="px-5 py-3 border-b border-[#1f1f25] flex-shrink-0">
             <p className="text-[11px] font-semibold text-[#6c6c74] uppercase tracking-wider">Live Preview</p>
           </div>
@@ -178,6 +229,33 @@ export default function NewChartPage() {
             />
           </div>
         </div>
+      </div>
+
+      {/* Mobile Next/Back navigation */}
+      <div className="md:hidden flex items-center justify-between px-4 py-3 border-t border-[#1f1f25] bg-[#0d0d10] flex-shrink-0">
+        <button
+          onClick={() => setMobileStep(s => Math.max(0, s - 1))}
+          disabled={mobileStep === 0}
+          className="flex items-center gap-1.5 px-4 py-2.5 min-h-[44px] rounded-[8px] text-[13px] font-medium border border-[#2a2a31] text-[#a0a0a7] disabled:opacity-30 hover:bg-[#16161a] transition-colors"
+        >
+          <ChevronLeft size={15} /> Back
+        </button>
+        <span className="text-[12px] text-[#44444b]">{mobileStep + 1} of {MOBILE_STEPS.length}</span>
+        {mobileStep < MOBILE_STEPS.length - 1 ? (
+          <button
+            onClick={() => setMobileStep(s => Math.min(MOBILE_STEPS.length - 1, s + 1))}
+            className="flex items-center gap-1.5 px-4 py-2.5 min-h-[44px] rounded-[8px] text-[13px] font-semibold bg-[#7c68ff] text-white hover:bg-[#9080ff] transition-colors"
+          >
+            Next <ChevronRight size={15} />
+          </button>
+        ) : (
+          <button
+            onClick={handleSave}
+            className="flex items-center gap-1.5 px-4 py-2.5 min-h-[44px] rounded-[8px] text-[13px] font-semibold bg-[#7c68ff] text-white hover:bg-[#9080ff] transition-colors"
+          >
+            <Save size={14} /> Save
+          </button>
+        )}
       </div>
 
       {/* Toast */}

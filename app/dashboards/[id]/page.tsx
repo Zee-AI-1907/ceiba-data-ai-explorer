@@ -15,8 +15,10 @@ import {
   getCanvasDashboard, saveCanvasDashboard,
   type CanvasDashboard, type CanvasWidget, type DashboardFilter, type WidgetSize,
 } from '@/lib/dashboardStore'
-import { ArrowLeft, MoreHorizontal, Trash2, Plus, Save, Globe, Eye, Pencil } from 'lucide-react'
+import { ArrowLeft, MoreHorizontal, Trash2, Plus, Save, Globe, Eye, Pencil, MessageCircle } from 'lucide-react'
 import { clsx } from 'clsx'
+import { CommentButton } from '@/components/Comments/CommentButton'
+import { CommentThread } from '@/components/Comments/CommentThread'
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 
@@ -87,12 +89,13 @@ function ChartCard({ chart, onRemove }: { chart: SavedChart; onRemove: () => voi
 
 function CanvasDashboardView({ id }: { id: string }) {
   const router = useRouter()
-  const [dashboard, setDashboard]     = useState<CanvasDashboard | null>(null)
-  const [loading, setLoading]         = useState(true)
-  const [editMode, setEditMode]       = useState(false)
-  const [editingName, setEditingName] = useState(false)
-  const [nameInput, setNameInput]     = useState('')
-  const [toast, setToast]             = useState<string | null>(null)
+  const [dashboard, setDashboard]         = useState<CanvasDashboard | null>(null)
+  const [loading, setLoading]             = useState(true)
+  const [editMode, setEditMode]           = useState(false)
+  const [editingName, setEditingName]     = useState(false)
+  const [nameInput, setNameInput]         = useState('')
+  const [toast, setToast]                 = useState<string | null>(null)
+  const [commentsOpen, setCommentsOpen]   = useState(false)
 
   useEffect(() => {
     const d = getCanvasDashboard(id)
@@ -224,6 +227,13 @@ function CanvasDashboardView({ id }: { id: string }) {
               <Eye size={10} /> View
             </button>
           </div>
+          <CommentButton
+            resourceType="dashboard"
+            resourceId={id}
+            isOpen={commentsOpen}
+            onClick={() => setCommentsOpen((v) => !v)}
+            className="px-3 py-1.5 border border-[#2a2a31] text-[12px]"
+          />
           <button onClick={handlePublish} className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold rounded-[8px] border border-[#2a2a31] text-[#a0a0a7] hover:bg-[#16161a] hover:text-[#e8e8ea] transition-all">
             <Globe size={12} /> Publish
           </button>
@@ -249,6 +259,30 @@ function CanvasDashboardView({ id }: { id: string }) {
           onSizeChange={handleSizeChange}
         />
       </div>
+
+      {/* Dashboard comments slide-over */}
+      {commentsOpen && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setCommentsOpen(false)}
+          />
+          {/* Panel */}
+          <div
+            className="fixed right-0 top-0 h-full w-[360px] z-50 bg-[#0d0d10] border-l border-[#2a2a31] shadow-[−4px_0_32px_rgba(0,0,0,0.6)] flex flex-col"
+            style={{ transform: 'translateX(0)', transition: 'transform 0.2s ease' }}
+          >
+            <CommentThread
+              resourceType="dashboard"
+              resourceId={id}
+              resourceLabel={dashboard?.name ?? id}
+              onClose={() => setCommentsOpen(false)}
+              mode="slideover"
+            />
+          </div>
+        </>
+      )}
 
       {toast && <Toast message={toast} onDone={() => setToast(null)} />}
     </>

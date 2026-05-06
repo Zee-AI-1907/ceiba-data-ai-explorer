@@ -289,3 +289,30 @@ textarea.mc-input::placeholder {
     --glow-angle: 45deg;
   }
 }
+
+/* ── Voice / Mic input ─────────────────────────────────────── */
+@keyframes mic-pulse {
+  0%, 100% { transform: scale(1);   opacity: 0.6; }
+  50%       { transform: scale(1.4); opacity: 0.2; }
+}
+.mic-pulse-ring {
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes bar-pulse { 0%,100% { height:4px } 50% { height:16px } }
+
+/* Waveform bars */
+@keyframes waveform-bar {
+  0%, 100% { transform: scaleY(0.4); }
+  50%       { transform: scaleY(1);   }
+}
+.waveform-bar {
+  transform-origin: bottom;
+  animation: waveform-bar 0.8s ease-in-out infinite;
+}
+
+/* Interim transcript styling — applied via inline className */
+textarea.mc-input.mc-interim {
+  opacity: 0.6;
+  font-style: italic;
+}

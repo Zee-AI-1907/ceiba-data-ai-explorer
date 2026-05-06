@@ -31,10 +31,7 @@ export function DashboardCanvas({ widgets, editMode, onRemove, onMove, onSizeCha
 
   return (
     <div className="flex-1 overflow-auto p-4">
-      <div
-        className="grid gap-4"
-        style={{ gridTemplateColumns: 'repeat(4, 1fr)', gridAutoRows: 'auto' }}
-      >
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         {sorted.map((widget, idx) => (
           <DashboardWidget
             key={widget.id}

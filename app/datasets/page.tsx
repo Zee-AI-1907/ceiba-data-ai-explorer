@@ -45,20 +45,20 @@ export default function DatasetsPage() {
   const totalPages = 3
 
   return (
-    <div className="min-h-screen bg-[#0b0b0c] text-[#e8e8ea] flex flex-col">
+    <div className="min-h-screen bg-[#0b0b0c] text-[#e8e8ea] flex flex-col pb-16 md:pb-0">
       <DataNav activePage="datasets" />
 
       {/* Header */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-[#1f1f25]">
+      <div className="flex items-center justify-between px-4 md:px-6 py-4 border-b border-[#1f1f25]">
         <h1 className="text-[17px] font-semibold text-[#e8e8ea]">Datasets</h1>
         <div className="flex items-center gap-2">
-          <button className="px-3 py-1.5 text-[12px] font-medium text-[#a0a0a7] border border-[#2a2a31] rounded-[8px] hover:bg-[#16161a] hover:text-[#e8e8ea] transition-colors">
+          <button className="hidden md:block px-3 py-1.5 text-[12px] font-medium text-[#a0a0a7] border border-[#2a2a31] rounded-[8px] hover:bg-[#16161a] hover:text-[#e8e8ea] transition-colors">
             BULK SELECT
           </button>
-          <button className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold text-white rounded-[8px] bg-[#7c68ff] hover:bg-[#9080ff] shadow-[0_2px_10px_rgba(124,104,255,0.3)] transition-all">
+          <button className="flex items-center gap-1.5 px-3 py-1.5 min-h-[44px] md:min-h-0 text-[12px] font-semibold text-white rounded-[8px] bg-[#7c68ff] hover:bg-[#9080ff] shadow-[0_2px_10px_rgba(124,104,255,0.3)] transition-all">
             <Plus size={13} /> DATASET
           </button>
-          <button className="w-8 h-8 flex items-center justify-center border border-[#2a2a31] rounded-[8px] text-[#6c6c74] hover:bg-[#16161a] hover:text-[#a0a0a7] transition-colors">
+          <button className="w-10 h-10 md:w-8 md:h-8 flex items-center justify-center border border-[#2a2a31] rounded-[8px] text-[#6c6c74] hover:bg-[#16161a] hover:text-[#a0a0a7] transition-colors">
             <Download size={14} />
           </button>
         </div>

@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
-import { Send, Sparkles } from 'lucide-react'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { Send, Sparkles, Mic, MicOff } from 'lucide-react'
 import { clsx } from 'clsx'
 import { QueryTemplates } from './QueryTemplates'
+import { useVoiceInput } from '../../hooks/useVoiceInput'
 
 export type Message = {
   id: string
@@ -21,6 +22,120 @@ type Props = {
   prefillMessage?: string
 }
 
+// ─── Waveform Indicator ──────────────────────────────────────────────────────
+function WaveformIndicator() {
+  const delays = ['0s', '0.15s', '0.3s', '0.15s', '0s']
+  const heights = ['12px', '18px', '24px', '18px', '12px']
+
+  return (
+    <div className="flex items-center gap-2 px-1 pb-1.5">
+      <div className="flex items-end gap-[3px] h-6">
+        {delays.map((delay, i) => (
+          <div
+            key={i}
+            className="waveform-bar w-[3px] rounded-full bg-[#ff5c6c]"
+            style={{
+              height: heights[i],
+              animationDelay: delay,
+            }}
+          />
+        ))}
+      </div>
+      <span className="text-[11px] text-[#ff5c6c] font-medium">
+        Listening… speak now
+      </span>
+    </div>
+  )
+}
+
+// ─── Clinical Hint Pill ───────────────────────────────────────────────────────
+function VoiceHintPill({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-2 bg-[#1b1b20] border border-[#2a2a31] rounded-[8px] px-3 py-1.5 mt-1.5">
+      <span className="text-[11px] text-[#6c6c74] leading-relaxed">
+        Try:{' '}
+        <span className="text-[#a0a0a7] italic">
+          &quot;Show ICU patients admitted this week&quot;
+        </span>{' '}
+        or{' '}
+        <span className="text-[#a0a0a7] italic">
+          &quot;Compare LOS by department&quot;
+        </span>
+      </span>
+      <button
+        onClick={onDismiss}
+        className="text-[#44444b] hover:text-[#6c6c74] text-[12px] flex-shrink-0 leading-none"
+        aria-label="Dismiss hint"
+      >
+        ✕
+      </button>
+    </div>
+  )
+}
+
+// ─── Error Toast ──────────────────────────────────────────────────────────────
+function VoiceErrorToast({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-2 bg-[#ff5c6c15] border border-[#ff5c6c40] rounded-[8px] px-3 py-2 mt-1.5">
+      <span className="text-[11px] text-[#ff5c6c]">{message}</span>
+      <button
+        onClick={onDismiss}
+        className="text-[#ff5c6c80] hover:text-[#ff5c6c] text-[12px] flex-shrink-0 leading-none"
+        aria-label="Dismiss error"
+      >
+        ✕
+      </button>
+    </div>
+  )
+}
+
+// ─── Mic Button ───────────────────────────────────────────────────────────────
+function MicButton({
+  isListening,
+  isSupported,
+  onClick,
+}: {
+  isListening: boolean
+  isSupported: boolean
+  onClick: () => void
+}) {
+  // QA fix: moved platform check to state+useEffect to avoid SSR hydration mismatch
+  const [isMac, setIsMac] = useState(false)
+  useEffect(() => {
+    setIsMac(/Mac|iPod|iPhone|iPad/.test(navigator.platform))
+  }, [])
+  const shortcut = isMac ? '⌘⇧M' : 'Ctrl+Shift+M'
+  const title = isListening
+    ? `Stop recording (${shortcut})`
+    : `Start voice input (${shortcut})`
+
+  return (
+    <div className="relative flex items-center justify-center flex-shrink-0 mb-0.5">
+      {/* Pulsing ring when listening */}
+      {isListening && (
+        <span
+          className="mic-pulse-ring absolute inset-0 rounded-[8px] bg-[#ff5c6c]"
+          aria-hidden="true"
+        />
+      )}
+      <button
+        onClick={onClick}
+        title={title}
+        aria-label={title}
+        className={clsx(
+          'relative w-7 h-7 rounded-[8px] flex items-center justify-center transition-all',
+          isListening
+            ? 'text-[#ff5c6c]'
+            : 'text-[#44444b] hover:text-[#a0a0a7]'
+        )}
+      >
+        {isListening ? <MicOff size={13} /> : <Mic size={13} />}
+      </button>
+    </div>
+  )
+}
+
+// ─── Message renderers ────────────────────────────────────────────────────────
 function AssistantMessage({ msg }: { msg: Message }) {
   const lines = msg.content.split('\n')
 
@@ -32,7 +147,6 @@ function AssistantMessage({ msg }: { msg: Message }) {
         </div>
         <span className="text-[11px] font-medium text-[#6c6c74]">Data Explorer</span>
       </div>
-      {/* Pulsing thinking indicator for in-progress messages */}
       {msg.content.startsWith('\u2695\ufe0f') && msg.content.endsWith('\u2026') ? (
         <div className="bg-[#16161a] border border-[#2a2a31] rounded-[12px] rounded-tl-[4px] px-4 py-3 text-[13px] text-[#a0a0a7] leading-relaxed flex items-center gap-2">
           <span className="thinking-pulse">{msg.content}</span>
@@ -40,7 +154,6 @@ function AssistantMessage({ msg }: { msg: Message }) {
       ) : (
         <div className="bg-[#16161a] border border-[#2a2a31] rounded-[12px] rounded-tl-[4px] px-4 py-3 text-[13px] text-[#c9ccd3] leading-relaxed">
           {lines.map((line, i) => {
-            // Bullet items
             if (line.startsWith('•') || line.startsWith('-')) {
               return (
                 <div key={i} className="flex gap-2 py-0.5">
@@ -49,9 +162,7 @@ function AssistantMessage({ msg }: { msg: Message }) {
                 </div>
               )
             }
-            // Empty line
             if (line.trim() === '') return <div key={i} className="h-2" />
-            // Regular line
             return <p key={i}>{line}</p>
           })}
         </div>
@@ -114,35 +225,101 @@ const QUICK_ACTIONS = [
   { icon: '🔍', label: 'Explore a dataset', query: 'What tables and data are available to explore?' },
 ]
 
+const HINT_STORAGE_KEY = 'voice-hint-dismissed'
+
+// ─── Main component ───────────────────────────────────────────────────────────
 export function ChatPanel({ messages, onSend, isLoading, projectName, onTemplateSelect, prefillMessage }: Props) {
   const [input, setInput] = useState('')
   const [inputGlow, setInputGlow] = useState(false)
+  const [isInterim, setIsInterim] = useState(false)
+  const [showHint, setShowHint] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  const voice = useVoiceInput()
+
+  // ── Sync voice transcript → textarea ────────────────────────────────────────
+  useEffect(() => {
+    if (voice.interimTranscript) {
+      // Show live partial transcript (italic / dimmed via className)
+      setInput(voice.interimTranscript)
+      setIsInterim(true)
+      autoResizeTextarea()
+    } else if (voice.transcript && !voice.isListening) {
+      // Final transcript confirmed
+      setInput(voice.transcript)
+      setIsInterim(false)
+      autoResizeTextarea()
+      textareaRef.current?.focus()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voice.transcript, voice.interimTranscript, voice.isListening])
+
+  // ── Show hint pill when voice starts (first time) ───────────────────────────
+  useEffect(() => {
+    if (voice.isListening) {
+      const dismissed =
+        typeof window !== 'undefined'
+          ? sessionStorage.getItem(HINT_STORAGE_KEY) === '1'
+          : false
+      if (!dismissed) setShowHint(true)
+    }
+  }, [voice.isListening])
+
+  // ── Keyboard shortcut Ctrl/Cmd+Shift+M ──────────────────────────────────────
+  const handleGlobalKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey
+      if (meta && e.shiftKey && e.key.toLowerCase() === 'm') {
+        e.preventDefault()
+        if (voice.isSupported) voice.startListening()
+      }
+    },
+    [voice]
+  )
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    window.addEventListener('keydown', handleGlobalKeyDown)
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [handleGlobalKeyDown])
+
+  // ── Scroll to bottom on new messages ────────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  // Handle prefill from template selection
+  // ── Handle prefill from template selection ───────────────────────────────────
   useEffect(() => {
     if (prefillMessage) {
       setInput(prefillMessage)
+      setIsInterim(false)
       setInputGlow(true)
       setTimeout(() => setInputGlow(false), 600)
       textareaRef.current?.focus()
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto'
-        textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px'
-      }
+      autoResizeTextarea()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefillMessage])
+
+  // ── Auto-resize helper ───────────────────────────────────────────────────────
+  const autoResizeTextarea = () => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto'
+      textareaRef.current.style.height =
+        Math.min(textareaRef.current.scrollHeight, 120) + 'px'
+    }
+  }
 
   const handleSend = () => {
     const text = input.trim()
     if (!text || isLoading) return
+    // If voice was listening, stop it first
+    if (voice.isListening) voice.stopListening()
+    setIsInterim(false)
     onSend(text)
     setInput('')
+    voice.resetTranscript()
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -157,11 +334,22 @@ export function ChatPanel({ messages, onSend, isLoading, projectName, onTemplate
 
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value)
+    setIsInterim(false) // user started typing manually
+    voice.resetTranscript()
     e.target.style.height = 'auto'
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
   }
 
+  const handleDismissHint = () => {
+    setShowHint(false)
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem(HINT_STORAGE_KEY, '1')
+    }
+  }
+
   const hasMessages = messages.length > 0
+  // Only show mic if supported
+  const showMic = voice.isSupported
 
   return (
     <div className="flex flex-col h-full bg-[#0d0d10] overflow-hidden">
@@ -170,6 +358,7 @@ export function ChatPanel({ messages, onSend, isLoading, projectName, onTemplate
         <QueryTemplates onSelect={(q) => {
           onTemplateSelect(q)
           setInput(q)
+          setIsInterim(false)
           setInputGlow(true)
           setTimeout(() => setInputGlow(false), 600)
           textareaRef.current?.focus()
@@ -190,6 +379,7 @@ export function ChatPanel({ messages, onSend, isLoading, projectName, onTemplate
                     key={action.label}
                     onClick={() => {
                       setInput(action.query)
+                      setIsInterim(false)
                       setInputGlow(true)
                       setTimeout(() => setInputGlow(false), 600)
                       textareaRef.current?.focus()
@@ -233,6 +423,14 @@ export function ChatPanel({ messages, onSend, isLoading, projectName, onTemplate
 
       {/* Input bar */}
       <div className="px-4 py-3 border-t border-[#2a2a31]">
+        {/* Waveform — visible only while listening */}
+        {voice.isListening && <WaveformIndicator />}
+
+        {/* Error toast */}
+        {voice.error && (
+          <VoiceErrorToast message={voice.error} onDismiss={() => voice.resetTranscript()} />
+        )}
+
         {/*
           gemini-glow wrapper: the 2px padding becomes the visible border ring.
           is-streaming class kicks in when the AI is actively responding,
@@ -250,10 +448,21 @@ export function ChatPanel({ messages, onSend, isLoading, projectName, onTemplate
               value={input}
               onChange={handleTextareaChange}
               onKeyDown={handleKeyDown}
-              placeholder="Type a message…"
+              placeholder={voice.isListening ? 'Listening…' : 'Type a message…'}
               rows={1}
-              className="mc-input flex-1 min-h-[20px] max-h-[120px] overflow-y-auto"
+              className={clsx(
+                'mc-input flex-1 min-h-[20px] max-h-[120px] overflow-y-auto transition-all',
+                isInterim && 'opacity-60 italic'
+              )}
             />
+            {/* Mic button — left of Send */}
+            {showMic && (
+              <MicButton
+                isListening={voice.isListening}
+                isSupported={voice.isSupported}
+                onClick={voice.startListening}
+              />
+            )}
             <button
               onClick={handleSend}
               disabled={!input.trim() || isLoading}
@@ -268,8 +477,15 @@ export function ChatPanel({ messages, onSend, isLoading, projectName, onTemplate
             </button>
           </div>
         </div>
+
+        {/* Hint pill */}
+        {showHint && voice.isListening && (
+          <VoiceHintPill onDismiss={handleDismissHint} />
+        )}
+
         <p className="text-[10px] text-[#44444b] mt-1.5 pl-1">
           Enter to send · Shift+Enter for new line
+          {showMic && ' · Ctrl+Shift+M for voice'}
         </p>
       </div>
     </div>

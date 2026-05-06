@@ -3,8 +3,11 @@
 import { useState } from 'react'
 import DataNav from '@/components/DataNav'
 import Link from 'next/link'
-import { Star, ChevronDown, Plus, Download, Search, Pencil, Trash2, Share2, ArrowUpDown, ArrowDown } from 'lucide-react'
+import { Star, ChevronDown, Plus, Download, Search, Pencil, Trash2, Share2, ArrowUpDown, ArrowDown, X, MoreVertical } from 'lucide-react'
 import { clsx } from 'clsx'
+import { CommentButton } from '@/components/Comments/CommentButton'
+import { CommentThread } from '@/components/Comments/CommentThread'
+import { slugify } from '@/lib/commentStore'
 
 const CHARTS = [
   { name: 'Call Duration by User',                    type: 'Bar Chart',                dataset: 'Direct Calls Query 01/25/2026 13:28:19', dashboard: 'Direct Calls Overview', owners: ['HA'], modified: '28 days ago' },
@@ -41,9 +44,21 @@ function OwnerAvatar({ code }: { code: string }) {
 }
 
 export default function ChartsPage() {
-  const [hoveredRow, setHoveredRow]   = useState<number | null>(null)
-  const [currentPage, setCurrentPage] = useState(1)
+  const [hoveredRow, setHoveredRow]     = useState<number | null>(null)
+  const [currentPage, setCurrentPage]   = useState(1)
+  const [activeComment, setActiveComment] = useState<string | null>(null) // resourceId
+  const [activeLabel, setActiveLabel]   = useState<string>('')
   const totalPages = 3
+
+  const openComments = (name: string) => {
+    const rid = slugify(name)
+    if (activeComment === rid) {
+      setActiveComment(null)
+    } else {
+      setActiveComment(rid)
+      setActiveLabel(name)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[#0b0b0c] text-[#e8e8ea] flex flex-col">
@@ -89,8 +104,26 @@ export default function ChartsPage() {
         ))}
       </div>
 
-      {/* Table */}
-      <div className="flex-1 overflow-x-auto">
+      {/* Mobile card list */}
+      <div className="md:hidden flex-1 overflow-y-auto pb-16">
+        {CHARTS.map((row, i) => (
+          <div key={i} className="flex items-center justify-between px-4 py-3.5 border-b border-[#1f1f25] active:bg-[#16161a] cursor-pointer">
+            <div className="flex-1 min-w-0 mr-3">
+              <p className="text-[13px] font-medium text-[#4c8dff] truncate mb-1">{row.name}</p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-[5px] bg-[#7c68ff20] text-[#7c68ff]">{row.type}</span>
+                <span className="text-[11px] text-[#6c6c74]">{row.modified}</span>
+              </div>
+            </div>
+            <button className="w-11 h-11 flex items-center justify-center text-[#44444b] hover:text-[#a0a0a7] flex-shrink-0">
+              <MoreVertical size={16} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Table - desktop only */}
+      <div className="hidden md:block flex-1 overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="border-b border-[#2a2a31] bg-[#111114]">
@@ -107,6 +140,7 @@ export default function ChartsPage() {
                 <button className="flex items-center gap-1 text-[11px] font-semibold text-[#6c6c74] uppercase tracking-wider hover:text-[#a0a0a7]">Last Modified <ArrowDown size={11} /></button>
               </th>
               <th className="px-4 py-3 text-left text-[11px] font-semibold text-[#6c6c74] uppercase tracking-wider">Actions</th>
+              <th className="w-12 px-2 py-3" />
             </tr>
           </thead>
           <tbody>
@@ -140,11 +174,41 @@ export default function ChartsPage() {
                     </div>
                   )}
                 </td>
+                <td className="px-2 py-2.5">
+                  <CommentButton
+                    resourceType="chart"
+                    resourceId={slugify(row.name)}
+                    isOpen={activeComment === slugify(row.name)}
+                    onClick={() => openComments(row.name)}
+                  />
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {/* End desktop table */}
+
+      {/* Chart comment modal */}
+      {activeComment && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-black/40"
+            onClick={() => setActiveComment(null)}
+          />
+          <div className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none">
+            <div className="pointer-events-auto w-[400px] max-h-[600px] bg-[#0d0d10] border border-[#2a2a31] rounded-[14px] shadow-2xl flex flex-col overflow-hidden">
+              <CommentThread
+                resourceType="chart"
+                resourceId={activeComment}
+                resourceLabel={activeLabel}
+                onClose={() => setActiveComment(null)}
+                mode="inline"
+              />
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Pagination */}
       <div className="flex items-center justify-center gap-1 py-4 border-t border-[#1f1f25]">
