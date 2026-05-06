@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import DataNav from '@/components/DataNav'
 import { getDashboards, fetchDashboards, type Dashboard as StoredDashboard } from '@/lib/store'
-import { Star, ChevronDown, Plus, Download, Search, Pencil, Trash2, Share2, ArrowUpDown, ArrowDown } from 'lucide-react'
+import { Star, ChevronDown, Plus, Download, Search, Pencil, Trash2, Share2, ArrowUpDown, ArrowDown, LayoutDashboard } from 'lucide-react'
 import { clsx } from 'clsx'
 
 const DASHBOARDS = [
@@ -97,7 +97,10 @@ export default function DashboardsPage() {
           <button className="px-3 py-1.5 text-[12px] font-medium text-[#a0a0a7] border border-[#2a2a31] rounded-[8px] hover:bg-[#16161a] hover:text-[#e8e8ea] transition-colors">
             BULK SELECT
           </button>
-          <button className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold text-white rounded-[8px] bg-[#7c68ff] hover:bg-[#9080ff] shadow-[0_2px_10px_rgba(124,104,255,0.3)] transition-all">
+          <button
+            onClick={() => router.push('/dashboards/new')}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold text-white rounded-[8px] bg-[#7c68ff] hover:bg-[#9080ff] shadow-[0_2px_10px_rgba(124,104,255,0.3)] transition-all"
+          >
             <Plus size={13} /> DASHBOARD
           </button>
           <button className="w-8 h-8 flex items-center justify-center border border-[#2a2a31] rounded-[8px] text-[#6c6c74] hover:bg-[#16161a] hover:text-[#a0a0a7] transition-colors">
