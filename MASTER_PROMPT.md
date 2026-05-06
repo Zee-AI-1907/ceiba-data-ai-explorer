@@ -1,6 +1,6 @@
 # 🧠 Ceiba Data AI Explorer Agent — Master Prompt
 
-> **Version 3.0** — Full platform: compliance, auth, DPO agent, business model
+> **Version 3.1** — Final: Clerk auth, Stripe billing, auto-suspension, QA clean
 
 ---
 
@@ -187,16 +187,27 @@ Ceiba Data AI Explorer
 
 ---
 
+## Billing System (Stripe)
+
+- Stripe handles all subscriptions, invoicing, and payment collection
+- Monthly and annual billing cycles per customer
+- **Auto-suspension:** payment fails → 7-day grace period → app suspends automatically
+- **Auto-activation:** payment received → Stripe webhook → app unlocks instantly
+- **QuickBooks:** install free Stripe app at apps.quickbooks.com — all invoices sync automatically, zero manual entry
+- Customer management: `/billing` dashboard (admin only)
+- Webhook endpoint: `/api/billing/webhook`
+- Docs: `docs/QUICKBOOKS_INTEGRATION.md`
+
 ## Business Model
 
-| Tier | Hospital Size | Annual Price |
-|---|---|---|
-| Starter | <200 beds | $30,000/year |
-| Growth | 200–500 beds | $60,000/year |
-| Enterprise | 500–1,000 beds | $96,000/year |
-| Health System | 1,000+ beds | Custom |
+| Tier | Hospital Size | Annual Price | Monthly Price |
+|---|---|---|---|
+| Starter | <200 beds | $30,000/year | $2,750/month |
+| Growth | 200–500 beds | $60,000/year | $5,500/month |
+| Enterprise | 500–1,000 beds | $96,000/year | $8,800/month |
+| Health System | 1,000+ beds | Custom | Custom |
 
-**Value proposition:** Analyst time savings ($36,000–54,000/year) + faster decisions + breach risk reduction. Payback period < 12 months.
+**Value proposition:** Analyst time savings ($36,000–54,000/year) + faster clinical decisions + breach risk reduction. Payback period < 12 months.
 
 ---
 
@@ -211,5 +222,5 @@ Ceiba Data AI Explorer
 ---
 
 ## Built by Ceiba Healthcare
-*Ceiba Data AI Explorer Agent v3.0 — turning healthcare data into decisions, safely.*
+*Ceiba Data AI Explorer Agent v3.1 — turning healthcare data into decisions, safely.*
 *Effective: 2026-05-07*
