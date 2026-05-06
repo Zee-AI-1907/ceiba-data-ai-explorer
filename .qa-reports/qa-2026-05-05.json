@@ -1,0 +1,116 @@
+{
+  "runAt": "2026-05-05T13:52:19.525Z",
+  "summary": {
+    "passed": 21,
+    "failed": 0,
+    "total": 21,
+    "totalMs": 21062
+  },
+  "results": [
+    {
+      "name": "Dashboards",
+      "status": "pass",
+      "ms": 2054
+    },
+    {
+      "name": "Charts",
+      "status": "pass",
+      "ms": 1105
+    },
+    {
+      "name": "Datasets",
+      "status": "pass",
+      "ms": 145
+    },
+    {
+      "name": "SQL Lab",
+      "status": "pass",
+      "ms": 1450
+    },
+    {
+      "name": "Clinical question gets a reply",
+      "status": "pass",
+      "ms": 6005
+    },
+    {
+      "name": "No API key returns 500",
+      "status": "pass",
+      "ms": 1191
+    },
+    {
+      "name": "Clinical request returns SQL",
+      "status": "pass",
+      "ms": 2055
+    },
+    {
+      "name": "Off-topic request is blocked",
+      "status": "pass",
+      "ms": 908
+    },
+    {
+      "name": "Second identical call is cached",
+      "status": "pass",
+      "ms": 2893
+    },
+    {
+      "name": "Returns valid chart config",
+      "status": "pass",
+      "ms": 1927
+    },
+    {
+      "name": "Off-topic chart blocked",
+      "status": "pass",
+      "ms": 1027
+    },
+    {
+      "name": "Blocks INSERT",
+      "status": "pass",
+      "ms": 140
+    },
+    {
+      "name": "Blocks DROP",
+      "status": "pass",
+      "ms": 3
+    },
+    {
+      "name": "Blocks DELETE",
+      "status": "pass",
+      "ms": 3
+    },
+    {
+      "name": "Blocks UPDATE",
+      "status": "pass",
+      "ms": 3
+    },
+    {
+      "name": "Blocks empty SQL",
+      "status": "pass",
+      "ms": 3
+    },
+    {
+      "name": "GET returns array",
+      "status": "pass",
+      "ms": 63
+    },
+    {
+      "name": "POST creates dashboard",
+      "status": "pass",
+      "ms": 3
+    },
+    {
+      "name": "GET by id returns created dashboard",
+      "status": "pass",
+      "ms": 3
+    },
+    {
+      "name": "DELETE removes dashboard",
+      "status": "pass",
+      "ms": 3
+    },
+    {
+      "name": "Cache stats endpoint responds",
+      "status": "pass",
+      "ms": 78
+    }
+  ]
+}
