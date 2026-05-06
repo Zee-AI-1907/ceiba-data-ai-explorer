@@ -201,14 +201,15 @@ export function SqlPanel({
         </div>
       )}
 
-      {/* Toolbar */}
-      <div className="flex items-center gap-2 px-3 py-2.5 border-t border-b border-[#2a2a31] bg-[#0d0d10] flex-shrink-0">
+      {/* Toolbar — QA fix: added overflow-x-auto so buttons don't get clipped
+           on narrow panels (mobile SQL tab or small desktop viewports) */}
+      <div className="flex items-center gap-2 px-3 py-2.5 border-t border-b border-[#2a2a31] bg-[#0d0d10] flex-shrink-0 overflow-x-auto">
         {/* Run button */}
         <button
           onClick={onRun}
           disabled={isRunning}
           className={clsx(
-            'flex items-center gap-1.5 px-4 py-1.5 rounded-[8px] text-[12px] font-semibold transition-all',
+            'flex items-center gap-1.5 px-4 py-1.5 rounded-[8px] text-[12px] font-semibold transition-all flex-shrink-0',
             isRunning
               ? 'bg-[#4dcc8840] text-[#4dcc88] cursor-not-allowed'
               : 'bg-[#4dcc88] text-[#0b0b0c] hover:bg-[#5fdb97] shadow-[0_2px_10px_rgba(77,204,136,0.35)]'

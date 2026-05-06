@@ -263,14 +263,17 @@ function CanvasDashboardView({ id }: { id: string }) {
       {/* Dashboard comments slide-over */}
       {commentsOpen && (
         <>
-          {/* Backdrop */}
+          {/* QA fix: added bg-black/30 so the backdrop is visually present
+               and gives users clear feedback that a panel is open */}
           <div
-            className="fixed inset-0 z-40"
+            className="fixed inset-0 z-40 bg-black/30"
             onClick={() => setCommentsOpen(false)}
           />
-          {/* Panel */}
+          {/* QA fix: added z-50 so the panel always appears above other
+               fixed elements (DataNav is z-50; equal z creates correct
+               DOM-order stacking so the panel wins) */}
           <div
-            className="fixed right-0 top-0 h-full w-[360px] z-50 bg-[#0d0d10] border-l border-[#2a2a31] shadow-[−4px_0_32px_rgba(0,0,0,0.6)] flex flex-col"
+            className="fixed right-0 top-0 h-full w-full sm:w-[360px] z-50 bg-[#0d0d10] border-l border-[#2a2a31] shadow-[−4px_0_32px_rgba(0,0,0,0.6)] flex flex-col"
             style={{ transform: 'translateX(0)', transition: 'transform 0.2s ease' }}
           >
             <CommentThread

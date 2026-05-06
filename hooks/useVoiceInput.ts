@@ -25,13 +25,18 @@ export function useVoiceInput(): VoiceInputState {
   const [interimTranscript, setInterimTranscript] = useState('')
   const [error, setError] = useState<string | null>(null)
 
-  // Check support at call-site (SSR-safe: only on client)
-  const isSupported =
-    typeof window !== 'undefined' &&
-    !!(
-      (window as SpeechRecognitionAny).SpeechRecognition ||
-      (window as SpeechRecognitionAny).webkitSpeechRecognition
+  // QA fix: use useState + useEffect to avoid SSR hydration mismatch.
+  // During SSR window is undefined so an inline typeof check returns false,
+  // but on the client it would be true — causing a React hydration warning.
+  const [isSupported, setIsSupported] = useState(false)
+  useEffect(() => {
+    setIsSupported(
+      !!(
+        (window as SpeechRecognitionAny).SpeechRecognition ||
+        (window as SpeechRecognitionAny).webkitSpeechRecognition
+      )
     )
+  }, [])
 
   const recognitionRef = useRef<SpeechRecognitionAny | null>(null)
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)

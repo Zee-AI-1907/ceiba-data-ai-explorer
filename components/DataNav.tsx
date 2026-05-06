@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import Link from 'next/link'
-import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu } from 'lucide-react'
+import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle } from 'lucide-react'
 import { clsx } from 'clsx'
 import {
   AppNotification,
@@ -170,6 +170,15 @@ export default function DataNav({ activePage }: DataNavProps) {
             <span className="text-[11px] text-[#6c6c74]">All systems operational</span>
           </div>
 
+          {/* Help Center */}
+          <Link
+            href="/help"
+            title="Help Center"
+            className="w-8 h-8 rounded-[8px] bg-[#16161a] border border-[#2a2a31] flex items-center justify-center text-[#6c6c74] hover:text-[#a0a0a7] hover:border-[#3a3a45] transition-all"
+          >
+            <HelpCircle size={14} />
+          </Link>
+
           {/* Bell / Notification Center */}
           <button
             onClick={() => setNotifOpen((v) => !v)}
@@ -195,8 +204,10 @@ export default function DataNav({ activePage }: DataNavProps) {
       </nav>
 
       {/* Mobile nav drawer */}
+      {/* QA fix: changed absolute -> fixed so the drawer is always anchored to
+           the viewport top regardless of the page's positioned ancestors. */}
       {mobileMenuOpen && (
-        <div className="md:hidden absolute top-11 left-0 right-0 bg-[#111114] border-b border-[#2a2a31] shadow-xl z-50">
+        <div className="md:hidden fixed top-11 left-0 right-0 bg-[#111114] border-b border-[#2a2a31] shadow-xl z-50">
           {navLinks.map((link) => (
             <Link
               key={link.key}
@@ -224,8 +235,9 @@ export default function DataNav({ activePage }: DataNavProps) {
             onClick={() => setNotifOpen(false)}
           />
 
-          {/* Panel */}
-          <div className="fixed top-0 right-0 h-full w-[380px] z-50 bg-[#111114] border-l border-[#2a2a31] flex flex-col shadow-2xl">
+          {/* QA fix: use w-full on mobile + cap at 380px so the panel
+               doesn't overflow on phones narrower than 380 px (e.g. iPhone SE) */}
+          <div className="fixed top-0 right-0 h-full w-full sm:w-[380px] z-50 bg-[#111114] border-l border-[#2a2a31] flex flex-col shadow-2xl">
             {/* Panel header */}
             <div className="flex items-center justify-between px-5 py-4 border-b border-[#2a2a31] flex-shrink-0">
               <div className="flex items-center gap-2.5">

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { Sidebar, type SavedQuery, upsertQuery, getSavedQueries } from '@/components/Sidebar'
 import { ChatPanel, Message } from '@/components/DataExplorer/ChatPanel'
 import { SqlPanel } from '@/components/DataExplorer/SqlPanel'
@@ -51,6 +51,12 @@ export default function DataExplorerPage() {
   const [activeQueryLabel, setActiveQueryLabel] = useState('New Query')
 
   const [messages, setMessages] = useState<Message[]>(INITIAL_MESSAGES)
+  // QA fix: keep a ref to messages so handleRun can access the latest value
+  // without adding messages to its useCallback deps (which would recreate it
+  // on every chat turn).
+  const messagesRef = useRef(messages)
+  useEffect(() => { messagesRef.current = messages }, [messages])
+
   const [sql, setSql] = useState(INITIAL_SQL)
   const [prefillMessage, setPrefillMessage] = useState<string | undefined>(undefined)
   const [isRunning, setIsRunning] = useState(false)
@@ -192,7 +198,9 @@ export default function DataExplorerPage() {
         saveQueryToHistory('success')
         // Auto-generate narrative after successful query
         if (data.rows && data.rows.length > 0) {
-          const lastUserMsg = messages.filter((m) => m.role === 'user').slice(-1)[0]?.content ?? ''
+          // QA fix: use messagesRef.current to get latest messages without
+          // adding messages to handleRun's useCallback deps
+          const lastUserMsg = messagesRef.current.filter((m) => m.role === 'user').slice(-1)[0]?.content ?? ''
           generateNarrative(data.columns, data.rows, lastUserMsg)
         }
       }
