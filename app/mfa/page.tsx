@@ -2,6 +2,7 @@
 
 import { useState, useRef } from 'react'
 import { useRouter } from 'next/navigation'
+import { useSession } from 'next-auth/react'
 import Link from 'next/link'
 import { ShieldCheck, Loader2, Smartphone } from 'lucide-react'
 
@@ -42,6 +43,8 @@ export default function MFAPage() {
     inputRefs.current[nextFocus]?.focus()
   }
 
+  const { data: session } = useSession()
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     const code = digits.join('')
@@ -53,17 +56,27 @@ export default function MFAPage() {
     setError('')
     setLoading(true)
 
-    await new Promise((r) => setTimeout(r, 600)) // simulate slight delay
+    try {
+      const email = session?.user?.email ?? new URLSearchParams(window.location.search).get('email') ?? ''
+      const res = await fetch('/api/auth/verify-mfa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code, email }),
+      })
+      const data = await res.json()
 
-    if (code === '123456') {
-      router.push('/data-explorer')
-    } else {
-      setError('Invalid code. Please try again.')
-      setDigits(Array(CODE_LENGTH).fill(''))
-      inputRefs.current[0]?.focus()
+      if (data.success) {
+        router.push('/data-explorer')
+      } else {
+        setError(data.error ?? 'Invalid code. Please try again.')
+        setDigits(Array(CODE_LENGTH).fill(''))
+        inputRefs.current[0]?.focus()
+      }
+    } catch {
+      setError('Verification failed. Please try again.')
+    } finally {
+      setLoading(false)
     }
-
-    setLoading(false)
   }
 
   return (

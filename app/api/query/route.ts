@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { executeTrinoQuery } from '@/lib/trinoClient'
-import { logAuditEvent } from '@/lib/auditLog'
+import { logWithSession } from '@/lib/auditLog'
+import { requireAuth } from '@/lib/apiAuth'
 
 export async function POST(req: NextRequest) {
+  const { error } = await requireAuth(req)
+  if (error) return error
+
   const { sql, database, schema, limit } = await req.json()
 
   if (!sql?.trim()) {
@@ -22,15 +26,12 @@ export async function POST(req: NextRequest) {
     const result = await executeTrinoQuery(sql, catalog, schema || 'public', limit || 1000)
 
     const columns = result.columns.map(c => ({ key: c.name, label: c.name, type: c.type }))
-    logAuditEvent({
+    await logWithSession(req, {
       action: 'QUERY_RUN',
       resourceType: 'patient_data',
       detail: `SQL: ${sql.slice(0, 300)}`,
       rowsAffected: result.rowCount,
       severity: 'INFO',
-      userId: 'system',
-      userEmail: 'system',
-      ipAddress: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? undefined,
     })
     return NextResponse.json({
       columns,
@@ -38,14 +39,11 @@ export async function POST(req: NextRequest) {
       rowCount: result.rowCount,
     })
   } catch (e) {
-    logAuditEvent({
+    await logWithSession(req, {
       action: 'QUERY_FAILED',
       resourceType: 'query',
       detail: `SQL: ${sql?.slice(0, 300) ?? ''} — Error: ${String(e).slice(0, 200)}`,
       severity: 'WARNING',
-      userId: 'system',
-      userEmail: 'system',
-      ipAddress: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? undefined,
     })
     return NextResponse.json({ error: String(e) }, { status: 500 })
   }

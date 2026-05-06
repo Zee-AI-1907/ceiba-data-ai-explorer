@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { logAuditEvent } from '@/lib/auditLog'
+import { logWithSession } from '@/lib/auditLog'
+import { requireAuth } from '@/lib/apiAuth'
 
 const SYSTEM_PROMPT = `You are a clinical data assistant for Ceiba Health. You help clinicians understand their healthcare data, interpret results, and make data-driven decisions.
 
@@ -14,20 +15,20 @@ Keep responses concise and clinically relevant. If asked something outside healt
 Format responses clearly — use bullet points for lists, be direct.`
 
 export async function POST(req: NextRequest) {
+  const { error } = await requireAuth(req)
+  if (error) return error
+
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) return NextResponse.json({ error: 'No API key' }, { status: 500 })
 
   const { message, context } = await req.json()
 
   // Log data view access
-  logAuditEvent({
+  await logWithSession(req, {
     action: 'DATA_VIEW',
     resourceType: 'patient_data',
     detail: `Chat query: ${String(message ?? '').slice(0, 300)}`,
     severity: 'INFO',
-    userId: 'system',
-    userEmail: 'system',
-    ipAddress: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? undefined,
   })
 
   // context = optional summary of current query results to give LLM awareness

@@ -20,6 +20,18 @@ const PHI_COLUMNS = new Set([
   'phone',
   'email',
   'address',
+  // Extended PHI column names (HIPAA compliance — do not remove)
+  'patientfirstname',
+  'patientlastname',
+  'patient_name',
+  'fullname',
+  'full_name',
+  'birthdate',
+  'birth_date',
+  'nationalid',
+  'national_id',
+  'tc_kimlik',
+  'tckimlik',
 ])
 
 function isPhiColumn(key: string): boolean {
@@ -41,6 +53,9 @@ function nextLetter(): string {
   return ch
 }
 
+// Turkish National ID pattern: 11 digits, first digit non-zero
+const TURKISH_ID_PATTERN = /^[1-9]\d{10}$/
+
 function anonymiseValue(
   key: string,
   value: unknown,
@@ -48,12 +63,13 @@ function anonymiseValue(
 ): string {
   if (value === null || value === undefined) return '[REDACTED]'
 
-  const k = key.toLowerCase()
+  // Normalise key the same way isPhiColumn does, for consistent matching
+  const k = key.toLowerCase().replace(/[-\s]/g, '_')
 
-  // Patient ID — numeric or alphanumeric
+  // Patient ID — numeric or alphanumeric; use full hex hash to avoid collisions
   if (k === 'patientid' || k === 'patient_id' || k === 'mrn') {
     if (tokenMap.has(value)) return tokenMap.get(value) as string
-    const token = `PT-${String(Math.abs(hashCode(String(value)))).padStart(5, '0').slice(0, 5)}`
+    const token = `PT-${Math.abs(hashCode(String(value))).toString(16).toUpperCase().padStart(8, '0')}`
     tokenMap.set(value, token)
     return token
   }
@@ -61,21 +77,41 @@ function anonymiseValue(
   // SSN
   if (k === 'ssn') return '[SSN REDACTED]'
 
-  // Dates / DOB
-  if (k === 'dob' || k === 'dateofbirth') return '[DATE REDACTED]'
+  // National / Turkish identity numbers
+  if (k === 'nationalid' || k === 'national_id' || k === 'tc_kimlik' || k === 'tckimlik') {
+    return '[NATIONAL ID REDACTED]'
+  }
 
-  // Names
+  // Dates / DOB
+  if (k === 'dob' || k === 'dateofbirth' || k === 'birthdate' || k === 'birth_date') {
+    return '[DATE REDACTED]'
+  }
+
+  // Names (extended set)
   if (
     k === 'firstname' ||
     k === 'lastname' ||
     k === 'patient_first_name' ||
     k === 'patient_last_name' ||
-    k === 'name'
+    k === 'name' ||
+    k === 'patientfirstname' ||
+    k === 'patientlastname' ||
+    k === 'patient_name' ||
+    k === 'fullname' ||
+    k === 'full_name'
   ) {
     if (tokenMap.has(value)) return tokenMap.get(value) as string
     const token = `Patient-${nextLetter()}`
     tokenMap.set(value, token)
     return token
+  }
+
+  // Turkish ID pattern detection on any PHI column value
+  if (typeof value === 'string' && TURKISH_ID_PATTERN.test(value.trim())) {
+    return '[NATIONAL ID REDACTED]'
+  }
+  if (typeof value === 'number' && TURKISH_ID_PATTERN.test(String(value))) {
+    return '[NATIONAL ID REDACTED]'
   }
 
   // Everything else (phone, email, address)
@@ -116,12 +152,27 @@ export function scrubPHI(
 
   const scrubbedRows = rows.map((row) => {
     const scrubbed: Record<string, unknown> = { ...row }
+
+    // Scrub known PHI columns
     for (const key of phiKeys) {
       if (key in scrubbed) {
         scrubbed[key] = anonymiseValue(key, scrubbed[key], tokenMap)
         phiValuesReplaced++
       }
     }
+
+    // Second pass: scan ALL column values for Turkish National ID pattern
+    // regardless of column name, to catch unlabelled identity numbers
+    for (const key of Object.keys(scrubbed)) {
+      if (phiKeys.includes(key)) continue // already handled above
+      const val = scrubbed[key]
+      const strVal = typeof val === 'number' ? String(val) : (typeof val === 'string' ? val.trim() : null)
+      if (strVal && TURKISH_ID_PATTERN.test(strVal)) {
+        scrubbed[key] = '[NATIONAL ID REDACTED]'
+        phiValuesReplaced++
+      }
+    }
+
     return scrubbed
   })
 

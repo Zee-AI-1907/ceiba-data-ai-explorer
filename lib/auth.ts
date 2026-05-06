@@ -2,13 +2,18 @@ import type { NextAuthOptions } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 import bcrypt from 'bcryptjs'
 
-const USERS = [
+// Demo TOTP secret shared by all users for MVP simplicity.
+// In production, each user would have a unique secret stored in the database.
+const DEMO_TOTP_SECRET = process.env.MFA_TOTP_SECRET ?? 'WHRTRD3ORPCZ7WO2YYZ6TPLAPLS3R3LL'
+
+export const USERS = [
   {
     id: '1',
     name: 'Dr. Afsin Alp',
     email: 'afsin@ceiba.com',
     role: 'admin',
     password: bcrypt.hashSync('ceiba2026', 10),
+    totpSecret: DEMO_TOTP_SECRET,
   },
   {
     id: '2',
@@ -16,6 +21,7 @@ const USERS = [
     email: 'ege@ceiba.com',
     role: 'analyst',
     password: bcrypt.hashSync('ceiba2026', 10),
+    totpSecret: DEMO_TOTP_SECRET,
   },
   {
     id: '3',
@@ -23,6 +29,7 @@ const USERS = [
     email: 'clinical@ceiba.com',
     role: 'clinician',
     password: bcrypt.hashSync('ceiba2026', 10),
+    totpSecret: DEMO_TOTP_SECRET,
   },
 ]
 
@@ -60,7 +67,9 @@ export const authOptions: NextAuthOptions = {
     },
     async session({ session, token }) {
       if (session.user) {
-        (session.user as { role?: string }).role = token.role as string
+        session.user.role = token.role as string
+        // Expose user ID (from JWT sub) so API routes can capture it in audit logs
+        session.user.id = token.sub ?? (token.id as string | undefined)
       }
       return session
     },

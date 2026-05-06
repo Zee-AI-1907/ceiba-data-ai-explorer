@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { logAuditEvent } from '@/lib/auditLog'
+import { logWithSession } from '@/lib/auditLog'
 import { scrubPHI } from '@/lib/phiScrubber'
+import { requireAuth } from '@/lib/apiAuth'
 
 const NARRATIVE_SYSTEM_PROMPT = `You are a clinical data analyst. Given a dataset and the user's original question, write a concise 2-4 sentence plain-English narrative summary.
 Highlight the top finding, any notable outliers, and one actionable insight.
@@ -29,6 +30,9 @@ interface NarrativeRequest {
 }
 
 export async function POST(req: NextRequest) {
+  const { error } = await requireAuth(req)
+  if (error) return error
+
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) return NextResponse.json({ error: 'No API key' }, { status: 500 })
 
@@ -45,20 +49,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No data provided' }, { status: 400 })
   }
 
-  // Log narrative generation (WARNING — PHI data is being sent to external AI)
-  logAuditEvent({
+  // HIPAA: PHI scrubbed before external AI call — see scrubReport
+  const { scrubbedRows, scrubReport } = scrubPHI(rows, columns)
+
+  // Log AFTER scrub so scrubReport is available for the audit trail
+  await logWithSession(req, {
     action: 'NARRATIVE_GENERATED',
     resourceType: 'patient_data',
-    detail: `Narrative requested for ${rows.length} rows, question: ${String(question ?? '').slice(0, 200)}`,
+    detail: [
+      `Narrative requested for ${rows.length} rows, question: ${String(question ?? '').slice(0, 200)}`,
+      `PHI scrub: ${scrubReport.columnsScrubed.length} column(s) [${scrubReport.columnsScrubed.join(', ') || 'none'}]`,
+      `${scrubReport.phiValuesReplaced} value(s) replaced across ${scrubReport.rowsProcessed} row(s)`,
+    ].join(' | '),
     rowsAffected: rows.length,
     severity: 'WARNING',
-    userId: 'system',
-    userEmail: 'system',
-    ipAddress: req.headers.get('x-forwarded-for') ?? req.headers.get('x-real-ip') ?? undefined,
   })
-
-  // Scrub PHI before sending to OpenAI
-  const { scrubbedRows } = scrubPHI(rows, columns)
 
   // Build a concise data summary to send to the LLM (cap at 50 rows to control tokens)
   const sampleRows = scrubbedRows.slice(0, 50)

@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { signIn } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import { Eye, EyeOff, ShieldCheck, Loader2 } from 'lucide-react'
 
 export default function LoginPage() {
@@ -121,8 +122,18 @@ export default function LoginPage() {
           </form>
         </div>
 
+        {/* MFA setup link */}
+        <div className="mt-4 flex items-center justify-center">
+          <Link
+            href="/mfa/setup"
+            className="text-[12px] text-[#44444b] hover:text-[#7c68ff] transition-colors"
+          >
+            First time? Set up your authenticator app →
+          </Link>
+        </div>
+
         {/* HIPAA notice */}
-        <div className="mt-5 flex items-start gap-2.5 px-1">
+        <div className="mt-4 flex items-start gap-2.5 px-1">
           <ShieldCheck size={14} className="text-[#4dcc88] flex-shrink-0 mt-0.5" />
           <p className="text-[11px] text-[#44444b] leading-relaxed">
             This system contains <span className="text-[#6c6c74]">Protected Health Information</span>.

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { sqlCache, hashKey } from '@/lib/cache'
 import { getRelevantSchema } from '@/lib/schemaInjector'
+import { requireAuth } from '@/lib/apiAuth'
 
 function buildSystemPrompt(schema: string): string {
   return `You are a clinical SQL expert for Ceiba Health. Generate PostgreSQL queries for healthcare databases.
@@ -16,6 +17,9 @@ Rules:
 }
 
 export async function POST(req: NextRequest) {
+  const { error } = await requireAuth(req)
+  if (error) return error
+
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {
     return NextResponse.json(

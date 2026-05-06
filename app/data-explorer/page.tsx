@@ -79,10 +79,22 @@ export default function DataExplorerPage() {
   const [mobileTab, setMobileTab] = useState<MobileTab>('chat')
   const [showWardRounds, setShowWardRounds] = useState(false)
 
+  const [showBaaNotice, setShowBaaNotice] = useState(false)
+
   useEffect(() => {
     const dismissed = sessionStorage.getItem('wardRoundsDismissed') === 'true'
     if (!dismissed) setShowWardRounds(true)
   }, [])
+
+  useEffect(() => {
+    const dismissed = sessionStorage.getItem('baaDismissed') === 'true'
+    if (!dismissed) setShowBaaNotice(true)
+  }, [])
+
+  const dismissBaaNotice = () => {
+    sessionStorage.setItem('baaDismissed', 'true')
+    setShowBaaNotice(false)
+  }
 
   const dismissWardRounds = () => {
     sessionStorage.setItem('wardRoundsDismissed', 'true')
@@ -502,6 +514,22 @@ export default function DataExplorerPage() {
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* PHI compliance warning banner */}
         <PHIWarning />
+
+        {/* BAA requirement notice for OpenAI-powered features */}
+        {showBaaNotice && (
+          <div className="flex items-center justify-between px-4 py-2 bg-[#4c8dff15] border-b border-[#4c8dff40] flex-shrink-0">
+            <span className="text-[11px] text-[#4c8dff]">
+              ℹ️ AI narrative features use OpenAI API. Ensure your organization has a signed BAA with OpenAI before processing real PHI.
+            </span>
+            <button
+              onClick={dismissBaaNotice}
+              className="ml-4 w-5 h-5 flex items-center justify-center rounded-full text-[#4c8dff] hover:bg-[#4c8dff20] transition-colors flex-shrink-0"
+              aria-label="Dismiss BAA notice"
+            >
+              <X size={11} />
+            </button>
+          </div>
+        )}
 
         {/* Ward Rounds Mode banner - mobile only */}
         {showWardRounds && (

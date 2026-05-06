@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
+import { requireAuth } from '@/lib/apiAuth'
 
 const DATA_DIR = join(process.cwd(), '.data')
 const DASHBOARDS_FILE = join(DATA_DIR, 'dashboards.json')
@@ -29,6 +30,9 @@ function writeFile(path: string, data: unknown): void {
 // GET /api/dashboards?charts=true — list saved charts
 
 export async function GET(req: NextRequest) {
+  const { error } = await requireAuth(req)
+  if (error) return error
+
   const { searchParams } = new URL(req.url)
   const id = searchParams.get('id')
   const charts = searchParams.get('charts')
@@ -47,6 +51,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  const { error } = await requireAuth(req)
+  if (error) return error
+
   const { searchParams } = new URL(req.url)
   const type = searchParams.get('type') || 'dashboard'
   const body = await req.json()
@@ -70,6 +77,9 @@ export async function POST(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  const { error } = await requireAuth(req)
+  if (error) return error
+
   const { searchParams } = new URL(req.url)
   const id = searchParams.get('id')
   const type = searchParams.get('type') || 'dashboard'
