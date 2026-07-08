@@ -43,6 +43,13 @@ export type AuditEvent = {
   id: string
   timestamp: string         // ISO 8601
   userId: string            // from session (or 'anonymous')
+  /**
+   * Tenant key from the session (AR1/H1). Optional at the type level for
+   * backward-compat: log lines written before org-scoping have no orgId and are
+   * normalised to '' ('legacy') on read — see readAllEvents(). New writes always
+   * populate it via logWithSession (or an explicit orgId on logAuditEvent).
+   */
+  orgId: string
   userEmail: string
   action: AuditAction
   resourceType: AuditResourceType
@@ -115,7 +122,7 @@ function getLastLineHash(): string {
  */
 export async function logWithSession(
   request: Request,
-  event: Omit<AuditEvent, 'id' | 'timestamp' | 'userId' | 'userEmail' | 'ipAddress' | 'userAgent' | 'previousHash' | 'hash'>
+  event: Omit<AuditEvent, 'id' | 'timestamp' | 'userId' | 'orgId' | 'userEmail' | 'ipAddress' | 'userAgent' | 'previousHash' | 'hash'>
 ): Promise<void> {
   const session = await getSession(request)
   const user = session ? findUserById(session.userId) : null
@@ -126,6 +133,8 @@ export async function logWithSession(
   logAuditEvent({
     ...event,
     userId: session?.userId ?? 'unauthenticated',
+    // Stamp the tenant key from the session (AR1/H1) so the audit route can scope.
+    orgId: session?.orgId ?? '',
     userEmail: email,
     ipAddress: ip,
     userAgent,
@@ -137,7 +146,10 @@ export async function logWithSession(
  * tamper-evident hash chaining.
  */
 export function logAuditEvent(
-  event: Omit<AuditEvent, 'id' | 'timestamp' | 'previousHash' | 'hash'>
+  // orgId is optional here for backward-compat: callers that pass identity
+  // explicitly (auth routes) SHOULD supply orgId; older/egress callers that omit
+  // it are normalised to '' below. logWithSession always supplies it.
+  event: Omit<AuditEvent, 'id' | 'timestamp' | 'orgId' | 'previousHash' | 'hash'> & { orgId?: string }
 ): void {
   try {
     ensureLogDir()
@@ -147,6 +159,7 @@ export function logAuditEvent(
     // Build event without hash first
     const withoutHash: Omit<AuditEvent, 'hash'> = {
       ...event,
+      orgId: event.orgId ?? '',
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       previousHash,
@@ -177,7 +190,11 @@ function readAllEvents(): AuditEvent[] {
     const events: AuditEvent[] = []
     for (const line of lines) {
       try {
-        events.push(JSON.parse(line) as AuditEvent)
+        const parsed = JSON.parse(line) as AuditEvent
+        // Backward-compat: pre-org-scoping lines have no orgId. Normalise to ''
+        // (treated as 'legacy') so old records neither crash nor leak across orgs.
+        if (typeof parsed.orgId !== 'string') parsed.orgId = ''
+        events.push(parsed)
       } catch {
         // Skip malformed lines
       }
@@ -190,9 +207,17 @@ function readAllEvents(): AuditEvent[] {
 
 /**
  * Return the N most-recent audit events (default 500).
+ *
+ * When `orgId` is provided, events are filtered to that tenant BEFORE the cap is
+ * applied, so a caller always gets up to N of *their own* org's events (AR1/H1) —
+ * not N global events that may all belong to other orgs. Pass undefined only for
+ * trusted, non-tenant-scoped callers.
  */
-export function getRecentAuditEvents(limit = 500): AuditEvent[] {
-  const all = readAllEvents()
+export function getRecentAuditEvents(limit = 500, orgId?: string): AuditEvent[] {
+  let all = readAllEvents()
+  if (orgId !== undefined) {
+    all = all.filter((e) => e.orgId === orgId)
+  }
   return all.slice(-limit).reverse()
 }
 

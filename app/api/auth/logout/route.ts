@@ -20,6 +20,7 @@ export async function POST(req: Request) {
       detail: `Logout for '${user?.email ?? session.userId}'`,
       severity: 'INFO',
       userId: session.userId,
+      orgId: session.orgId,
       userEmail: user?.email ?? 'unknown',
       ipAddress: ip,
       userAgent: req.headers.get('user-agent') ?? undefined,

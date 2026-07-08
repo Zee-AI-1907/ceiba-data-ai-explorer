@@ -40,6 +40,7 @@ export async function POST(req: Request) {
       detail: `Failed login for '${email}'`,
       severity: 'WARNING',
       userId: 'unauthenticated',
+      orgId: '', // no authenticated org for a failed login
       userEmail: email,
       ipAddress: ip,
       userAgent,
@@ -59,6 +60,7 @@ export async function POST(req: Request) {
     detail: `Login for '${user.email}' (org ${user.orgId}, role ${user.role})`,
     severity: 'INFO',
     userId: user.id,
+    orgId: user.orgId,
     userEmail: user.email,
     ipAddress: ip,
     userAgent,

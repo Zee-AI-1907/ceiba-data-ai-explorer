@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { X, Plus, LayoutDashboard } from 'lucide-react'
-import { getDashboards, saveDashboard, type Dashboard, type SavedChart } from '@/lib/store'
+import { getDashboards, persistDashboard, type Dashboard, type SavedChart } from '@/lib/store'
 
 type Props = {
   chart: SavedChart
@@ -19,31 +19,35 @@ export function SaveToDashboardModal({ chart, onClose, onAdded }: Props) {
     setDashboards(getDashboards())
   }, [])
 
-  const addToDashboard = (dashboard: Dashboard) => {
-    const alreadyExists = dashboard.charts.some((c) => c.id === chart.id)
+  const addToDashboard = async (dashboard: Dashboard) => {
+    const existingCharts = dashboard.charts ?? []
+    const alreadyExists = existingCharts.some((c) => c.id === chart.id)
     const updated: Dashboard = {
       ...dashboard,
-      charts: alreadyExists ? dashboard.charts : [...dashboard.charts, chart],
+      // chart is a client draft (SavedChart); the server re-stamps tenancy on the
+      // parent dashboard, so it is safe to embed as-is here.
+      charts: alreadyExists ? existingCharts : [...existingCharts, chart as unknown as NonNullable<Dashboard['charts']>[number]],
       updatedAt: new Date().toISOString(),
     }
-    saveDashboard(updated)
+    // Server is the source of truth — await the write (owner/orgId stamped server-side).
+    await persistDashboard(updated)
     onAdded(dashboard.name)
     onClose()
   }
 
-  const createAndAdd = () => {
+  const createAndAdd = async () => {
     const name = newName.trim()
     if (!name) return
     const newDashboard: Dashboard = {
       id: String(Date.now()),
       name,
       status: 'Draft',
-      charts: [chart],
+      charts: [chart as unknown as NonNullable<Dashboard['charts']>[number]],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      owner: 'You',
+      // owner/orgId intentionally omitted — the server stamps them from the session.
     }
-    saveDashboard(newDashboard)
+    await persistDashboard(newDashboard)
     onAdded(name)
     onClose()
   }
@@ -88,12 +92,12 @@ export function SaveToDashboardModal({ chart, onClose, onAdded }: Props) {
                 autoFocus
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && createAndAdd()}
+                onKeyDown={(e) => { if (e.key === 'Enter') void createAndAdd() }}
                 placeholder="Dashboard name…"
                 className="flex-1 px-3 py-2 rounded-[8px] bg-[#111114] border border-[#2a2a31] text-[12px] text-[#e8e8ea] placeholder-[#44444b] outline-none focus:border-[#7c68ff60]"
               />
               <button
-                onClick={createAndAdd}
+                onClick={() => { void createAndAdd() }}
                 disabled={!newName.trim()}
                 className="px-3 py-2 rounded-[8px] bg-[#7c68ff] text-white text-[12px] font-semibold hover:bg-[#9080ff] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
               >
@@ -117,7 +121,7 @@ export function SaveToDashboardModal({ chart, onClose, onAdded }: Props) {
               {dashboards.map((d) => (
                 <button
                   key={d.id}
-                  onClick={() => addToDashboard(d)}
+                  onClick={() => { void addToDashboard(d) }}
                   className="flex items-center justify-between w-full px-3.5 py-2.5 rounded-[10px] bg-[#111114] border border-[#2a2a31] hover:border-[#7c68ff40] hover:bg-[#1b1b20] transition-all group"
                 >
                   <div className="flex items-center gap-2.5">
@@ -127,7 +131,7 @@ export function SaveToDashboardModal({ chart, onClose, onAdded }: Props) {
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-[#44444b]">{d.charts.length} chart{d.charts.length !== 1 ? 's' : ''}</span>
+                    <span className="text-[10px] text-[#44444b]">{(d.charts?.length ?? 0)} chart{(d.charts?.length ?? 0) !== 1 ? 's' : ''}</span>
                     <span className={`text-[10px] font-medium ${d.status === 'Published' ? 'text-[#4dcc88]' : 'text-[#6c6c74]'}`}>
                       {d.status}
                     </span>

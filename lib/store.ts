@@ -1,24 +1,34 @@
-import type { ChartConfig } from '@/components/DataExplorer/ChartPreview'
+/**
+ * store.ts — Client-side dashboard/chart persistence.
+ *
+ * SOURCE OF TRUTH IS THE SERVER (AR4). persistDashboard/persistChart now AWAIT
+ * the server write and return the server's canonical record. localStorage is a
+ * render cache written THROUGH only AFTER the server confirms — it is no longer
+ * authoritative. (Old behaviour: fire-and-forget POST, localStorage treated as
+ * the source of truth. That is what made server org-scoping impossible.)
+ *
+ * Types are the canonical ones from lib/domain.ts. For backward compatibility the
+ * historical names `Dashboard` and `SavedChart` are preserved here as the
+ * client-facing INPUT aliases (server-stamped orgId/owner/updatedAt are optional
+ * on the client; the server stamps them on write).
+ *
+ * TODO (read-path refetch): fetchDashboards/fetchDashboard currently merge server
+ * data with the localStorage cache in the calling pages. Once WS-G lands the
+ * server store, the pages should drop the localStorage seed and refetch on focus
+ * so the server is the *only* read source. Tracked as a follow-up; the write path
+ * is already server-authoritative.
+ */
 
-export type SavedChart = {
-  id: string
-  title: string
-  description?: string
-  config: ChartConfig
-  data: Record<string, unknown>[]
-  createdAt: string
-  queryName?: string
-}
+import type {
+  Chart,
+  Dashboard as CanonicalDashboard,
+  ChartInput,
+  DashboardInput,
+} from '@/lib/domain'
 
-export type Dashboard = {
-  id: string
-  name: string
-  status: 'Draft' | 'Published'
-  charts: SavedChart[]
-  createdAt: string
-  updatedAt: string
-  owner: string
-}
+// Backward-compatible public names. These are the client-facing INPUT shapes.
+export type SavedChart = ChartInput
+export type Dashboard = DashboardInput
 
 const CHARTS_KEY = 'ceiba_saved_charts'
 const DASHBOARDS_KEY = 'ceiba_dashboards'
@@ -77,20 +87,40 @@ export async function fetchDashboard(id: string): Promise<Dashboard | null> {
   } catch { return null }
 }
 
-export async function persistDashboard(dashboard: Dashboard): Promise<void> {
-  saveDashboard(dashboard) // keep localStorage for instant UI
-  await fetch('/api/dashboards', {
+/**
+ * Persist a dashboard. Server is authoritative: we AWAIT the POST, and only if it
+ * succeeds do we write the server's returned record through to the localStorage
+ * render cache. On failure we throw so callers can surface the error rather than
+ * silently diverging from the server.
+ */
+export async function persistDashboard(dashboard: Dashboard): Promise<CanonicalDashboard> {
+  const res = await fetch('/api/dashboards', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(dashboard),
-  }).catch(() => {}) // fire-and-forget, localStorage is the source of truth
+  })
+  if (!res.ok) {
+    throw new Error(`Failed to save dashboard (${res.status})`)
+  }
+  const saved: CanonicalDashboard = await res.json()
+  // Write-through cache only AFTER the server confirms.
+  saveDashboard(saved)
+  return saved
 }
 
-export async function persistChart(chart: SavedChart): Promise<void> {
-  saveChart(chart) // keep localStorage for instant UI
-  await fetch('/api/dashboards?type=chart', {
+/**
+ * Persist a chart. Same server-authoritative contract as persistDashboard.
+ */
+export async function persistChart(chart: SavedChart): Promise<Chart> {
+  const res = await fetch('/api/dashboards?type=chart', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(chart),
-  }).catch(() => {})
+  })
+  if (!res.ok) {
+    throw new Error(`Failed to save chart (${res.status})`)
+  }
+  const saved: Chart = await res.json()
+  saveChart(saved)
+  return saved
 }

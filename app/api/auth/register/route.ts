@@ -66,6 +66,7 @@ export async function POST(req: Request) {
       detail: `User created '${created.email}' (org ${created.orgId}, role ${created.role}) by ${session.userId}`,
       severity: 'INFO',
       userId: session.userId,
+      orgId: session.orgId,
       userEmail: 'admin',
     })
     return NextResponse.json({ user: created }, { status: 201 })

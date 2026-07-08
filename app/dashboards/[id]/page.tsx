@@ -76,7 +76,7 @@ function ChartCard({ chart, onRemove }: { chart: SavedChart; onRemove: () => voi
         </div>
       </div>
       <div style={{ height: 280 }} className="w-full">
-        <ChartPreview config={chart.config} data={chart.data} />
+        {chart.config && <ChartPreview config={chart.config} data={chart.data ?? []} />}
       </div>
       {chart.queryName && (
         <p className="text-[10px] text-[#44444b] border-t border-[#1f1f25] pt-2">Source: {chart.queryName}</p>
@@ -329,10 +329,10 @@ export default function DashboardDetailPage() {
     if (!dashboard) return
     const updated: Dashboard = {
       ...dashboard,
-      charts: dashboard.charts.filter((c) => c.id !== chartId),
+      charts: (dashboard.charts ?? []).filter((c) => c.id !== chartId),
       updatedAt: new Date().toISOString(),
     }
-    persistDashboard(updated)
+    void persistDashboard(updated)
     setDashboard(updated)
   }
 
@@ -391,7 +391,7 @@ export default function DashboardDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-[11px] text-[#44444b]">{dashboard.charts.length} chart{dashboard.charts.length !== 1 ? 's' : ''}</span>
+          <span className="text-[11px] text-[#44444b]">{(dashboard.charts?.length ?? 0)} chart{(dashboard.charts?.length ?? 0) !== 1 ? 's' : ''}</span>
           <button onClick={() => router.push('/data-explorer')} className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-semibold text-white rounded-[8px] bg-[#7c68ff] hover:bg-[#9080ff] shadow-[0_2px_10px_rgba(124,104,255,0.3)] transition-all">
             <Plus size={13} /> Add Chart
           </button>
@@ -399,7 +399,7 @@ export default function DashboardDetailPage() {
       </div>
 
       <div className="flex-1 px-6 py-5">
-        {dashboard.charts.length === 0 ? (
+        {(dashboard.charts?.length ?? 0) === 0 ? (
           <div className="flex flex-col items-center justify-center gap-4 py-20 text-center">
             <div className="w-14 h-14 rounded-2xl bg-[#16161a] border border-[#2a2a31] flex items-center justify-center">
               <Plus size={22} className="text-[#44444b]" />
@@ -412,7 +412,7 @@ export default function DashboardDetailPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-            {dashboard.charts.map((chart) => (
+            {(dashboard.charts ?? []).map((chart) => (
               <ChartCard key={chart.id} chart={chart} onRemove={() => removeChart(chart.id)} />
             ))}
           </div>
