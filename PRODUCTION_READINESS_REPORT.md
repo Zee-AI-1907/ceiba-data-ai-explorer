@@ -14,6 +14,17 @@
 > §7. Net: **~50 additional findings, 5 new production blockers (N1–N5).** The
 > NO-GO / grade-F verdict is unchanged and reinforced.
 
+> **Scope change, 2026-07-09 (remediation).** Product direction: **Clerk and Stripe are
+> removed for now** and deferred to a later milestone. Auth is replaced with a **local
+> RBAC system** (session + hashed credentials + the existing role/permission map);
+> **billing, licensing, and subscription/suspension are removed entirely.** Consequently
+> the following findings are **descoped / obsolete** and retained only for history:
+> **B8, H13, H18, L4** (all billing/license), the licensing half of **B5's BAA gating**
+> stays (OpenAI egress is independent of billing), and the *tenant* framing of **B2/N4**
+> is narrowed to **per-user owner scoping** (single local user store, no multi-tenant
+> Clerk Orgs). The **data-residency (N1)** and **PHI-egress (B5/H15)** blockers are
+> unaffected. See §7 for the revised plan.
+
 ## 1. Verdict
 
 **NO-GO for production with real patient data. Overall readiness grade: F.**
@@ -398,11 +409,12 @@ in some routes partial work already performed.
 2. Enforce read-only at Trino with a real SELECT-only role, verified at the **connector *and* source-DB
    grant** level (not just a Trino role); replace the first-token SQL guard with parser-based validation;
    enforce a server-side table/statement allowlist on generated SQL before execution (B1, H25).
-3. **[A] Stand up the tenant/identity model as a prerequisite** (Clerk Organizations + user→tenant backfill),
-   *then* add tenant scoping to dashboards/charts and the audit route and enforce write/`audit:read`
-   permissions (B2, H1, H2).
-4. Enforce license/tenant status inside the API trust boundary — fix the `/api/*` bypass and the global
-   fail-open (controls fail **closed**) (B8, H13).
+3. **[revised] Replace Clerk with a local RBAC auth system** (session + hashed credentials + the existing
+   `lib/permissions.ts` role/permission map); remove `@clerk/nextjs`. *Then* add **per-user owner scoping**
+   to dashboards/charts and the audit route and enforce write/`audit:read` permissions (B2, H1, H2). Clerk
+   Organizations / multi-tenant deferred with the auth-provider milestone.
+4. **[descoped]** Billing/licensing removed entirely (Stripe, webhook, license store, `/suspended`) — B8/H13
+   no longer apply. The API trust boundary is now enforced by local RBAC + owner scoping, failing **closed**.
 5. Stop PHI egress: **[A]** send schema + aggregates only (never row-level PHI) to any LLM without a BAA —
    do not merely widen `scrubPHI`, which misses free-text PHI (B5, H15); disable/round-trip
    `webkitSpeechRecognition`. **[A] Resolve data residency (N1)** — establish the KVKK cross-border basis
@@ -422,8 +434,8 @@ in some routes partial work already performed.
    log AI-egress outcomes *after* the call resolves (§6a).
 9. Fix retention to target the real PHI keys with a test (H7); wire anomaly flags to real alerting + a
    breach-response workflow with 60-day clock handling (H6). **[A]** Define DR/backup with explicit RPO/RTO.
-10. **[A]** Billing integrity: license PATCH field allowlist + enum validation; Stripe webhook idempotency
-    (persist `event.id`) + atomic upsert; check `payment_status` (H18, L4, §6a).
+10. **[descoped]** Billing integrity items (H18/L4 — license PATCH allowlist, Stripe webhook idempotency)
+    removed with the billing subsystem. Revisit when Stripe is reintroduced.
 
 **Phase 2 — Correct the product and the claims.**
 11. Fix NL→SQL client/server contract and the Postgres-vs-Trino/catalog bugs; integration test
