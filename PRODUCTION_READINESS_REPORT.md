@@ -16,14 +16,16 @@
 
 > **Scope change, 2026-07-09 (remediation).** Product direction: **Clerk and Stripe are
 > removed for now** and deferred to a later milestone. Auth is replaced with a **local
-> RBAC system** (session + hashed credentials + the existing role/permission map);
+> RBAC system that supports organization/tenant scoping** (session + hashed credentials +
+> the existing role/permission map + a local org/tenant model: users belong to an org,
+> data scopes by org then by owner within the org);
 > **billing, licensing, and subscription/suspension are removed entirely.** Consequently
 > the following findings are **descoped / obsolete** and retained only for history:
-> **B8, H13, H18, L4** (all billing/license), the licensing half of **B5's BAA gating**
-> stays (OpenAI egress is independent of billing), and the *tenant* framing of **B2/N4**
-> is narrowed to **per-user owner scoping** (single local user store, no multi-tenant
-> Clerk Orgs). The **data-residency (N1)** and **PHI-egress (B5/H15)** blockers are
-> unaffected. See §7 for the revised plan.
+> **B8, H13, H18, L4** (all billing/license). **B5's OpenAI-BAA gating stays** (egress is
+> independent of billing). **B2/N4 tenant scoping remains in scope** — now delivered via
+> the *local* org/tenant model instead of Clerk Organizations (cache keys and record
+> scoping key on `orgId` + `owner`). The **data-residency (N1)** and **PHI-egress
+> (B5/H15)** blockers are unaffected. See §7 for the revised plan.
 
 ## 1. Verdict
 
@@ -409,10 +411,11 @@ in some routes partial work already performed.
 2. Enforce read-only at Trino with a real SELECT-only role, verified at the **connector *and* source-DB
    grant** level (not just a Trino role); replace the first-token SQL guard with parser-based validation;
    enforce a server-side table/statement allowlist on generated SQL before execution (B1, H25).
-3. **[revised] Replace Clerk with a local RBAC auth system** (session + hashed credentials + the existing
-   `lib/permissions.ts` role/permission map); remove `@clerk/nextjs`. *Then* add **per-user owner scoping**
-   to dashboards/charts and the audit route and enforce write/`audit:read` permissions (B2, H1, H2). Clerk
-   Organizations / multi-tenant deferred with the auth-provider milestone.
+3. **[revised] Replace Clerk with a local RBAC auth system with org/tenant scoping** (session + hashed
+   credentials + the existing `lib/permissions.ts` role/permission map + a local org/tenant model — users
+   belong to an org); remove `@clerk/nextjs`. *Then* add **org-then-owner scoping** to dashboards/charts and
+   the audit route and enforce write/`audit:read` permissions (B2, H1, H2, N4). Records and cache keys carry
+   `orgId` + `owner`.
 4. **[descoped]** Billing/licensing removed entirely (Stripe, webhook, license store, `/suspended`) — B8/H13
    no longer apply. The API trust boundary is now enforced by local RBAC + owner scoping, failing **closed**.
 5. Stop PHI egress: **[A]** send schema + aggregates only (never row-level PHI) to any LLM without a BAA —
