@@ -13,7 +13,8 @@
 import fs from 'fs'
 import path from 'path'
 import crypto from 'crypto'
-import { auth } from '@clerk/nextjs/server'
+import { getSession } from '@/lib/apiAuth'
+import { findUserById } from '@/lib/authStore'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -110,20 +111,21 @@ function getLastLineHash(): string {
 /**
  * logWithSession — Preferred audit helper.
  * Extracts userId, userEmail, ipAddress, and userAgent from the incoming
- * request and the current NextAuth session, then calls logAuditEvent.
+ * request and the current local session, then calls logAuditEvent.
  */
 export async function logWithSession(
   request: Request,
   event: Omit<AuditEvent, 'id' | 'timestamp' | 'userId' | 'userEmail' | 'ipAddress' | 'userAgent' | 'previousHash' | 'hash'>
 ): Promise<void> {
-  const { userId, sessionClaims } = await auth()
-  const email = (sessionClaims?.email as string) ?? 'unknown'
+  const session = await getSession(request)
+  const user = session ? findUserById(session.userId) : null
+  const email = user?.email ?? 'unknown'
   const forwarded = request.headers.get('x-forwarded-for')
   const ip = forwarded?.split(',')[0]?.trim() ?? request.headers.get('x-real-ip') ?? 'unknown'
   const userAgent = request.headers.get('user-agent') ?? undefined
   logAuditEvent({
     ...event,
-    userId: userId ?? 'unauthenticated',
+    userId: session?.userId ?? 'unauthenticated',
     userEmail: email,
     ipAddress: ip,
     userAgent,

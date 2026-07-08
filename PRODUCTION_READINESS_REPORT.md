@@ -465,6 +465,38 @@ unverified, and all committed secrets as burned. **[A]** Two second-pass items r
 guidance is insufficient (H15). This is a promising prototype, but it is multiple phases of focused work —
 not touch-ups — away from lawfully handling real patient data.
 
+## 7a. [A] Architecture-Consistency Review (2026-07-09) — plan adjustments
+
+A read-only architecture review of the local-RBAC pivot found the tenancy *model* sound
+(`lib/session.ts`, `lib/authStore.ts`, `lib/apiAuth.ts` are forward-compatible with Postgres/Prisma
+and a future Clerk return) but the tenancy *plumbing* terminating at the session and never reaching
+the data planes. Five structural findings, with the plan adjustments now adopted:
+
+- **AR1 — Audit layer is orphaned.** `lib/auditLog.ts` was Clerk-bound, `AuditEvent` has **no `orgId`**,
+  and two audit-write conventions now coexist. **Adjustment:** de-Clerk `auditLog.ts` and **add `orgId` to
+  `AuditEvent` now** (before WS-G freezes the Postgres schema); `/api/audit` filters by `session.orgId` +
+  `audit:read`. `auditLog.ts` gets an explicit owner (was orphaned across 4 workstreams).
+- **AR2 — Scoping wired into nothing; write path discards it** (`SaveToDashboardModal` sets `owner:'You'`;
+  dashboards route upserts by `id` only). Deferring owner-scoping = a backfill migration later. **Adjustment:
+  pull owner-scoping into the AUTH phase** — server stamps `orgId`/`owner` from the session on every write
+  (ignoring client values), filters every read, rejects cross-org writes/deletes. Done against the flat file
+  now so the Prisma swap only changes the storage call.
+- **AR3 — No single store abstraction.** `Dashboard` vs `CanvasDashboard` and `SavedChart` (×2) are duplicated
+  and **incompatible**; persistence is smeared across route bodies + two localStorage conventions. **Adjustment:
+  add a pre-Postgres task** — reconcile to one canonical `Dashboard`/`Chart` type (`id, orgId, owner,
+  createdAt, updatedAt` on every entity) behind a thin repository interface (`list/get/upsert/delete(session,…)`);
+  WS-G then swaps only the implementation.
+- **AR4 — localStorage-as-source-of-truth is incompatible with server org-scoping** (H4). They are one decision.
+  **Adjustment: flip source-of-truth to the server in the same change that adds owner-scoping** (merge the
+  relevant part of Phase 1.7 into the AUTH/DATA phase); localStorage becomes a render cache only.
+- **AR5 — Choke points** `lib/auditLog.ts` and `lib/cache.ts` had no owner; `lib/apiAuth.ts` is the model
+  (self-declared stable contract). **Adjustment:** assign explicit owners; **fuse WS-DATA into the AUTH phase**
+  (owner-scoping is meaningless without the session); E/F/H build only on the frozen contract.
+
+Also confirmed still-true and not yet fixed: `middleware.ts` fail-open `catch{}` must not return (fail closed);
+`app/api/query` uses bare `requireAuth` not `query:run`; dashboards writes don't enforce `dashboard:write`/`chart:write`
+(H2); `retentionPolicy.ts` still targets the wrong keys (H7).
+
 ## 8. [A] Second-Pass Meta-Review — verification & report corrections
 
 A dedicated meta-reviewer re-checked this report against the cited code.

@@ -1,50 +1,56 @@
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
-import { NextResponse } from 'next/server'
+import { NextResponse, type NextRequest } from 'next/server'
+import { SESSION_COOKIE_NAME, verifySessionEdge } from '@/lib/session'
 
-const isPublicRoute = createRouteMatcher([
-  '/sign-in(.*)',
-  '/sign-up(.*)',
-  '/suspended(.*)',
-  '/privacy(.*)',
-  '/api/billing/webhook(.*)',
-  '/api/privacy/request(.*)',
-])
+/**
+ * Local-session middleware (Clerk-free).
+ *
+ * - Public routes are always allowed.
+ * - For /api/* protected routes: return 401 JSON when there is no valid session.
+ * - For app pages: redirect unauthenticated users to /sign-in (with ?redirect).
+ *
+ * NOTE: This is a coarse authentication gate only. Per-route PERMISSION checks
+ * (403) stay in the route handlers via requireAuthWithPermission — do NOT add
+ * permission logic here.
+ */
 
-export default clerkMiddleware(async (auth, req) => {
-  if (!isPublicRoute(req)) {
-    await auth.protect()
-  }
+const PUBLIC_ROUTES = [
+  '/sign-in',
+  '/sign-up',
+  '/privacy',
+  '/api/auth/login',
+  '/api/auth/logout',
+  '/api/privacy/request',
+]
 
-  // ── License check ─────────────────────────────────────────────────────────
-  // Only run for page routes (not API), after auth check.
-  // We catch all errors so a missing/malformed licenses.json never hard-blocks
-  // access — fail open for resilience.
+function isPublic(pathname: string): boolean {
+  return PUBLIC_ROUTES.some(
+    (route) => pathname === route || pathname.startsWith(route + '/')
+  )
+}
+
+export default async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
-  if (!isPublicRoute(req) && !pathname.startsWith('/api/')) {
-    try {
-      const licenseCheckUrl = new URL('/api/billing/licenses/status', req.url)
-      const res = await fetch(licenseCheckUrl.toString(), {
-        headers: { 'x-internal-license-check': '1' },
-      })
-      if (res.ok) {
-        const { hasActive, hasGrace } = await res.json() as {
-          hasActive: boolean
-          hasGrace: boolean
-        }
-        if (!hasActive && !hasGrace) {
-          return NextResponse.redirect(new URL('/suspended', req.url))
-        }
-        if (!hasActive && hasGrace) {
-          const response = NextResponse.next()
-          response.headers.set('X-License-Warning', 'grace_period')
-          return response
-        }
-      }
-    } catch {
-      // Fail open — don't block users if license check errors
-    }
+
+  if (isPublic(pathname)) {
+    return NextResponse.next()
   }
-})
+
+  const cookieValue = req.cookies.get(SESSION_COOKIE_NAME)?.value
+  const session = await verifySessionEdge(cookieValue)
+
+  if (session) {
+    return NextResponse.next()
+  }
+
+  // No valid session.
+  if (pathname.startsWith('/api/')) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const signInUrl = new URL('/sign-in', req.url)
+  signInUrl.searchParams.set('redirect', pathname)
+  return NextResponse.redirect(signInUrl)
+}
 
 export const config = {
   matcher: ['/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)', '/(api|trpc)(.*)'],

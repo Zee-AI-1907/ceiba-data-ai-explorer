@@ -1,7 +1,6 @@
 import type { Metadata } from 'next'
 import { Inter } from 'next/font/google'
 import '../styles/globals.css'
-import { ClerkProvider } from '@clerk/nextjs'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import MobileNav from '@/components/MobileNav'
 import CookieConsent from '@/components/CookieConsent'
@@ -26,18 +25,16 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <ClerkProvider>
-      <html lang="en">
-        <body className={`${inter.className} bg-[#0b0b0c] text-[#e8e8ea] antialiased`}>
-          {/* G-003: enforce retention on every page load */}
-          <RetentionEnforcer />
-          <ErrorBoundary>
-            {children}
-          </ErrorBoundary>
-          <MobileNav />
-          <CookieConsent />
-        </body>
-      </html>
-    </ClerkProvider>
+    <html lang="en">
+      <body className={`${inter.className} bg-[#0b0b0c] text-[#e8e8ea] antialiased`}>
+        {/* G-003: enforce retention on every page load */}
+        <RetentionEnforcer />
+        <ErrorBoundary>
+          {children}
+        </ErrorBoundary>
+        <MobileNav />
+        <CookieConsent />
+      </body>
+    </html>
   )
 }

@@ -1,10 +1,10 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
-import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle, LogOut, CreditCard } from 'lucide-react'
+import { useRouter } from 'next/navigation'
+import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle, LogOut } from 'lucide-react'
 import { clsx } from 'clsx'
-import { useUser, useClerk } from '@clerk/nextjs'
 import {
   AppNotification,
   getNotifications,
@@ -14,11 +14,14 @@ import {
   clearAll,
 } from '@/lib/notificationStore'
 
-type ActivePage = 'dashboards' | 'charts' | 'datasets' | 'sql' | 'alerts' | 'reports' | 'audit' | 'billing'
+type ActivePage = 'dashboards' | 'charts' | 'datasets' | 'sql' | 'alerts' | 'reports' | 'audit'
 
 interface DataNavProps {
   activePage: ActivePage
-  /** Show the admin-only Audit Log link. Defaults to false. */
+  /**
+   * Show admin-only links (Audit Log). Optional — if omitted, DataNav derives
+   * admin status from the current session via /api/auth/me.
+   */
   isAdmin?: boolean
 }
 
@@ -30,7 +33,6 @@ const navLinks: { key: ActivePage; label: string; href: string; hasDrop?: boolea
   { key: 'alerts',     label: 'Alerts',     href: '/alerts' },
   { key: 'reports',    label: 'Reports',    href: '/reports' },
   { key: 'audit',      label: 'Audit Log',  href: '/audit',    adminOnly: true },
-  { key: 'billing',    label: 'Billing',    href: '/billing',  adminOnly: true, icon: CreditCard },
 ]
 
 function timeAgo(iso: string): string {
@@ -65,17 +67,28 @@ const roleColor: Record<string, string> = {
   analyst: '#4c8dff',
 }
 
-export default function DataNav({ activePage, isAdmin = false }: DataNavProps) {
+type SessionUser = {
+  id: string
+  email: string
+  role: string
+  orgId: string
+  name: string
+}
+
+export default function DataNav({ activePage, isAdmin }: DataNavProps) {
+  const router = useRouter()
   const [sqlOpen, setSqlOpen] = useState(false)
   const [notifOpen, setNotifOpen] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [notifications, setNotifications] = useState<AppNotification[]>([])
   const [unread, setUnread] = useState(0)
-  const { user } = useUser()
-  const { signOut } = useClerk()
-  const userName = user?.fullName ?? user?.firstName ?? ''
-  const userRole = (user?.publicMetadata as Record<string, string>)?.role ?? 'analyst'
+  const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
+
+  const userName = sessionUser?.name ?? ''
+  const userRole = sessionUser?.role ?? 'analyst'
   const avatarColor = roleColor[userRole] ?? '#6c6c74'
+  // If isAdmin is passed explicitly, honour it; otherwise derive from session.
+  const showAdmin = isAdmin ?? (sessionUser?.role === 'admin')
 
   const refreshNotifications = useCallback(() => {
     setNotifications(getNotifications())
@@ -85,6 +98,29 @@ export default function DataNav({ activePage, isAdmin = false }: DataNavProps) {
   useEffect(() => {
     refreshNotifications()
   }, [refreshNotifications])
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/auth/me')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { user: SessionUser } | null) => {
+        if (!cancelled && data?.user) setSessionUser(data.user)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function handleSignOut() {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // ignore — clear client state regardless
+    }
+    router.push('/sign-in')
+    router.refresh()
+  }
 
   function handleMarkRead(id: string) {
     markAsRead(id)
@@ -120,7 +156,7 @@ export default function DataNav({ activePage, isAdmin = false }: DataNavProps) {
 
         {/* Nav links - hidden on mobile */}
         <div className="hidden md:flex items-stretch flex-1">
-          {navLinks.filter((link) => !link.adminOnly || isAdmin).map((link) => {
+          {navLinks.filter((link) => !link.adminOnly || showAdmin).map((link) => {
             const isActive = activePage === link.key
 
             if (link.hasDrop) {
@@ -239,7 +275,7 @@ export default function DataNav({ activePage, isAdmin = false }: DataNavProps) {
               </div>
               <span className="text-[12px] text-[#a0a0a7] max-w-[100px] truncate">{userName}</span>
               <button
-                onClick={() => signOut({ redirectUrl: '/sign-in' })}
+                onClick={handleSignOut}
                 title="Sign out"
                 className="w-6 h-6 rounded-[6px] flex items-center justify-center text-[#44444b] hover:text-[#ff5c6c] hover:bg-[#ff5c6c10] transition-all"
               >
@@ -255,7 +291,7 @@ export default function DataNav({ activePage, isAdmin = false }: DataNavProps) {
            the viewport top regardless of the page's positioned ancestors. */}
       {mobileMenuOpen && (
         <div className="md:hidden fixed top-11 left-0 right-0 bg-[#111114] border-b border-[#2a2a31] shadow-xl z-50">
-          {navLinks.filter((link) => !link.adminOnly || isAdmin).map((link) => (
+          {navLinks.filter((link) => !link.adminOnly || showAdmin).map((link) => (
             <Link
               key={link.key}
               href={link.href}
