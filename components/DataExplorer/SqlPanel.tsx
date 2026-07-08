@@ -14,7 +14,7 @@ import {
   FileDown,
   Sheet,
 } from 'lucide-react'
-import * as XLSX from 'xlsx'
+import writeXlsxFile from 'write-excel-file/browser'
 import { clsx } from 'clsx'
 import { SqlHighlight } from './SqlHighlight'
 import { NarrativePanel, NarrativeResult } from './NarrativePanel'
@@ -394,19 +394,36 @@ function exportCSV(results: { columns: Column[]; rows: Row[] }) {
   triggerDownload(csv, 'ceiba-results.csv', 'text/csv;charset=utf-8;')
 }
 
-function exportExcel(results: { columns: Column[]; rows: Row[] }) {
-  // Build worksheet data: first row = headers, then data rows
-  const wsData = [
-    results.columns.map((c) => c.label),
-    ...results.rows.map((row) =>
-      results.columns.map((c) => (row[c.key] == null ? '' : row[c.key]))
-    ),
-  ]
-  const ws = XLSX.utils.aoa_to_sheet(wsData)
-  const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, 'Results')
-  // Write and trigger download as .xlsx
-  XLSX.writeFile(wb, 'ceiba-results.xlsx')
+async function exportExcel(results: { columns: Column[]; rows: Row[] }) {
+  // Build a 2D array of cell objects for write-excel-file (browser-safe,
+  // no Node/fs dependency). First row = bold headers, then data rows.
+  // Numeric values are emitted as Number cells; everything else as String.
+  const headerRow = results.columns.map((column) => ({
+    value: column.label,
+    type: String,
+    fontWeight: 'bold' as const,
+  }))
+
+  const dataRows = results.rows.map((row) =>
+    results.columns.map((column) => {
+      const rawValue = row[column.key]
+      if (rawValue == null) {
+        return { value: '', type: String }
+      }
+      if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+        return { value: rawValue, type: Number }
+      }
+      return { value: String(rawValue), type: String }
+    })
+  )
+
+  const worksheetData = [headerRow, ...dataRows]
+
+  // The browser build returns { toBlob, toFile }; toFile() builds the .xlsx
+  // Blob and triggers a client-side download (no Node/fs dependency).
+  await writeXlsxFile(worksheetData, { sheet: 'Results' }).toFile(
+    'ceiba-results.xlsx'
+  )
 }
 
 function triggerDownload(content: string, filename: string, mimeType: string) {

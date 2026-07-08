@@ -14,24 +14,26 @@ async function requireAdmin() {
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const denied = await requireAdmin()
   if (denied) return denied
 
-  const license = getLicense(params.id)
+  const { id } = await params
+  const license = getLicense(id)
   if (!license) return NextResponse.json({ error: 'Not found' }, { status: 404 })
   return NextResponse.json(license)
 }
 
 export async function PATCH(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   const denied = await requireAdmin()
   if (denied) return denied
 
-  const license = getLicense(params.id)
+  const { id } = await params
+  const license = getLicense(id)
   if (!license) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const updates = await req.json()
@@ -39,6 +41,6 @@ export async function PATCH(
   delete updates.id
   delete updates.createdAt
 
-  const updated = updateLicense(params.id, updates)
+  const updated = updateLicense(id, updates)
   return NextResponse.json(updated)
 }
