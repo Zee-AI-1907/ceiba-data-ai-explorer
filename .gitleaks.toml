@@ -1,0 +1,46 @@
+# Gitleaks configuration for ceiba-data-ai-explorer
+# Docs: https://github.com/gitleaks/gitleaks
+#
+# `extend.useDefault = true` pulls in the full set of Gitleaks built-in rules
+# (OpenAI, Stripe, AWS, Clerk, GitHub, private keys, JWTs, generic API keys,
+# etc.), so we only declare an allowlist for known-safe placeholders and docs
+# that intentionally describe (redacted) findings.
+#
+# Run locally:   gitleaks detect --config .gitleaks.toml --redact
+# Run on a diff: gitleaks protect --staged --config .gitleaks.toml --redact
+
+title = "ceiba-data-ai-explorer gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allowlist for template placeholders and intentionally-redacted docs"
+
+# Files that are templates or post-redaction remediation docs. These contain
+# placeholder values or "<REDACTED — ...>" markers, never live secrets.
+paths = [
+  '''\.env\.example$''',
+  '''\.gitleaks\.toml$''',
+  '''SECRET_ROTATION\.md$''',
+]
+
+# Placeholder token shapes used in .env.example and redaction markers. If any of
+# these substrings appear in a match, it is not a real leak.
+regexes = [
+  '''your_[a-z_]*_here''',
+  '''sk-proj-your_openai_api_key_here''',
+  '''pk_test_your_clerk_publishable_key_here''',
+  '''sk_test_your_clerk_secret_key_here''',
+  '''sk_test_your_stripe_secret_key_here''',
+  '''whsec_your_stripe_webhook_signing_secret_here''',
+  '''<REDACTED[^>]*>''',
+]
+
+# Stopwords / example tokens that should never be treated as findings.
+stopwords = [
+  "example",
+  "placeholder",
+  "your_",
+  "redacted",
+]

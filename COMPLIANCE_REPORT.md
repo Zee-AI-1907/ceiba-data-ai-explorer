@@ -251,14 +251,14 @@ logAuditEvent({
 ```typescript
 const USERS = [
   { id: '1', name: 'Dr. Afsin Alp', email: 'afsin@ceiba.com', role: 'admin',
-    password: bcrypt.hashSync('ceiba2026', 10) },
+    password: bcrypt.hashSync('<REDACTED — RETIRED 2026-07-08, see SECRET_ROTATION.md>', 10) },
   { id: '2', name: 'Ege Apak', email: 'ege@ceiba.com', role: 'analyst',
-    password: bcrypt.hashSync('ceiba2026', 10) },
+    password: bcrypt.hashSync('<REDACTED — RETIRED 2026-07-08, see SECRET_ROTATION.md>', 10) },
   { id: '3', name: 'Clinical Lead', email: 'clinical@ceiba.com', role: 'clinician',
-    password: bcrypt.hashSync('ceiba2026', 10) },
+    password: bcrypt.hashSync('<REDACTED — RETIRED 2026-07-08, see SECRET_ROTATION.md>', 10) },
 ]
 ```
-All users share the same password `ceiba2026` hardcoded in the application source. While bcrypt hashing is applied, the plaintext is in the source tree. Anyone with code access knows the credentials.  
+All users share the same password (`<REDACTED — RETIRED 2026-07-08, see SECRET_ROTATION.md>`) hardcoded in the application source. While bcrypt hashing is applied, the plaintext is in the source tree. Anyone with code access knows the credentials.  
 **Risk:** Credential stuffing, insider threat, compromised developer laptop = full platform access. All three users have the same password (no individual accountability). No password expiry, no account lockout policy.  
 **Fix:** Move user management to a database (PostgreSQL/SQLite). Implement individual passwords with bcrypt, account lockout after N failures, password expiry, and password complexity requirements. Consider integrating with an identity provider (Azure AD, Okta, Auth0).
 
@@ -337,8 +337,8 @@ There is no monitoring for unusual query patterns such as: bulk data export (SEL
 **File:** `.env.local`  
 **Finding:**  
 ```
-OPENAI_API_KEY=sk-proj-orw1py7DIUFAhtvyuJUPDyRxzE82PsFbDXyGSR6B7yP1Fdbp_...
-NEXTAUTH_SECRET=Os/+nL0tN9mYc2MtGmj34rR518NSolwY5AP49HBsY50=
+OPENAI_API_KEY=<REDACTED — ROTATE, see SECRET_ROTATION.md (2026-07-08)>
+NEXTAUTH_SECRET=<REDACTED — ROTATE, see SECRET_ROTATION.md (2026-07-08)>
 ```
 Real API keys are in a plaintext file. While `.env.local` is in `.gitignore`, there is no secrets management system, no key rotation policy, and no audit trail for secret access.  
 **Risk:** Developer laptop compromise, accidental git commit, or CI/CD exposure would leak keys enabling unauthorized OpenAI API usage and NEXTAUTH forged JWTs.  
@@ -869,7 +869,7 @@ No security training requirements, no secure coding standards documentation, no 
 
 ### A.2 — Technologies Requiring Immediate Action
 
-1. **OpenAI API Key** (`sk-proj-orw1py7...`): **ROTATE IMMEDIATELY** — visible in audit
+1. **OpenAI API Key** (`<REDACTED — ROTATE, see SECRET_ROTATION.md>`): **ROTATE IMMEDIATELY** — was committed to git history
 2. **NEXTAUTH_SECRET**: Rotate as part of key rotation
 3. **MFA secret (`123456`)**: Remove hardcoded value, implement real TOTP
 

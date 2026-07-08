@@ -8,12 +8,17 @@ node_modules/
 out/
 build/
 
-# Environment
+# Environment — never commit real secrets.
+# Ignore ALL .env variants, then explicitly allow the committed template.
 .env
+.env.*
+!.env.example
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+.env.production
+.env.staging
 
 # Misc
 .DS_Store
@@ -32,3 +37,11 @@ logs/privacy-requests.log
 
 # License/billing data (contains customer PII — never commit)
 data/
+
+# Persistent app state (PHI — dashboards, saved queries — never commit)
+.data/
+
+# QA / audit report outputs (may embed PHI or secrets — never commit)
+# Keep the directory itself via a tracked .gitkeep.
+.qa-reports/
+!.qa-reports/.gitkeep
