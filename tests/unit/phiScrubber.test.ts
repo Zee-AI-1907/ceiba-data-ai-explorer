@@ -118,6 +118,61 @@ describe('scrubPHI — stable tokenisation within a single call', () => {
   })
 })
 
+describe('scrubPHI — reentrancy / no shared module state (H21)', () => {
+  // H21: previously a module-global `_letterIndex` was reset+advanced by every
+  // call. Two overlapping scrubs aliased each other's tokens. The counter is now
+  // local to each call, so interleaved calls must not affect one another.
+
+  it('produces identical output whether calls run sequentially or interleaved', () => {
+    // Only a firstName column carries names here, so the per-call letter counter
+    // advances once per distinct firstName (no interference from other name cols).
+    const nameOnlyColumns = [{ key: 'firstName', label: 'First Name' }]
+    const rowsA = [{ firstName: 'Amelia' }, { firstName: 'Aaron' }]
+    const rowsB = [{ firstName: 'Bianca' }, { firstName: 'Boris' }]
+
+    // Baseline: each scrub in isolation.
+    const baselineA = scrubPHI(rowsA, nameOnlyColumns).scrubbedRows.map((r) => r.firstName)
+    const baselineB = scrubPHI(rowsB, nameOnlyColumns).scrubbedRows.map((r) => r.firstName)
+
+    // Both start at Patient-A because state is per-call, not shared/global.
+    expect(baselineA).toEqual(['Patient-A', 'Patient-B'])
+    expect(baselineB).toEqual(['Patient-A', 'Patient-B'])
+
+    // Interleave: start A, then run B fully, then continue reading A's result.
+    // If any module-global counter existed, B's run would have advanced it and
+    // corrupted A's tokens. With per-call state, A is unaffected by B.
+    const resultA = scrubPHI(rowsA, nameOnlyColumns)
+    const resultBInner = scrubPHI(rowsB, nameOnlyColumns)
+    const resultAContinued = scrubPHI(rowsA, nameOnlyColumns)
+
+    expect(resultA.scrubbedRows.map((r) => r.firstName)).toEqual(baselineA)
+    expect(resultBInner.scrubbedRows.map((r) => r.firstName)).toEqual(baselineB)
+    expect(resultAContinued.scrubbedRows.map((r) => r.firstName)).toEqual(baselineA)
+  })
+
+  it('is reentrant under many concurrent async invocations (no cross-talk)', async () => {
+    // Simulate concurrent requests. Each promise scrubs its own distinct set of
+    // names; every call must independently start at Patient-A and stay stable.
+    const nameOnlyColumns = [{ key: 'firstName', label: 'First Name' }]
+    const jobs = Array.from({ length: 25 }, (_unused, callIndex) =>
+      Promise.resolve().then(() => {
+        const rows = [
+          { firstName: `Name-${callIndex}-0` },
+          { firstName: `Name-${callIndex}-1` },
+          { firstName: `Name-${callIndex}-2` },
+        ]
+        return scrubPHI(rows, nameOnlyColumns).scrubbedRows.map((r) => r.firstName)
+      })
+    )
+
+    const results = await Promise.all(jobs)
+    for (const tokens of results) {
+      // Three distinct names in each call → A, B, C every time, deterministically.
+      expect(tokens).toEqual(['Patient-A', 'Patient-B', 'Patient-C'])
+    }
+  })
+})
+
 describe('scrubPHI — national ID columns and in-allowlist ID-pattern detection', () => {
   it('redacts a nationalId-labelled column via the dedicated branch', () => {
     const columnsWithNationalId = [...COLUMNS, { key: 'nationalId', label: 'National ID' }]

@@ -1,6 +1,17 @@
 // Simple in-memory LRU cache for LLM responses
 // Survives across requests in the same Next.js server process
-// Key insight: same SQL request = zero LLM tokens spent
+// Key insight: same request (same tenant) = zero LLM tokens spent
+//
+// N4 (cross-tenant AI cache leak): cache keys MUST be derived with
+// `tenantCacheKey(session, ...)` (lib/cacheKey.ts), which prefixes the
+// server-verified `session.orgId` and hashes the variable parts with SHA-256.
+// The old djb2 `hashKey` had NO tenant component and a forgeable 32-bit space,
+// so two tenants issuing the same NL string collided on one entry — Tenant B
+// could read Tenant A's PHI-derived AI output, and a cache hit bypassed the LLM
+// scope check. `hashKey` is intentionally removed; `tenantCacheKey` is re-exported
+// here so route handlers import their cache + key helper from one place.
+
+export { tenantCacheKey } from '@/lib/cacheKey'
 
 type CacheEntry<T> = { value: T; expiresAt: number }
 
@@ -37,14 +48,3 @@ class LRUCache<T> {
 // Singleton caches (persist across requests in same process)
 export const sqlCache = new LRUCache<{ sql: string; description: string }>(300)
 export const chartCache = new LRUCache<Record<string, unknown>>(500)
-
-export function hashKey(...parts: string[]): string {
-  // Simple djb2-style hash — no crypto needed for cache keys
-  let h = 5381
-  const str = parts.join('|')
-  for (let i = 0; i < str.length; i++) {
-    h = ((h << 5) + h) ^ str.charCodeAt(i)
-    h = h >>> 0 // keep unsigned 32-bit
-  }
-  return h.toString(36)
-}
