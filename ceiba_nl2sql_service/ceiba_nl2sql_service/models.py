@@ -77,6 +77,10 @@ class UsageModel(BaseModel):
     estimatedCostUsd: float
     latencyMs: int
     priced: bool = True
+    # Prompt-prefix cache hits (subset of promptTokens, billed at the
+    # provider's discounted cached-input rate). Additive field — 0 when the
+    # provider reports no cache detail.
+    cachedPromptTokens: int = 0
 
 
 class GenerateResponse(BaseModel):

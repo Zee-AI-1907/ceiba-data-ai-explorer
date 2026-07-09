@@ -67,17 +67,24 @@ class TokenUsage:
     """Per-call token counts. Mirrors OpenAI's `usage` object. All fields
     default to 0 so a client that cannot report usage (or a stub that chooses
     not to) still yields a well-formed, summable value.
+
+    `cached_prompt_tokens` is the prompt-prefix cache-hit portion
+    (`usage.prompt_tokens_details.cached_tokens`) — a SUBSET of
+    `prompt_tokens` billed at the provider's discounted cached-input rate.
+    Metered so prompt-caching gains are measurable, not guessed.
     """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_prompt_tokens: int = 0
 
     def __add__(self, other: "TokenUsage") -> "TokenUsage":
         return TokenUsage(
             prompt_tokens=self.prompt_tokens + other.prompt_tokens,
             completion_tokens=self.completion_tokens + other.completion_tokens,
             total_tokens=self.total_tokens + other.total_tokens,
+            cached_prompt_tokens=self.cached_prompt_tokens + other.cached_prompt_tokens,
         )
 
 
@@ -253,10 +260,15 @@ class OpenAiLlmClient:
             raise LlmUpstreamError("The driving language model returned an empty completion.")
 
         usage_obj = getattr(response, "usage", None)
+        # prompt_tokens_details.cached_tokens = the prompt-prefix cache-hit
+        # portion, billed at the discounted cached-input rate. Absent on older
+        # models/SDKs -> 0.
+        prompt_details = getattr(usage_obj, "prompt_tokens_details", None)
         usage = TokenUsage(
             prompt_tokens=getattr(usage_obj, "prompt_tokens", 0) or 0,
             completion_tokens=getattr(usage_obj, "completion_tokens", 0) or 0,
             total_tokens=getattr(usage_obj, "total_tokens", 0) or 0,
+            cached_prompt_tokens=getattr(prompt_details, "cached_tokens", 0) or 0,
         )
         # OpenAI echoes the resolved model (e.g. a dated snapshot) — record it
         # verbatim so cost pricing + audit reflect exactly what ran.

@@ -127,6 +127,10 @@ class UsageSummary:
     estimated_cost_usd: float
     latency_ms: int
     priced: bool = True
+    # Prompt-prefix cache hits (subset of prompt_tokens, billed at the
+    # provider's discounted cached-input rate). Additive — 0 when the
+    # provider reports no cache detail.
+    cached_prompt_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -406,7 +410,12 @@ async def generate_sql(
 
     def _build_usage() -> UsageSummary:
         latency_ms = int((time.monotonic_ns() - start_ns) / 1_000_000)
-        estimate = estimate_cost_usd(metering_model, total_usage.prompt_tokens, total_usage.completion_tokens)
+        estimate = estimate_cost_usd(
+            metering_model,
+            total_usage.prompt_tokens,
+            total_usage.completion_tokens,
+            cached_prompt_tokens=total_usage.cached_prompt_tokens,
+        )
         return UsageSummary(
             model=metering_model,
             prompt_tokens=total_usage.prompt_tokens,
@@ -416,6 +425,7 @@ async def generate_sql(
             estimated_cost_usd=estimate.estimated_cost_usd,
             latency_ms=latency_ms,
             priced=estimate.priced,
+            cached_prompt_tokens=total_usage.cached_prompt_tokens,
         )
 
     retrieve_options = RetrieveOptions(

@@ -46,6 +46,16 @@ DEFAULT_MODEL_PRICES: dict[str, dict[str, float]] = {
     "gpt-4.1-mini": {"input": 0.40, "output": 1.60},
     "gpt-4.1": {"input": 2.00, "output": 8.00},
     "gpt-4.1-nano": {"input": 0.10, "output": 0.40},
+    # gpt-5.x — the models the staging benchmarks actually run
+    # (docs/research/BENCHMARK_FINDINGS.md). Without these entries every
+    # benchmarked query reported priced=False / cost $0. `cached_input` is the
+    # discounted rate OpenAI bills for prompt-prefix cache hits (10% of input
+    # across the gpt-5 family); used when the usage reports cached tokens.
+    # List prices verified 2026-07 at developers.openai.com/api/docs/pricing.
+    "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "output": 30.00},
+    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
+    "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
 }
 
 _PER_MILLION = 1_000_000.0
@@ -84,10 +94,13 @@ def _env_price_overrides() -> dict[str, dict[str, float]]:
         if not isinstance(entry, dict):
             continue
         try:
-            cleaned[str(model)] = {
+            cleaned_entry = {
                 "input": float(entry.get("input", 0.0)),
                 "output": float(entry.get("output", 0.0)),
             }
+            if "cached_input" in entry:
+                cleaned_entry["cached_input"] = float(entry["cached_input"])
+            cleaned[str(model)] = cleaned_entry
         except (TypeError, ValueError):
             continue
     return cleaned
@@ -109,14 +122,22 @@ def estimate_cost_usd(
     prompt_tokens: int,
     completion_tokens: int,
     *,
+    cached_prompt_tokens: int = 0,
     prices: dict[str, dict[str, float]] | None = None,
 ) -> CostEstimate:
     """Estimate the USD cost of a set of prompt+completion tokens for `model`.
 
-    cost = prompt_tokens / 1e6 * input_price + completion_tokens / 1e6 * output_price
+    cost = (prompt_tokens - cached) / 1e6 * input_price
+         + cached / 1e6 * cached_input_price   (falls back to input_price when
+                                                the model has no cached rate)
+         + completion_tokens / 1e6 * output_price
 
-    Returns a `CostEstimate`; `priced=False` (and cost 0.0) when the model is
-    not in the table — we never fabricate a price.
+    `cached_prompt_tokens` is the prompt-prefix cache-hit portion OpenAI
+    reports in `usage.prompt_tokens_details.cached_tokens` — a SUBSET of
+    `prompt_tokens`, billed at the discounted `cached_input` rate. Clamped
+    into [0, prompt_tokens] so a malformed usage can't produce a negative
+    cost. Returns a `CostEstimate`; `priced=False` (and cost 0.0) when the
+    model is not in the table — we never fabricate a price.
     """
     table = resolve_prices(prices)
     entry = table.get(model)
@@ -133,7 +154,14 @@ def estimate_cost_usd(
         return CostEstimate(model=model, estimated_cost_usd=0.0, priced=False)
     input_price = entry.get("input", 0.0)
     output_price = entry.get("output", 0.0)
-    cost = (prompt_tokens / _PER_MILLION) * input_price + (completion_tokens / _PER_MILLION) * output_price
+    cached_price = entry.get("cached_input", input_price)
+    cached = min(max(cached_prompt_tokens, 0), max(prompt_tokens, 0))
+    uncached = max(prompt_tokens, 0) - cached
+    cost = (
+        (uncached / _PER_MILLION) * input_price
+        + (cached / _PER_MILLION) * cached_price
+        + (completion_tokens / _PER_MILLION) * output_price
+    )
     # Round to 6 dp: per-query costs are fractions of a cent; 6 dp keeps
     # sub-cent precision without float-noise digits leaking into logs/JSON.
     return CostEstimate(model=model, estimated_cost_usd=round(cost, 6), priced=True)

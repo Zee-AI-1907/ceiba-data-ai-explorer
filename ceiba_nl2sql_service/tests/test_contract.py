@@ -40,6 +40,7 @@ _USAGE_KEYS = {
     "estimatedCostUsd",
     "latencyMs",
     "priced",
+    "cachedPromptTokens",
 }
 _EXECUTE_KEYS = {"columns", "rows", "rowCount", "truncated"}
 _COLUMN_KEYS = {"name", "type"}

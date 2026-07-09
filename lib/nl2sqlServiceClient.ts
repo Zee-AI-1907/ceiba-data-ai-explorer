@@ -62,6 +62,12 @@ export interface Nl2sqlUsage {
    * with an older service that predates the field (defaults to unknown).
    */
   priced?: boolean
+  /**
+   * Prompt-prefix cache hits (subset of promptTokens, billed at the provider's
+   * discounted cached-input rate). Optional for backward-compat with an older
+   * service that predates the field.
+   */
+  cachedPromptTokens?: number
 }
 
 /** The /nl2sql/generate success body (mirrors SqlGenerateResponse + usage). */

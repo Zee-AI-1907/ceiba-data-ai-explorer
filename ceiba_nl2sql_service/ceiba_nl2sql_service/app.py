@@ -129,6 +129,7 @@ def _usage_model(usage) -> UsageModel | None:
         estimatedCostUsd=usage.estimated_cost_usd,
         latencyMs=usage.latency_ms,
         priced=usage.priced,
+        cachedPromptTokens=getattr(usage, "cached_prompt_tokens", 0),
     )
 
 

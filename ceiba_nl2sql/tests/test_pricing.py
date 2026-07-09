@@ -60,6 +60,52 @@ def test_longest_prefix_wins_over_shorter_family():
     assert r.estimated_cost_usd == 0.15  # mini price, not the 2.50 gpt-4o price
 
 
+def test_gpt5_benchmark_models_are_priced():
+    """Regression: the staging benchmarks run gpt-5.4-mini / gpt-5.4-nano
+    (docs/research/BENCHMARK_FINDINGS.md), which had NO price entry — every
+    benchmarked query reported priced=False / cost $0. Dated snapshots must
+    price via the longest-prefix family fallback too.
+    """
+    for model in ("gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4", "gpt-5.5", "gpt-5.4-mini-2026-05-01"):
+        result = estimate_cost_usd(model, 1_000_000, 100_000)
+        assert result.priced is True, model
+        assert result.estimated_cost_usd > 0.0, model
+    # Longest prefix: a dated gpt-5.4-mini snapshot uses the mini price,
+    # not the more expensive bare gpt-5.4 family price.
+    dated_mini = estimate_cost_usd("gpt-5.4-mini-2026-05-01", 1_000_000, 0)
+    assert dated_mini.estimated_cost_usd == pytest.approx(DEFAULT_MODEL_PRICES["gpt-5.4-mini"]["input"])
+
+
+def test_cached_prompt_tokens_billed_at_cached_rate():
+    prices = {"cache-model": {"input": 1.0, "cached_input": 0.1, "output": 2.0}}
+    # 1M prompt tokens, 400k of them cache hits: 600k @ $1 + 400k @ $0.1 = $0.64.
+    result = estimate_cost_usd("cache-model", 1_000_000, 0, cached_prompt_tokens=400_000, prices=prices)
+    assert result.estimated_cost_usd == pytest.approx(0.64)
+
+
+def test_cached_tokens_fall_back_to_input_price_when_no_cached_rate():
+    prices = {"no-cache-rate": {"input": 1.0, "output": 2.0}}
+    with_cache = estimate_cost_usd("no-cache-rate", 1_000_000, 0, cached_prompt_tokens=400_000, prices=prices)
+    without_cache = estimate_cost_usd("no-cache-rate", 1_000_000, 0, prices=prices)
+    assert with_cache.estimated_cost_usd == without_cache.estimated_cost_usd
+
+
+def test_cached_tokens_clamped_to_prompt_tokens():
+    prices = {"cache-model": {"input": 1.0, "cached_input": 0.1, "output": 2.0}}
+    # A malformed usage reporting MORE cached than prompt tokens must clamp,
+    # never produce a negative uncached count / negative cost.
+    result = estimate_cost_usd("cache-model", 100_000, 0, cached_prompt_tokens=1_000_000, prices=prices)
+    assert result.estimated_cost_usd == pytest.approx(0.01)  # all 100k at cached rate
+
+
+def test_env_override_preserves_cached_input_rate(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        MODEL_PRICES_ENV, '{"gpt-5.4-mini": {"input": 1.0, "cached_input": 0.5, "output": 2.0}}'
+    )
+    result = estimate_cost_usd("gpt-5.4-mini", 1_000_000, 0, cached_prompt_tokens=1_000_000)
+    assert result.estimated_cost_usd == pytest.approx(0.5)
+
+
 def test_env_price_override_merges_over_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv(MODEL_PRICES_ENV, '{"gpt-4o-mini": {"input": 10.0, "output": 20.0}}')
     # gpt-4o-mini overridden...
