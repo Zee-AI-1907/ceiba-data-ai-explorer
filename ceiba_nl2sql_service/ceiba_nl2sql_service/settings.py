@@ -75,6 +75,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("NL2SQL_STATIC_CONTEXT_MAX_TOKENS", "nl2sql_static_context_max_tokens"),
     )
 
+    # R5 semantic question cache (OPTIONAL, off by default): embedding-
+    # similarity paraphrase cache in front of generate. Tenant-scoped, TTL'd,
+    # every hit re-EXPLAINed before serving. A wrong hit is a silent-wrong
+    # answer, hence the high default threshold and the explicit opt-in.
+    nl2sql_semantic_cache: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("NL2SQL_SEMANTIC_CACHE", "nl2sql_semantic_cache"),
+    )
+    nl2sql_semantic_cache_threshold: float = Field(
+        default=0.97,
+        validation_alias=AliasChoices("NL2SQL_SEMANTIC_CACHE_THRESHOLD", "nl2sql_semantic_cache_threshold"),
+    )
+
     # ── internal service auth (§2.1) ─────────────────────────────────────────
     nl2sql_service_token: str | None = None
 

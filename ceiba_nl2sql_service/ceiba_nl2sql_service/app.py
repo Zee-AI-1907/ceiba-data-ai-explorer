@@ -175,6 +175,34 @@ async def nl2sql_generate(payload: GenerateRequest, request: Request, state: App
         source_scope=payload.sourceScope,
     )
 
+    # ── R5 semantic paraphrase cache (opt-in) ────────────────────────────────
+    # A hit skips the entire LLM round trip. Every hit is re-EXPLAINed before
+    # serving (schema drift protection); a failed revalidation drops the entry
+    # and falls through to fresh generation. Tenant-scoped by construction.
+    cache = state.semantic_cache
+    if cache is not None:
+        try:
+            hit = await run_in_threadpool(cache.lookup, payload.question, tenant_id)
+        except Exception as exc:  # noqa: BLE001 - cache trouble must never block generation
+            logger.warning("semantic cache lookup failed: %s", exc)
+            hit = None
+        if hit is not None:
+            verdict = await run_in_threadpool(state.engine.explain, hit.sql)
+            if getattr(verdict, "ok", False):
+                logger.info(
+                    "nl2sql.generate.semantic_cache_hit correlationId=%s tenantId=%s", correlation_id, tenant_id or "-"
+                )
+                return GenerateResponse(
+                    sql=hit.sql,
+                    description=hit.description,
+                    dialect=hit.dialect,
+                    # A cached response carries no fresh retrieval trace.
+                    retrieval=RetrievalSummaryModel(tables=[], exemplarsUsed=[], cardinalityWarnings=[]),
+                    cached=True,
+                    usage=None,
+                )
+            cache.invalidate(hit.question, tenant_id)
+
     try:
         llm = state.llm_client()
         simple_llm = state.llm_client_simple()
@@ -234,6 +262,26 @@ async def nl2sql_generate(payload: GenerateRequest, request: Request, state: App
         )
 
     _log_usage(correlation_id, tenant_id, "success", response.usage)
+
+    # R5: remember the successful generation for paraphrase reuse.
+    if cache is not None and response.sql:
+        try:
+            from ceiba_nl2sql.generation.semantic_cache import CachedGeneration
+
+            await run_in_threadpool(
+                cache.store,
+                payload.question,
+                tenant_id,
+                CachedGeneration(
+                    question=payload.question,
+                    sql=response.sql,
+                    description=response.description,
+                    dialect=response.dialect,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - cache trouble must never fail a served response
+            logger.warning("semantic cache store failed: %s", exc)
+
     return GenerateResponse(
         sql=response.sql,
         description=response.description,

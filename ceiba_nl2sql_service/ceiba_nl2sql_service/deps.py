@@ -49,6 +49,8 @@ class AppState:
     _llm: LlmClient | None = None
     _llm_simple: LlmClient | None = None
     _llm_repair: LlmClient | None = None
+    # R5: optional semantic paraphrase cache (None = disabled).
+    semantic_cache: object | None = None
 
     def llm_client(self) -> LlmClient:
         if self._llm is None:
@@ -150,10 +152,21 @@ def create_app_state(settings: Settings) -> AppState:
 
     bundle_version = retriever._bundle.manifest.get("bundleVersion", "unknown") if retriever._bundle else "unknown"  # noqa: SLF001
 
+    # R5: optional semantic paraphrase cache, sharing the retriever's embedder
+    # so the similarity space matches retrieval's.
+    semantic_cache = None
+    if settings.nl2sql_semantic_cache:
+        from ceiba_nl2sql.generation.semantic_cache import SemanticSqlCache
+
+        semantic_cache = SemanticSqlCache(
+            embed_query, threshold=settings.nl2sql_semantic_cache_threshold
+        )
+
     return AppState(
         settings=settings,
         engine=engine,
         retriever=retriever,
         bundle_version=bundle_version,
         embedding_model_id=resolved_expected_model_id,
+        semantic_cache=semantic_cache,
     )
