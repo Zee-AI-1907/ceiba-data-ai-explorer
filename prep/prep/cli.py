@@ -691,7 +691,15 @@ def _run_build_pipeline_p3b(
             from prep.enrich.llm_enrich import enrich_catalog_with_llm
 
             _llm_model = os.environ.get("NL2SQL_LLM_MODEL", "gpt-4o-mini")
-            _llm = build_llm_client(api_key=os.environ.get("OPENAI_API_KEY"), model=_llm_model)
+            # use_structured_output=False: the enrichment prompt has its OWN
+            # JSON contract ({"tables": [...]}); the default R3 {sql,description}
+            # response_format would force the wrong shape and the parse would
+            # yield nothing (silent no-op enrichment).
+            _llm = build_llm_client(
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                model=_llm_model,
+                use_structured_output=False,
+            )
             _report = _asyncio.run(enrich_catalog_with_llm(catalog, _llm))
             llm_enrich_report_json = _report.to_json()
             logger.info(

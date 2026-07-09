@@ -329,11 +329,19 @@ class OpenAiLlmClient:
         return LlmCompletion(text=content, usage=usage, model=resolved_model)
 
 
-def build_llm_client(*, api_key: str | None, model: str = DEFAULT_LLM_MODEL) -> LlmClient:
+def build_llm_client(
+    *, api_key: str | None, model: str = DEFAULT_LLM_MODEL, use_structured_output: bool = True
+) -> LlmClient:
     """Constructs the real OpenAI LlmClient. Raises if no API key is
     configured — callers (deps.py) decide whether that is fatal (readyz) or
     tolerable (dark/unused paths).
+
+    `use_structured_output` defaults to True (the R3 `{sql, description}`
+    json_schema response_format that SQL generation depends on). Callers with a
+    DIFFERENT JSON contract — the P3 prep enrichment pass, whose prompt asks for
+    a `{tables: [...]}` object — MUST pass False, otherwise the model is forced
+    to answer `{sql, description}` and their own parse yields nothing.
     """
     if not api_key:
         raise LlmUpstreamError("OPENAI_API_KEY is not configured.")
-    return OpenAiLlmClient(api_key=api_key, model=model)
+    return OpenAiLlmClient(api_key=api_key, model=model, use_structured_output=use_structured_output)

@@ -102,3 +102,21 @@ async def test_non_response_format_errors_still_raise_scrubbed():
     with pytest.raises(LlmUpstreamError) as excinfo:
         await client.complete("prompt")
     assert "rate limit" not in str(excinfo.value)  # H20: raw upstream detail never surfaces
+
+
+async def test_build_llm_client_threads_structured_output_flag():
+    """P3 enrichment regression: build_llm_client must let a caller turn OFF the
+    R3 {sql,description} response_format so a different JSON contract (the
+    enrichment {tables:[...]}) is not overwritten. Default stays ON for SQL gen.
+    """
+    from ceiba_nl2sql.generation.llm import build_llm_client
+
+    default_client = build_llm_client(api_key="test-key", model="gpt-4o-mini")
+    off_client = build_llm_client(
+        api_key="test-key", model="gpt-4o-mini", use_structured_output=False
+    )
+    for client, expect in ((default_client, True), (off_client, False)):
+        fake = _FakeCompletions()
+        client._client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+        await client.complete("prompt")
+        assert ("response_format" in fake.calls[0]) is expect
