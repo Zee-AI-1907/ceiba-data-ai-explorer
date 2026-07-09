@@ -28,6 +28,10 @@ export type AuditAction =
   | 'LOGIN_FAILED'
   | 'QUERY_FAILED'
   | 'NARRATIVE_GENERATED'
+  | 'USER_CREATED'          // admin created a user (was overloaded onto LOGIN)
+  | 'ORG_SWITCH'            // user switched their active org
+  | 'MEMBERSHIP_GRANTED'    // admin granted a user a membership in the active org
+  | 'MEMBERSHIP_REVOKED'    // admin revoked a user's membership in the active org
 
 export type AuditResourceType =
   | 'patient_data'

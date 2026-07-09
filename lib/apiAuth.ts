@@ -34,6 +34,7 @@
 import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 import { hasPermission, type Permission, type Role } from '@/lib/permissions'
+import { findUserById, roleInOrg } from '@/lib/authStore'
 import {
   SESSION_COOKIE_NAME,
   verifySession,
@@ -132,8 +133,21 @@ export async function requireOrg(request?: Request): Promise<AuthResult> {
 
 /**
  * requireAuthWithPermission — Authenticate AND authorise in one call.
- * 401 if no session; 403 if the session's role lacks `permission`
- * (per lib/permissions.ts). Returns `{ session, error: null }` on success.
+ *
+ * MULTI-ORG: the effective role is re-resolved from the user's ACTIVE-org
+ * membership at check time (defence-in-depth against a stale cookie), then
+ * `hasPermission` is applied to that fresh role. This makes authorization
+ * revocation-safe: if the membership for the active org was revoked/downgraded
+ * mid-session, the old cookie can no longer ride its stale role.
+ *
+ * - No session            → 401.
+ * - Active membership gone → 401 (the session is now invalid, not merely
+ *   forbidden — the user is no longer a member of the org they are scoped to).
+ * - Role lacks permission  → 403.
+ *
+ * The single scoping key `session.orgId` (= active org) is unchanged; only the
+ * ROLE is re-derived. The returned session carries the freshly-resolved role so
+ * downstream reads current truth.
  */
 export async function requireAuthWithPermission(
   request: Request | undefined,
@@ -142,8 +156,17 @@ export async function requireAuthWithPermission(
   const { session, error } = await requireAuth(request)
   if (error) return { session: null, error }
 
-  if (!hasPermission(session.role, permission)) {
-    return forbidden(permission, session.role ?? 'unknown')
+  // Re-resolve the effective role against the live store (revocation-safe).
+  const user = findUserById(session.userId)
+  const effectiveRole: Role | null = user ? roleInOrg(user, session.orgId) : null
+  if (!user || effectiveRole === null) {
+    // Membership for the active org was revoked → treat the session as invalid.
+    return unauthorized()
   }
-  return { session, error: null }
+
+  if (!hasPermission(effectiveRole, permission)) {
+    return forbidden(permission, effectiveRole)
+  }
+  // Return the freshly-resolved role so downstream reads the current truth.
+  return { session: { ...session, role: effectiveRole }, error: null }
 }

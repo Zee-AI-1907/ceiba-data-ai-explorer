@@ -9,7 +9,7 @@
  * `__setGenerationDepsForTest`, so no bundle, no DuckDB, no network, no BAA.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NextRequest } from 'next/server'
 import type {
   EngineCapabilities,
@@ -23,6 +23,7 @@ import { signSession } from '@/lib/session'
 import { resolvedDialect } from '@/lib/engine/provisioning'
 import { sqlCache } from '@/lib/cache'
 import { resetRateLimit, rateLimitKey } from '@/lib/rateLimiter'
+import { __setUserResolverForTest, type User } from '@/lib/authStore'
 import {
   POST,
   __setGenerationDepsForTest,
@@ -30,9 +31,28 @@ import {
   type GenerationDeps,
 } from '../route'
 
+// Orgs these tests forge sessions into. requireAuthWithPermission now re-resolves
+// the effective role from the live store (multi-org plan §2.3, revocation-safe),
+// so a forged synthetic principal must be resolvable with a membership in each
+// forged org (role 'clinician', matching every forged session in this file).
+const FORGED_ORGS = ['orgA', 'orgB', 'orgP', 'orgX']
+
 beforeAll(() => {
   // requireAuthWithPermission -> verifySession needs a signing secret.
   process.env.SESSION_SECRET = process.env.SESSION_SECRET ?? 'test-session-secret-0123456789'
+  __setUserResolverForTest((id: string): User => ({
+    id,
+    email: `${id}@test.local`,
+    passwordHash: 'x',
+    memberships: FORGED_ORGS.map((orgId) => ({ orgId, role: 'clinician' as const })),
+    defaultOrgId: FORGED_ORGS[0],
+    name: id,
+    createdAt: new Date(0).toISOString(),
+  }))
+})
+
+afterAll(() => {
+  __setUserResolverForTest(null)
 })
 
 // ── stub generation dependencies (no bundle / DuckDB / network) ───────────────

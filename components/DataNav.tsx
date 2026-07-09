@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle, LogOut } from 'lucide-react'
+import { ChevronDown, Plus, Settings, Bell, X, CheckCheck, Trash2, Menu, HelpCircle, LogOut, Check, Building2 } from 'lucide-react'
 import { clsx } from 'clsx'
 import {
   AppNotification,
@@ -67,12 +67,118 @@ const roleColor: Record<string, string> = {
   analyst: '#4c8dff',
 }
 
+type MembershipView = {
+  orgId: string
+  role: string
+  orgName: string
+}
+
 type SessionUser = {
   id: string
   email: string
-  role: string
-  orgId: string
   name: string
+  memberships: MembershipView[]
+  defaultOrgId: string
+}
+
+type MeResponse = {
+  user: SessionUser
+  activeOrgId: string
+  activeRole: string
+  orgName: string
+}
+
+/**
+ * OrgSwitcher — active-org pill + dropdown. Rendered only when the user has >1
+ * membership (single-org users see nothing new). Selecting another org POSTs to
+ * /api/auth/switch-org, which re-issues the session cookie scoped to the new
+ * active org; on success we refresh the router (server components re-render
+ * under the new active org) and re-fetch /api/auth/me.
+ */
+function OrgSwitcher({
+  memberships,
+  activeOrgId,
+  activeOrgName,
+  onSwitched,
+}: {
+  memberships: MembershipView[]
+  activeOrgId: string
+  activeOrgName: string
+  onSwitched: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [switching, setSwitching] = useState(false)
+
+  async function handleSelect(orgId: string) {
+    setOpen(false)
+    if (orgId === activeOrgId || switching) return
+    setSwitching(true)
+    try {
+      // On 200 OR 403 we re-scope from /api/auth/me (memberships may have
+      // changed); the parent's onSwitched handles router.refresh + re-fetch.
+      await fetch('/api/auth/switch-org', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orgId }),
+      })
+    } catch {
+      // Network failure — still re-fetch identity below.
+    } finally {
+      setSwitching(false)
+      onSwitched()
+    }
+  }
+
+  return (
+    <div className="relative hidden md:flex items-stretch">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        disabled={switching}
+        title={`Active organization: ${activeOrgName}`}
+        className="flex items-center gap-1.5 h-7 px-3 rounded-[8px] bg-[#16161a] border border-[#2a2a31] text-[11px] text-[#a0a0a7] hover:text-[#e8e8ea] hover:border-[#3a3a45] transition-all font-medium disabled:opacity-60"
+      >
+        <Building2 size={11} />
+        <span className="max-w-[120px] truncate">{activeOrgName}</span>
+        <ChevronDown size={11} className={clsx('transition-transform duration-200', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div
+          className="absolute top-full right-0 mt-1 bg-[#16161a] border border-[#2a2a31] rounded-[10px] shadow-xl z-50 min-w-[220px] overflow-hidden"
+          onMouseLeave={() => setOpen(false)}
+        >
+          <div className="px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-[#6c6c74] border-b border-[#1f1f25]">
+            Switch organization
+          </div>
+          {memberships.map((membership) => {
+            const isActive = membership.orgId === activeOrgId
+            return (
+              <button
+                key={membership.orgId}
+                onClick={() => handleSelect(membership.orgId)}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left hover:bg-[#1f1f25] transition-colors"
+              >
+                <span className="flex items-center gap-2 min-w-0">
+                  <span className={clsx('text-[12px] truncate', isActive ? 'text-[#e8e8ea] font-medium' : 'text-[#a0a0a7]')}>
+                    {membership.orgName}
+                  </span>
+                  <span
+                    className="px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide flex-shrink-0"
+                    style={{
+                      color: roleColor[membership.role] ?? '#6c6c74',
+                      backgroundColor: `${roleColor[membership.role] ?? '#6c6c74'}1a`,
+                    }}
+                  >
+                    {membership.role}
+                  </span>
+                </span>
+                {isActive && <Check size={13} className="text-[#7c68ff] flex-shrink-0" />}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function DataNav({ activePage, isAdmin }: DataNavProps) {
@@ -83,12 +189,18 @@ export default function DataNav({ activePage, isAdmin }: DataNavProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([])
   const [unread, setUnread] = useState(0)
   const [sessionUser, setSessionUser] = useState<SessionUser | null>(null)
+  const [activeOrgId, setActiveOrgId] = useState<string>('')
+  const [activeRole, setActiveRole] = useState<string>('')
+  const [activeOrgName, setActiveOrgName] = useState<string>('')
 
   const userName = sessionUser?.name ?? ''
-  const userRole = sessionUser?.role ?? 'analyst'
+  // The avatar/role reflect the ACTIVE org's role (flips as the user switches).
+  const userRole = activeRole || 'analyst'
   const avatarColor = roleColor[userRole] ?? '#6c6c74'
-  // If isAdmin is passed explicitly, honour it; otherwise derive from session.
-  const showAdmin = isAdmin ?? (sessionUser?.role === 'admin')
+  // If isAdmin is passed explicitly, honour it; otherwise derive from the
+  // ACTIVE role so the Audit Log nav item toggles as the user switches orgs.
+  const showAdmin = isAdmin ?? (activeRole === 'admin')
+  const memberships = sessionUser?.memberships ?? []
 
   const refreshNotifications = useCallback(() => {
     setNotifications(getNotifications())
@@ -99,18 +211,44 @@ export default function DataNav({ activePage, isAdmin }: DataNavProps) {
     refreshNotifications()
   }, [refreshNotifications])
 
+  const loadMe = useCallback(() => {
+    return fetch('/api/auth/me')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: MeResponse | null) => {
+        if (data?.user) {
+          setSessionUser(data.user)
+          setActiveOrgId(data.activeOrgId)
+          setActiveRole(data.activeRole)
+          setActiveOrgName(data.orgName)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     fetch('/api/auth/me')
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { user: SessionUser } | null) => {
-        if (!cancelled && data?.user) setSessionUser(data.user)
+      .then((data: MeResponse | null) => {
+        if (!cancelled && data?.user) {
+          setSessionUser(data.user)
+          setActiveOrgId(data.activeOrgId)
+          setActiveRole(data.activeRole)
+          setActiveOrgName(data.orgName)
+        }
       })
       .catch(() => {})
     return () => {
       cancelled = true
     }
   }, [])
+
+  // Called after an org switch: re-render server components under the new
+  // active org, then re-fetch identity so the switcher + admin nav re-scope.
+  const handleSwitched = useCallback(() => {
+    router.refresh()
+    void loadMe()
+  }, [router, loadMe])
 
   async function handleSignOut() {
     try {
@@ -263,13 +401,23 @@ export default function DataNav({ activePage, isAdmin }: DataNavProps) {
             Settings
           </button>
 
+          {/* Org switcher — only for multi-org users */}
+          {memberships.length > 1 && activeOrgId && (
+            <OrgSwitcher
+              memberships={memberships}
+              activeOrgId={activeOrgId}
+              activeOrgName={activeOrgName}
+              onSwitched={handleSwitched}
+            />
+          )}
+
           {/* User avatar + sign out */}
           {userName && (
             <div className="hidden md:flex items-center gap-2 ml-1 pl-2 border-l border-[#2a2a31]">
               <div
                 className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0"
                 style={{ backgroundColor: avatarColor }}
-                title={`${userName} (${userRole})`}
+                title={`${userName} (${userRole})${activeOrgName ? ` — ${activeOrgName}` : ''}`}
               >
                 {getInitials(userName)}
               </div>

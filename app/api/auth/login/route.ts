@@ -1,5 +1,11 @@
 import { NextResponse } from 'next/server'
-import { verifyCredentials, toPublicUser } from '@/lib/authStore'
+import {
+  verifyCredentials,
+  toPublicUser,
+  resolveActiveOrg,
+  roleInOrg,
+  setDefaultOrg,
+} from '@/lib/authStore'
 import {
   SESSION_COOKIE_NAME,
   signSession,
@@ -14,7 +20,7 @@ import { logAuditEvent } from '@/lib/auditLog'
  * On failure: 401 (no user enumeration in the message).
  */
 export async function POST(req: Request) {
-  let body: { email?: unknown; password?: unknown }
+  let body: { email?: unknown; password?: unknown; orgId?: unknown }
   try {
     body = await req.json()
   } catch {
@@ -23,6 +29,9 @@ export async function POST(req: Request) {
 
   const email = typeof body.email === 'string' ? body.email : ''
   const password = typeof body.password === 'string' ? body.password : ''
+  // Optional: a multi-org user may request a specific active org at login.
+  // resolveActiveOrg ignores it if the user is not a member (never leaks scope).
+  const preferredOrgId = typeof body.orgId === 'string' ? body.orgId : undefined
 
   if (!email || !password) {
     return NextResponse.json({ error: 'Email and password are required' }, { status: 400 })
@@ -48,19 +57,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Invalid email or password' }, { status: 401 })
   }
 
+  // MULTI-ORG: choose the active org (preferred → default → first membership),
+  // then resolve the effective role FOR that active org. resolveActiveOrg never
+  // returns a non-member org, so the session is always scoped to a member org.
+  const activeOrgId = resolveActiveOrg(user, preferredOrgId)
+  const activeRole = roleInOrg(user, activeOrgId)!
+  // Persist last-active so a returning user lands where they left off.
+  setDefaultOrg(user.id, activeOrgId)
+
   const cookieValue = signSession({
     userId: user.id,
-    orgId: user.orgId,
-    role: user.role,
+    orgId: activeOrgId,
+    role: activeRole,
   })
 
   logAuditEvent({
     action: 'LOGIN',
     resourceType: 'auth',
-    detail: `Login for '${user.email}' (org ${user.orgId}, role ${user.role})`,
+    detail: `Login for '${user.email}' (org ${activeOrgId}, role ${activeRole})`,
     severity: 'INFO',
     userId: user.id,
-    orgId: user.orgId,
+    orgId: activeOrgId,
     userEmail: user.email,
     ipAddress: ip,
     userAgent,

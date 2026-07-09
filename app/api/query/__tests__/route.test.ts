@@ -30,11 +30,32 @@ import { __setQueryEngineForTest, resolvedDialect } from '@/lib/engine/provision
 import { signSession } from '@/lib/session'
 import { resetRateLimit, rateLimitKey } from '@/lib/rateLimiter'
 import { getRecentAuditEvents } from '@/lib/auditLog'
+import { __setUserResolverForTest, type User } from '@/lib/authStore'
 import { POST, __setServiceFetchForTest } from '../route'
+
+// Orgs these tests forge sessions into. requireAuthWithPermission now re-resolves
+// the effective role from the live store (multi-org plan §2.3, revocation-safe),
+// so a forged synthetic principal must be resolvable with a membership in each
+// forged org. Install a test-only resolver that returns such a synthetic user;
+// the role is 'clinician' everywhere (matching every forged session in this file).
+const FORGED_ORGS = ['orgA', 'orgX', 'orgAudit', 'orgFail']
 
 beforeAll(() => {
   // requireAuthWithPermission -> verifySession needs a signing secret.
   process.env.SESSION_SECRET = process.env.SESSION_SECRET ?? 'test-session-secret-0123456789'
+  __setUserResolverForTest((id: string): User => ({
+    id,
+    email: `${id}@test.local`,
+    passwordHash: 'x',
+    memberships: FORGED_ORGS.map((orgId) => ({ orgId, role: 'clinician' as const })),
+    defaultOrgId: FORGED_ORGS[0],
+    name: id,
+    createdAt: new Date(0).toISOString(),
+  }))
+})
+
+afterAll(() => {
+  __setUserResolverForTest(null)
 })
 
 // ── hermetic DuckDB-native source (no PG, no network) ─────────────────────────
