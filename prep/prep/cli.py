@@ -658,6 +658,38 @@ def _run_build_pipeline_p3b(
 
     # [5] ENRICH: importance + isLargeTimeSeries, join graph, glossary.
     enrich_start = time.monotonic()
+
+    # P3 (opt-in, --llm-enrich): one-time LLM annotation from schema metadata
+    # only, BEFORE importance runs so an LLM-provided grain wins over the
+    # template (derive_grain fills empty slots only). Fail-open: any failure
+    # ships the un-annotated catalog.
+    llm_enrich_report_json: dict | None = None
+    if getattr(args, "llm_enrich", False):
+        import asyncio as _asyncio
+
+        try:
+            from ceiba_nl2sql.generation.llm import build_llm_client
+
+            from prep.enrich.llm_enrich import enrich_catalog_with_llm
+
+            _llm_model = os.environ.get("NL2SQL_LLM_MODEL", "gpt-4o-mini")
+            _llm = build_llm_client(api_key=os.environ.get("OPENAI_API_KEY"), model=_llm_model)
+            _report = _asyncio.run(enrich_catalog_with_llm(catalog, _llm))
+            llm_enrich_report_json = _report.to_json()
+            logger.info(
+                "llm-enrich: %d table descriptions, %d column descriptions, %d units, %d grains "
+                "(%d calls, %d prompt + %d completion tokens)",
+                _report.tables_enriched,
+                _report.columns_enriched,
+                _report.units_filled,
+                _report.grains_filled,
+                _report.llm_calls,
+                _report.prompt_tokens,
+                _report.completion_tokens,
+            )
+        except Exception as exc:  # noqa: BLE001 - enrichment must never fail the build
+            logger.warning("llm-enrich skipped: %s", exc)
+
     row_counts = _row_counts_by_table_id(models)
     large_threshold = sources[0].profile.large_table_row_threshold
     catalog = apply_importance_and_large_flag(
@@ -822,6 +854,9 @@ def _run_build_pipeline_p3b(
                 "glossaryTerms": len(glossary["synonyms"]),
                 "autoSynonyms": len(glossary.get("autoSynonyms", [])),
                 "syntheticTables": len(synthetic["tables"]),
+                "goldenExemplars": len(golden_exemplars),
+                # P3 audit trail: what the LLM pass filled + what it cost.
+                "llmEnrichment": llm_enrich_report_json,
             },
         )
     )
@@ -1220,6 +1255,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "TEST-ONLY: use ceiba_nl2sql.embed.local_embedder.DeterministicHashEmbedder "
             "instead of the real fastembed/bge-small-en-v1.5 model. Never the "
             "default; for hermetic/offline test runs only."
+        ),
+    )
+    build_parser.add_argument(
+        "--llm-enrich",
+        action="store_true",
+        dest="llm_enrich",
+        help=(
+            "P3 (opt-in): one-time LLM annotation of the catalog — table/column "
+            "descriptions, grains, units — from SCHEMA METADATA ONLY (never a "
+            "sampled cell). Requires OPENAI_API_KEY; model from "
+            "NL2SQL_LLM_MODEL (default gpt-4o-mini). Fills empty slots only; "
+            "everything applied is recorded in BUILD_REPORT.json."
         ),
     )
     build_parser.set_defaults(func=cmd_build)
