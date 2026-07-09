@@ -229,3 +229,120 @@ function isGenerateResult(body: unknown): body is Nl2sqlGenerateResult {
   const b = body as Record<string, unknown>
   return typeof b.sql === 'string' && typeof b.dialect === 'string' && typeof b.cached === 'boolean'
 }
+
+// ── POST /nl2sql/execute (§2.2, §2.3 — Phase 4 execution cutover) ─────────────
+//
+// Phase 4 makes the Python EXECUTION runtime available behind a flag
+// (NL2SQL_QUERY_RUNTIME=python). When the flag is 'python', the
+// `app/api/query/route.ts` route KEEPS all its TS hardening (auth → rate-limit →
+// body-size → validate → catalog/schema allowlist → guardSql RE-GUARD) and,
+// instead of the in-process `getQueryEngine().execute`, POSTs the already-guarded
+// SQL to `POST /nl2sql/execute`. The re-guard STAYS in TS as the execution
+// security boundary (§1.3) — the service also re-guards, but /api/query is the
+// boundary; only the DuckDB call itself crosses the wire.
+//
+// This reuses the SAME auth/timeout/correlation-id/error-envelope machinery as
+// `generateSqlViaService`, so the two paths cannot drift.
+
+/** A result column (mirrors the service's `ColumnModel`). */
+export interface Nl2sqlColumn {
+  name: string
+  type: string
+}
+
+/** The /nl2sql/execute success body (mirrors the service `ExecuteResponse`, §2.2). */
+export interface Nl2sqlExecuteResult {
+  columns: Nl2sqlColumn[]
+  rows: Array<Record<string, unknown>>
+  rowCount: number
+  truncated: boolean
+}
+
+/**
+ * The request body for POST /nl2sql/execute (§2.2). `sql` has ALREADY been
+ * TS-re-guarded (guardSql) and the `database`/`schema` values have ALREADY been
+ * validated against the TS allowlist before this call — the service re-guards as
+ * defense in depth, but the TS route remains the boundary (§1.3). `maxRows` is
+ * the TS-clamped row cap; `deadlineMs` the TS wall-clock budget.
+ */
+export interface Nl2sqlExecuteRequest {
+  sql: string
+  tenantId?: string
+  context?: { userId?: string; activeOrgId?: string; role?: string }
+  database?: string
+  schema?: string
+  maxRows?: number
+  deadlineMs?: number
+}
+
+function isExecuteResult(body: unknown): body is Nl2sqlExecuteResult {
+  if (typeof body !== 'object' || body === null) return false
+  const b = body as Record<string, unknown>
+  return (
+    Array.isArray(b.columns) &&
+    Array.isArray(b.rows) &&
+    typeof b.rowCount === 'number' &&
+    typeof b.truncated === 'boolean'
+  )
+}
+
+/**
+ * executeSqlViaService — POST the (already TS-re-guarded) SQL to the Python
+ * service and return the typed execution result. Uses the identical
+ * auth/timeout/correlation-id/error-envelope-parsing pattern as
+ * `generateSqlViaService`. Throws `Nl2sqlServiceError` on any error-envelope
+ * response, transport failure, timeout, or unexpected body — the route maps that
+ * onto a generic 502 (H20: no raw upstream body ever reaches the client).
+ *
+ * `fetchImpl` is injectable purely so the route test can supply a mocked fetch
+ * (no live service); production passes the global `fetch`.
+ */
+export async function executeSqlViaService(
+  request: Nl2sqlExecuteRequest,
+  options: { config?: Nl2sqlClientConfig; correlationId?: string; fetchImpl?: typeof fetch } = {}
+): Promise<Nl2sqlExecuteResult> {
+  const config = options.config ?? resolveNl2sqlClientConfig()
+  const fetchImpl = options.fetchImpl ?? fetch
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs)
+
+  let response: Response
+  try {
+    response = await fetchImpl(`${config.baseUrl}/nl2sql/execute`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.token}`,
+        ...(options.correlationId ? { 'X-Correlation-Id': options.correlationId } : {}),
+      },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    })
+  } catch (e) {
+    // Network error / abort (timeout). NEVER surface the raw cause (H20).
+    const reason = e instanceof Error && e.name === 'AbortError' ? 'timed out' : 'is unreachable'
+    throw new Nl2sqlServiceError('unavailable', `The NL→SQL service ${reason}.`)
+  } finally {
+    clearTimeout(timer)
+  }
+
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    throw new Nl2sqlServiceError('unavailable', 'The NL→SQL service returned a non-JSON response.')
+  }
+
+  if (!response.ok) {
+    if (isServiceErrorEnvelope(body)) {
+      const { kind, message, detail } = body.error
+      throw new Nl2sqlServiceError(coerceErrorKind(kind), message, detail)
+    }
+    throw new Nl2sqlServiceError('unavailable', `The NL→SQL service returned HTTP ${response.status}.`)
+  }
+
+  if (!isExecuteResult(body)) {
+    throw new Nl2sqlServiceError('unavailable', 'The NL→SQL service returned an unexpected response shape.')
+  }
+  return body
+}
