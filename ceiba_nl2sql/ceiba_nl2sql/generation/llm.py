@@ -61,6 +61,29 @@ LLM_MAX_TOKENS = 600
 # reasoning + the SQL both fit; chat models keep the tight 600 bound.
 LLM_MAX_COMPLETION_TOKENS_REASONING = 4000
 
+# R3 structured outputs: a JSON-schema response_format guaranteeing a
+# parseable {"sql", "description"} object. Kills the two extraction failure
+# shapes seen in production: fence/prose ambiguity, and mid-SQL truncation
+# producing sqlglot TokenErrors that burned a repair round each (commit
+# 95f01e2 made the guards fail closed on those). extract_sql already handles
+# the JSON contract, so the pipeline needs no change.
+SQL_GENERATION_RESPONSE_FORMAT: dict = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "sql_generation",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "sql": {"type": "string", "description": "The single read-only SQL statement."},
+                "description": {"type": "string", "description": "One short sentence describing what the SQL returns."},
+            },
+            "required": ["sql", "description"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 @dataclass(frozen=True)
 class TokenUsage:
@@ -217,9 +240,21 @@ class OpenAiLlmClient:
     `.complete()` directly from pipeline code; always go through `call_llm`.
     """
 
-    def __init__(self, *, api_key: str, model: str = DEFAULT_LLM_MODEL, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = DEFAULT_LLM_MODEL,
+        timeout_seconds: float = 30.0,
+        use_structured_output: bool = True,
+    ) -> None:
         self._model = model
         self._timeout_seconds = timeout_seconds
+        # R3: send the {"sql","description"} json_schema response_format by
+        # default. If the model/endpoint rejects response_format, complete()
+        # falls back to plain text ONCE and remembers, so an unsupported
+        # model costs exactly one extra round trip per process, not per call.
+        self._use_structured_output = use_structured_output
         # Imported lazily so a service that never exercises the real OpenAI
         # path (e.g. this phase's hermetic test suite) does not require the
         # `openai` package to even be importable at collection time — though
@@ -228,7 +263,7 @@ class OpenAiLlmClient:
 
         self._client = AsyncOpenAI(api_key=api_key, timeout=timeout_seconds)
 
-    async def complete(self, prompt: str) -> LlmCompletion:
+    def _build_params(self, prompt: str) -> dict:
         # Newer OpenAI models (gpt-5*, o-series reasoning models) renamed
         # `max_tokens` -> `max_completion_tokens` and reject a custom
         # `temperature` (only the default 1 is allowed). Older chat models
@@ -248,9 +283,27 @@ class OpenAiLlmClient:
         else:
             params["max_tokens"] = LLM_MAX_TOKENS
             params["temperature"] = LLM_TEMPERATURE
+        if self._use_structured_output:
+            params["response_format"] = SQL_GENERATION_RESPONSE_FORMAT
+        return params
+
+    async def complete(self, prompt: str) -> LlmCompletion:
+        params = self._build_params(prompt)
         try:
             response = await self._client.chat.completions.create(**params)
         except Exception as exc:  # noqa: BLE001 - deliberately broad: any SDK error is scrubbed before surfacing
+            # R3 fallback: a model/endpoint that rejects response_format gets
+            # ONE plain-text retry, and structured output is disabled for the
+            # rest of the process lifetime. Detected by the error text naming
+            # the parameter — anything else is a real upstream failure.
+            if self._use_structured_output and "response_format" in str(exc):
+                logger.warning(
+                    "model %s rejected response_format; falling back to plain text permanently: %s",
+                    self._model,
+                    exc,
+                )
+                self._use_structured_output = False
+                return await self.complete(prompt)
             logger.error("OpenAI completion failed: %s", exc)
             raise LlmUpstreamError("The driving language model is temporarily unavailable.") from exc
 
