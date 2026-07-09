@@ -37,6 +37,12 @@ class ColumnMeta:
     is_primary_key: bool
     ordinal_position: int
     is_indexed: bool
+    # Metadata-only enrichment (SPEC §2.3 additive fields; defaults keep every
+    # existing constructor call valid). `comment` = pg_description column
+    # comment; `enum_values` = the DECLARED labels of a Postgres ENUM type —
+    # DDL metadata, never sampled cell data.
+    comment: str | None = None
+    enum_values: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -69,14 +75,61 @@ class IndexMeta:
     method: str
 
 
+@dataclass(frozen=True)
+class ColumnStatistics:
+    """Whole-table planner statistics for one column, read from `pg_stats`
+    (or the engine-native equivalent). Numbers ONLY — `most_common_vals` and
+    every other value-bearing pg_stats field are deliberately never read
+    (they contain raw cell values; the PHI discipline forbids them outside
+    `sample_aggregate*`).
+
+    `n_distinct` keeps Postgres semantics: >= 0 is an absolute distinct
+    count; < 0 is `-(distinct/row)` ratio (scale by row count to estimate).
+    """
+
+    null_frac: float | None = None
+    n_distinct: float | None = None
+
+
+@dataclass(frozen=True)
+class TimeColumnRange:
+    """Aggregate min/max of one time column, month-truncated ("YYYY-MM") so no
+    individual-level date leaves the source (an exact earliest admission
+    timestamp is an individual's date; a month is a cohort property).
+    `uses_infinity_sentinels` records that the column holds Postgres
+    ±infinity open-range sentinels — a convention the LLM must know about.
+    When a sentinel IS the min/max, the corresponding month is None (unknown)
+    and the flag is the signal.
+    """
+
+    column: str
+    min_month: str | None
+    max_month: str | None
+    uses_infinity_sentinels: bool = False
+
+
 class Introspector(Protocol):
-    """DB-agnostic. One implementation per route (SQLAlchemy default; DuckDB-attach; Trino later)."""
+    """DB-agnostic. One implementation per route (SQLAlchemy default; DuckDB-attach; Trino later).
+
+    Additive catalog-harvest methods (all optional for a route to implement
+    meaningfully — return None/{} when the engine has no equivalent):
+      - `table_comment` / column `comment`s: pg_description documentation.
+      - `column_statistics`: whole-table planner stats (pg_stats), NUMBERS ONLY.
+      - `sample_aggregate_time_range`: the second sanctioned data-touching
+        method alongside `sample_aggregate*` — an aggregate-only min/max of one
+        time column, month-truncated before it leaves the introspector.
+    """
 
     def connect_read_only(self, source_id: str, dsn: str) -> None: ...
     def list_schemas(self, source_id: str) -> list[str]: ...
     def list_tables(self, source_id: str, schema: str) -> list[TableMeta]: ...
     def describe_table(self, table: TableMeta) -> tuple[list[ColumnMeta], KeyMeta, list[IndexMeta]]: ...
     def approx_row_count(self, table: TableMeta) -> int: ...  # pg_class.reltuples / equivalent
+    def table_comment(self, table: TableMeta) -> str | None: ...  # pg_description, metadata-only
+    def column_statistics(self, table: TableMeta) -> dict[str, ColumnStatistics]: ...  # pg_stats numbers only
     def sample_aggregate(
         self, table: TableMeta, columns: list[ColumnMeta], sample_rows: int
-    ) -> "AggregateProfile": ...  # ONLY data-touching method (§2.5)
+    ) -> "AggregateProfile": ...  # data-touching (§2.5)
+    def sample_aggregate_time_range(
+        self, table: TableMeta, time_column: str
+    ) -> TimeColumnRange | None: ...  # data-touching, aggregate-only (§2.5)

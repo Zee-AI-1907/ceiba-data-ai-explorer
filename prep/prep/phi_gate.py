@@ -183,6 +183,35 @@ def check_profiles_json(phi_json: dict, profiles_json: dict) -> list[GateViolati
     return violations
 
 
+def check_catalog_json(phi_json: dict, catalog_json: dict) -> list[GateViolation]:
+    """catalog.json invariant (P1 catalog harvest): `allowedValues` — the
+    DDL-declared enum/CHECK value list — may only appear on a column whose
+    phiClass == non-phi. Declared labels are metadata by construction, but a
+    PHI-classified column's vocabulary is suppressed anyway (conservative,
+    mirrors the topCategories discipline in profiles.json).
+    """
+    violations: list[GateViolation] = []
+    phi_class_by_id = _phi_class_by_column_id(phi_json)
+    for table in catalog_json.get("tables", []):
+        for col in table.get("columns", []):
+            if not col.get("allowedValues"):
+                continue
+            column_id = col.get("columnId", "<unknown>")
+            phi_class = phi_class_by_id.get(column_id)
+            if phi_class is not None and phi_class != "non-phi":
+                violations.append(
+                    GateViolation(
+                        check="no_raw_cell_value",
+                        message=(
+                            f"catalog column {column_id} has phiClass={phi_class!r} but "
+                            "carries allowedValues (declared values allowed only for non-phi)"
+                        ),
+                        location="catalog.json",
+                    )
+                )
+    return violations
+
+
 def check_synthetic_json(phi_json: dict, synthetic_json: dict) -> list[GateViolation]:
     """synthetic.json must carry generator DESCRIPTORS only (SPEC §1.8): no
     `params.labels`/category strings for a column whose phiClass != non-phi,
@@ -330,12 +359,27 @@ _ALLOWED_FUNCTION_PREFIXES = ("sample_aggregate",)
 # read-only attach at runtime, never a hardcoded cell fetch. So the
 # `postgres_query()` wrapper is exempt for the same reason as the other DuckDB
 # table-function/metadata spellings.
+# `pg_stats` (added for the P1 catalog harvest — column_statistics): the query
+# reads null_frac + n_distinct ONLY, which are pure whole-table numbers the
+# Postgres planner maintains. pg_stats ALSO exposes value-bearing fields
+# (most_common_vals, histogram_bounds) that DO contain raw cell values — those
+# must never be selected; check_pg_stats_value_fields below enforces that no
+# scanned literal names them, so this allowlist entry cannot be silently
+# widened into a value leak.
 _METADATA_ONLY_PATTERN = re.compile(
-    r"information_schema|pg_catalog|pg_class|pg_namespace|duckdb_tables\(\)|"
+    r"information_schema|pg_catalog|pg_class|pg_namespace|pg_stats|duckdb_tables\(\)|"
     r"duckdb_databases\(\)|duckdb_constraints\(\)|duckdb_indexes\(\)|"
     r"postgres_query\(|"
     r"table_constraints|key_column_usage",
     re.IGNORECASE,
+)
+
+# Value-bearing pg_stats fields that must NEVER appear in any string literal
+# in the scanned packages — they contain raw sampled cell values. Spelled with
+# `[x]` character classes so this pattern's own source literal (this file is
+# scanned too) does not match the compiled regex.
+_PG_STATS_FORBIDDEN_FIELDS = re.compile(
+    r"most_common_val[s]|most_common_elem[s]|histogram_bound[s]", re.IGNORECASE
 )
 
 
@@ -407,6 +451,21 @@ def scan_file_for_raw_select(path: Path) -> list[GateViolation]:
 
     docstring_ids = _docstring_nodes(tree)
     for value, node in _string_constants(tree, docstring_ids):
+        # A literal naming a value-bearing pg_stats field is a violation in
+        # ANY function — those fields carry raw cell values, and allowlisting
+        # `pg_stats` for the numeric statistics must not open a path to them.
+        if _PG_STATS_FORBIDDEN_FIELDS.search(value):
+            violations.append(
+                GateViolation(
+                    check="sole_data_path",
+                    message=(
+                        "literal references a value-bearing pg_stats field "
+                        f"(those fields carry raw cell values): {value.strip()[:120]!r}"
+                    ),
+                    location=f"{path}:{getattr(node, 'lineno', '?')}",
+                )
+            )
+            continue
         if not _SELECT_LITERAL_PATTERN.search(value):
             continue
         if _METADATA_ONLY_PATTERN.search(value):
@@ -472,6 +531,7 @@ def run_gate(
     exemplars_json: dict | None = None,
     prep_package_dir: str | Path | None = None,
     extra_package_dirs: list[str | Path] | None = None,
+    catalog_json: dict | None = None,
 ) -> PhiGateReport:
     """Run every PHI gate check and return a single report. `synthetic_json`,
     `glossary_json`, `exemplars_json` are optional because P3a alone does not
@@ -503,6 +563,10 @@ def run_gate(
 
     violations.extend(check_profiles_json(phi_json, profiles_json))
     checked_files += 1  # profiles.json
+
+    if catalog_json is not None:
+        violations.extend(check_catalog_json(phi_json, catalog_json))
+        checked_files += 1  # catalog.json (allowedValues PHI discipline)
 
     if synthetic_json is not None:
         violations.extend(check_synthetic_json(phi_json, synthetic_json))
@@ -569,4 +633,5 @@ def run_gate_from_bundle_dir(
         synthetic_json=_load("synthetic.json"),
         glossary_json=_load("glossary.json"),
         exemplars_json=_load("exemplars.json"),
+        catalog_json=_load("catalog.json"),
     )

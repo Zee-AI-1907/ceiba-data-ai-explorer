@@ -149,6 +149,9 @@ def introspect_source(
         for table in tables:
             columns, key_meta, indexes = introspector.describe_table(table)
             approx_rows = introspector.approx_row_count(table)
+            # Metadata-only catalog harvest (P1): pg_description comments and
+            # pg_stats whole-table statistics. Both fail-open — enrichment,
+            # never a build blocker.
             table_entries.append(
                 {
                     "table": table,
@@ -156,16 +159,43 @@ def introspect_source(
                     "keys": key_meta,
                     "indexes": indexes,
                     "approx_row_count": approx_rows,
+                    "table_comment": introspector.table_comment(table),
+                    "column_stats": introspector.column_statistics(table),
                 }
             )
         model["schemas"].append({"schema": schema, "tables": table_entries})
     return model
 
 
-def build_catalog_and_keys(models: list[dict], large_table_row_threshold: int) -> tuple[dict, dict]:
+def _distinct_count_estimate(n_distinct: float | None, approx_rows: int) -> int | None:
+    """Normalize pg_stats `n_distinct` semantics into an absolute estimate:
+    >= 0 is already absolute; < 0 is `-(distinct/row)` ratio, scaled by the
+    table's approximate row count. None when unknown.
+    """
+    if n_distinct is None:
+        return None
+    if n_distinct >= 0:
+        return int(n_distinct)
+    if approx_rows <= 0:
+        return None
+    return int(round(-n_distinct * approx_rows))
+
+
+def build_catalog_and_keys(
+    models: list[dict], large_table_row_threshold: int, phi_columns: frozenset[str] | None = None
+) -> tuple[dict, dict]:
     """Fold introspection models (one per source) into catalog.json + keys.json
     shapes (SPEC §1.3, §1.4).
+
+    P1 catalog harvest: folds pg_description comments (`description`),
+    DDL-declared enum/CHECK values (`allowedValues`), and pg_stats numbers
+    (`nullFraction`, `distinctCountEstimate`) into each column, plus the table
+    comment and (when profile_source stashed one) the month-truncated
+    `timeRange` onto each table. `allowedValues` is PHI-gated: a column whose
+    name+type classifies as anything but non-phi never emits declared values —
+    conservative even though DDL enum labels are metadata by construction.
     """
+    from ceiba_nl2sql.compliance.phi import classify_column
     catalog_schemas: list[dict] = []
     catalog_tables: list[dict] = []
     primary_keys: list[dict] = []
@@ -195,7 +225,14 @@ def build_catalog_and_keys(models: list[dict], large_table_row_threshold: int) -
                 indexed_names = {
                     c for idx in table_entry["indexes"] for c in idx.columns
                 }
+                column_stats: dict = table_entry.get("column_stats") or {}
                 for col in columns:
+                    allowed_values = list(col.enum_values) if col.enum_values else None
+                    if allowed_values and phi_columns is not None:
+                        phi_class, _rule = classify_column(col.name, phi_columns, col.data_type)
+                        if phi_class != "non-phi":
+                            allowed_values = None
+                    stats = column_stats.get(col.name)
                     column_json.append(
                         {
                             "columnId": _column_id(table_id, col.name),
@@ -208,9 +245,16 @@ def build_catalog_and_keys(models: list[dict], large_table_row_threshold: int) -
                             "isIndexed": col.is_indexed or col.name in indexed_names,
                             "unit": None,
                             "ordinalPosition": col.ordinal_position,
+                            "description": col.comment,
+                            "allowedValues": allowed_values,
+                            "nullFraction": stats.null_frac if stats else None,
+                            "distinctCountEstimate": _distinct_count_estimate(
+                                stats.n_distinct if stats else None, approx_rows
+                            ),
                         }
                     )
 
+                time_range = table_entry.get("time_range")
                 catalog_tables.append(
                     {
                         "tableId": table_id,
@@ -222,6 +266,21 @@ def build_catalog_and_keys(models: list[dict], large_table_row_threshold: int) -
                         "domain": None,
                         "isLargeTimeSeries": is_large,
                         "importanceScore": None,
+                        "description": table_entry.get("table_comment"),
+                        # Month-truncated data horizon of the table's best time
+                        # column (stashed by profile_source) — lets the prompt
+                        # state the real data window instead of the model
+                        # guessing one.
+                        "timeRange": (
+                            {
+                                "column": time_range.column,
+                                "minMonth": time_range.min_month,
+                                "maxMonth": time_range.max_month,
+                                "usesInfinitySentinels": time_range.uses_infinity_sentinels,
+                            }
+                            if time_range
+                            else None
+                        ),
                         "columns": column_json,
                         "indexes": [
                             {
@@ -290,6 +349,25 @@ def profile_source(
             qualified_name = f"{schema}.{table.name}"
 
             is_large = approx_rows > large_table_row_threshold
+
+            # P1 time-range harvest: aggregate-only min/max of the table's best
+            # time column, month-truncated inside the introspector. INDEXED time
+            # column -> index-endpoints probe on any size; unindexed allowed only
+            # on small tables (bounded one-column scan). Stashed on the model
+            # entry so build_catalog_and_keys folds it into catalog.json.
+            range_time_col = next(
+                (c.name for c in columns if _looks_like_time_column(c) and c.is_indexed),
+                None,
+            )
+            if range_time_col is None and approx_rows <= 100_000:
+                range_time_col = next(
+                    (c.name for c in columns if _looks_like_time_column(c)), None
+                )
+            if range_time_col is not None:
+                table_entry["time_range"] = introspector.sample_aggregate_time_range(
+                    table, range_time_col
+                )
+
             if is_large and qualified_name in time_windowed_tables:
                 time_col = next(
                     (c.name for c in columns if _looks_like_time_column(c) and c.is_indexed),
@@ -378,7 +456,9 @@ def cmd_introspect(args: argparse.Namespace) -> int:
         introspector.dispose(src.source_id)
 
     catalog, keys = build_catalog_and_keys(
-        models, large_table_row_threshold=sources[0].profile.large_table_row_threshold
+        models,
+        large_table_row_threshold=sources[0].profile.large_table_row_threshold,
+        phi_columns=load_phi_columnset(str(REPO_ROOT)).columns,
     )
 
     out_dir = Path(args.out) if args.out else REPO_ROOT / "artifacts" / "introspect-dry-run"
@@ -464,7 +544,9 @@ def cmd_build(args: argparse.Namespace) -> int:
     stage_durations["connect_introspect_profile_classify"] = time.monotonic() - connect_start
 
     catalog, keys = build_catalog_and_keys(
-        models, large_table_row_threshold=sources[0].profile.large_table_row_threshold
+        models,
+        large_table_row_threshold=sources[0].profile.large_table_row_threshold,
+        phi_columns=phi_columnset.columns,
     )
     profiles = _merge_profiles_json(profile_parts)
     phi = _merge_phi_json(phi_parts, phi_columnset.columnset_hash)
@@ -716,7 +798,9 @@ def _run_build_pipeline_p3b(
                     column_name=col["name"],
                     data_type=col["dataType"],
                     unit=col.get("unit"),
-                    description=None,
+                    # P1 harvest: pg_description comments enrich the embedded
+                    # doc, so retrieval can match on real documentation text.
+                    description=col.get("description"),
                     domain=table.get("domain"),
                     phi_class_by_column_id=phi_class_by_column_id,
                 )
@@ -855,6 +939,7 @@ def _run_build_pipeline_p3b(
             synthetic_json=synthetic,
             glossary_json=glossary,
             exemplars_json=exemplars,
+            catalog_json=catalog,
         )
         gate_report_json = gate_report.to_json()
     else:
@@ -868,6 +953,7 @@ def _run_build_pipeline_p3b(
             synthetic_json=synthetic,
             glossary_json=glossary,
             exemplars_json=exemplars,
+            catalog_json=catalog,
         )
         gate_report_json = base_report.to_json()
 

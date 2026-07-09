@@ -13,6 +13,7 @@ metadata-only by construction.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import sqlalchemy as sa
@@ -28,10 +29,12 @@ from ceiba_nl2sql.compliance.phi import load_phi_columnset
 
 from prep.introspect.engine import (
     ColumnMeta,
+    ColumnStatistics,
     ForeignKeyMeta,
     IndexMeta,
     KeyMeta,
     TableMeta,
+    TimeColumnRange,
 )
 
 
@@ -77,6 +80,91 @@ def _register_infinity_safe_loaders(dbapi_connection) -> None:  # noqa: ANN001
     adapters.register_loader("date", _SafeDate)
     adapters.register_loader("timestamp", _SafeTimestamp)
     adapters.register_loader("timestamptz", _SafeTimestamptz)
+
+
+_MAX_CHECK_IN_LIST_VALUES = 50
+_MONTH_RE = re.compile(r"^(\d{4})-(\d{2})")
+_INFINITY_LITERALS = ("infinity", "-infinity")
+
+
+def _month_of(text_value: object) -> tuple[str | None, bool]:
+    """(month "YYYY-MM" | None, is_infinity_sentinel) for a ::text-cast
+    date/timestamp aggregate result. Month truncation happens HERE, before the
+    value leaves the introspector — no exact date is ever emitted.
+    """
+    if text_value is None:
+        return None, False
+    text = str(text_value).strip()
+    if text.lower() in _INFINITY_LITERALS:
+        return None, True
+    match = _MONTH_RE.match(text)
+    if match is None:
+        return None, False
+    return f"{match.group(1)}-{match.group(2)}", False
+
+
+def parse_check_in_list(sqltext: str) -> tuple[str, tuple[str, ...]] | None:
+    """Extract (column, declared values) from a CHECK constraint expression
+    when it is a single-column IN-list. Handles both the authored form
+    (`status IN ('a','b')`) and Postgres's normalized form
+    (`(status)::text = ANY ((ARRAY['a'::character varying, ...])::text[])`).
+    Returns None for anything else (multi-column, ranges, unparseable) —
+    fail-open by design. Values capped at 50 (a bigger list is a vocabulary
+    table, not a status enum, and would bloat the prompt).
+    """
+    if not sqltext or "(" not in sqltext and " in " not in sqltext.lower():
+        return None
+    try:
+        import sqlglot
+        from sqlglot import exp as _exp
+
+        parsed = sqlglot.parse_one(sqltext, read="postgres")
+    except Exception:  # noqa: BLE001 - unparseable constraint -> no values
+        return None
+
+    def _column_name(node) -> str | None:
+        inner = node
+        while isinstance(inner, (_exp.Cast, _exp.Paren)):
+            inner = inner.this
+        return inner.name if isinstance(inner, _exp.Column) else None
+
+    def _literal_values(nodes) -> tuple[str, ...] | None:
+        values: list[str] = []
+        for candidate in nodes:
+            inner = candidate
+            while isinstance(inner, (_exp.Cast, _exp.Paren)):
+                inner = inner.this
+            if not isinstance(inner, _exp.Literal):
+                return None
+            values.append(str(inner.this))
+        if not values or len(values) > _MAX_CHECK_IN_LIST_VALUES:
+            return None
+        return tuple(values)
+
+    # Form 1: <col> IN (<literals>)
+    for in_node in parsed.find_all(_exp.In):
+        column = _column_name(in_node.this)
+        values = _literal_values(in_node.expressions)
+        if column and values:
+            return column, values
+
+    # Form 2: <col> = ANY (ARRAY[<literals>])  (Postgres normalization)
+    for eq_node in parsed.find_all(_exp.EQ):
+        column = _column_name(eq_node.this)
+        if not column:
+            continue
+        right = eq_node.expression
+        while isinstance(right, (_exp.Cast, _exp.Paren)):
+            right = right.this
+        if isinstance(right, _exp.Any):
+            array = right.this
+            while isinstance(array, (_exp.Cast, _exp.Paren)):
+                array = array.this
+            if isinstance(array, _exp.Array):
+                values = _literal_values(array.expressions)
+                if values:
+                    return column, values
+    return None
 
 
 def _quote_ident(dialect_name: str, identifier: str) -> str:
@@ -197,10 +285,20 @@ class SqlAlchemyIntrospector:
                 )
             )
 
+        # CHECK-constraint IN-lists give DDL-declared allowed values for a
+        # column ("status IN ('active','closed')") — schema metadata, never
+        # sampled data. Parsed fail-open: an unparseable constraint yields no
+        # values, never an error.
+        check_values = self._check_constraint_values(table)
+
         raw_columns = inspector.get_columns(table.name, schema=table.schema)
         columns: list[ColumnMeta] = []
         for position, col in enumerate(raw_columns, start=1):
             name = col["name"]
+            # A reflected Postgres ENUM type carries its DECLARED labels on
+            # `.enums` — DDL metadata (the type definition), not cell data.
+            declared_enum = getattr(col.get("type"), "enums", None)
+            enum_values = tuple(str(v) for v in declared_enum) if declared_enum else check_values.get(name)
             columns.append(
                 ColumnMeta(
                     name=name,
@@ -210,6 +308,8 @@ class SqlAlchemyIntrospector:
                     is_primary_key=name in pk_columns,
                     ordinal_position=position,
                     is_indexed=name in indexed_columns or name in pk_columns,
+                    comment=col.get("comment") or None,
+                    enum_values=enum_values,
                 )
             )
 
@@ -228,6 +328,103 @@ class SqlAlchemyIntrospector:
 
         key_meta = KeyMeta(primary_key=sorted(pk_columns), foreign_keys=foreign_keys)
         return columns, key_meta, index_metas
+
+    def _check_constraint_values(self, table: TableMeta) -> dict[str, tuple[str, ...]]:
+        """Parse each CHECK constraint's sqltext for a single-column IN-list
+        (`col IN ('a','b')`, or Postgres's normalized `col = ANY (ARRAY[...])`
+        form) and return {column_name: declared values}. DDL metadata only —
+        the values come from the constraint DEFINITION, never a data row.
+        Fail-open: anything unparseable contributes nothing.
+        """
+        try:
+            inspector = self._inspector(table.source_id)
+            constraints = inspector.get_check_constraints(table.name, schema=table.schema)
+        except Exception:  # noqa: BLE001 - engines without CHECK reflection just yield nothing
+            return {}
+        values: dict[str, tuple[str, ...]] = {}
+        for constraint in constraints:
+            parsed = parse_check_in_list(constraint.get("sqltext") or "")
+            if parsed is not None:
+                column_name, allowed = parsed
+                values[column_name] = allowed
+        return values
+
+    def table_comment(self, table: TableMeta) -> str | None:
+        """pg_description table comment via SQLAlchemy's metadata-only
+        `get_table_comment`. None when absent or unsupported by the engine.
+        """
+        try:
+            comment = self._inspector(table.source_id).get_table_comment(table.name, schema=table.schema)
+        except Exception:  # noqa: BLE001 - not all dialects implement it
+            return None
+        text = (comment or {}).get("text")
+        return text or None
+
+    def column_statistics(self, table: TableMeta) -> dict[str, ColumnStatistics]:
+        """Whole-table planner statistics from `pg_stats` — null_frac +
+        n_distinct ONLY. `most_common_vals`/`histogram_bounds` are NEVER
+        selected: those fields carry raw cell values, which may only ever be
+        touched inside `sample_aggregate*` (SPEC §2.5 #3). The two numeric
+        fields read here are pure statistics Postgres already maintains, and
+        they are strictly better than sample-derived estimates (whole-table,
+        not first-5000-rows). Non-Postgres engines: empty (unknown).
+        """
+        conn = self._conn(table.source_id)
+        if conn.dialect_name != "postgresql":
+            return {}
+        query = sa.text(
+            "SELECT attname, null_frac, n_distinct FROM pg_stats "
+            "WHERE schemaname = :schema AND tablename = :name"
+        )
+        try:
+            with conn.engine.connect() as connection:
+                rows = connection.execute(query, {"schema": table.schema, "name": table.name}).all()
+        except Exception:  # noqa: BLE001 - stats are enrichment, never fail a build over them
+            return {}
+        return {
+            str(r[0]): ColumnStatistics(
+                null_frac=float(r[1]) if r[1] is not None else None,
+                n_distinct=float(r[2]) if r[2] is not None else None,
+            )
+            for r in rows
+        }
+
+    def sample_aggregate_time_range(self, table: TableMeta, time_column: str) -> TimeColumnRange | None:
+        """Aggregate-only min/max of ONE time column, month-truncated before it
+        leaves this function (an exact earliest/latest timestamp is an
+        individual's date; a month is a cohort property). Cast to text
+        server-side so Postgres ±infinity sentinels arrive as literal
+        'infinity'/'-infinity' strings (the psycopg loaders would otherwise
+        nullify them) — their presence is itself a signal the LLM needs
+        (open-ended ranges convention). Plain min/max on an INDEXED column is
+        an index-endpoints probe, never a table scan — the caller only asks
+        for indexed time columns (or tiny tables).
+
+        Named `sample_aggregate_*` because it IS a data-touching aggregate —
+        the phi_gate AST scan sanctions exactly this prefix (SPEC §2.5 #3).
+        """
+        conn = self._conn(table.source_id)
+        dialect_name = conn.dialect_name
+        quoted_col = _quote_ident(dialect_name, time_column)
+        quoted_table = f"{_quote_ident(dialect_name, table.schema)}.{_quote_ident(dialect_name, table.name)}"
+        query = sa.text(
+            f"SELECT min({quoted_col})::text, max({quoted_col})::text FROM {quoted_table}"  # noqa: S608
+        )
+        try:
+            with conn.engine.connect() as connection:
+                row = connection.execute(query).first()
+        except Exception:  # noqa: BLE001 - a range probe must never fail the build
+            return None
+        if row is None:
+            return None
+        min_month, min_inf = _month_of(row[0])
+        max_month, max_inf = _month_of(row[1])
+        return TimeColumnRange(
+            column=time_column,
+            min_month=min_month,
+            max_month=max_month,
+            uses_infinity_sentinels=min_inf or max_inf,
+        )
 
     def approx_row_count(self, table: TableMeta) -> int:
         """pg_class.reltuples — NEVER COUNT(*) (SPEC §2.3, DATA_SOURCES.md: the

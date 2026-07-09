@@ -480,6 +480,10 @@ from typing import Protocol
 class ColumnMeta:
     name: str; quoted_name: str; data_type: str; nullable: bool
     is_primary_key: bool; ordinal_position: int; is_indexed: bool
+    # P1 catalog harvest (additive, defaulted): pg_description comment +
+    # DDL-declared ENUM/CHECK values (type/constraint DEFINITIONS, never data).
+    comment: str | None = None
+    enum_values: tuple[str, ...] | None = None
 
 @dataclass(frozen=True)
 class TableMeta:
@@ -506,11 +510,16 @@ class Introspector(Protocol):
     def list_tables(self, source_id: str, schema: str) -> list[TableMeta]: ...
     def describe_table(self, table: TableMeta) -> tuple[list[ColumnMeta], KeyMeta, list[IndexMeta]]: ...
     def approx_row_count(self, table: TableMeta) -> int: ...          # pg_class.reltuples / equivalent
+    # P1 catalog harvest (additive; metadata-only):
+    def table_comment(self, table: TableMeta) -> str | None: ...      # pg_description
+    def column_statistics(self, table: TableMeta) -> dict[str, ColumnStatistics]: ...  # pg_stats NUMBERS ONLY
     def sample_aggregate(self, table: TableMeta, columns: list[ColumnMeta],
-                         sample_rows: int) -> "AggregateProfile": ...  # ONLY data-touching method (§2.5)
+                         sample_rows: int) -> "AggregateProfile": ...  # data-touching (§2.5)
+    def sample_aggregate_time_range(self, table: TableMeta,
+                                    time_column: str) -> TimeColumnRange | None: ...  # data-touching, aggregate-only
 ```
 
-**Hard rule (mirrors research §1.4):** `sample_aggregate` is the *only* method that reads cell data, and it returns the same PHI-suppressed `AggregateProfile` shape as `lib/phiScrubber.ts.buildAggregateProfile`. Introspection reads `information_schema`/`pg_catalog` only. Read-only is enforced at connect: `PGOPTIONS='-c default_transaction_read_only=on'` + `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` (DATA_SOURCES.md).
+**Hard rule (mirrors research §1.4):** methods named `sample_aggregate*` are the *only* methods that read cell data. `sample_aggregate` returns the same PHI-suppressed `AggregateProfile` shape as the original `buildAggregateProfile`; `sample_aggregate_time_range` returns ONLY a month-truncated min/max of one time column plus a ±infinity-sentinel flag (no exact date ever leaves the introspector). `column_statistics` reads `pg_stats` `null_frac`/`n_distinct` only — the value-bearing pg_stats fields are forbidden by the PHI gate's AST scan. All other introspection reads `information_schema`/`pg_catalog` only. Read-only is enforced at connect: `PGOPTIONS='-c default_transaction_read_only=on'` + `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` (DATA_SOURCES.md).
 
 ### 2.4 Build stages
 

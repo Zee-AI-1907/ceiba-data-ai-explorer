@@ -113,6 +113,7 @@ def run_gate_including_vectors(
     glossary_json: dict | None = None,
     exemplars_json: dict | None = None,
     prep_package_dir: str | Path | None = None,
+    catalog_json: dict | None = None,
 ) -> VectorsPhiGateReport:
     """Run the full P3a gate (`prep.phi_gate.run_gate`, unmodified) PLUS the
     vectors.duckdb-specific checks this module owns. This is the entry point
@@ -129,6 +130,7 @@ def run_gate_including_vectors(
         glossary_json=glossary_json,
         exemplars_json=exemplars_json,
         prep_package_dir=prep_package_dir,
+        catalog_json=catalog_json,
     )
 
     phi_class_by_column_id = {c["columnId"]: c["phiClass"] for c in phi_json.get("columns", [])}
