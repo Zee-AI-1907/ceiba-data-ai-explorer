@@ -30,6 +30,50 @@ from prep.introspect.engine import (
 from prep.profile import AggregateProfile, ProfileColumn, sample_aggregate_from_rows
 
 
+def _register_infinity_safe_loaders(dbapi_connection) -> None:  # noqa: ANN001
+    """Map Postgres date/timestamp ±infinity sentinels to None on a psycopg3
+    connection, so sampling rows that hold them doesn't raise `DataError:
+    date too small`. No-op for non-psycopg drivers.
+
+    We subclass psycopg's built-in loaders and only intercept the two literal
+    sentinel byte strings (`infinity` / `-infinity`), delegating everything else
+    to the default parser — so ordinary dates are unaffected.
+    """
+    try:
+        from psycopg.types.datetime import (
+            DateLoader,
+            TimestampLoader,
+            TimestamptzLoader,
+        )
+    except Exception:  # not psycopg3 (e.g. sqlite/mysql) — nothing to do
+        return
+
+    _INF = (b"infinity", b"-infinity")
+
+    class _SafeDate(DateLoader):
+        def load(self, data):  # noqa: ANN001
+            if data is not None and bytes(data) in _INF:
+                return None
+            return super().load(data)
+
+    class _SafeTimestamp(TimestampLoader):
+        def load(self, data):  # noqa: ANN001
+            if data is not None and bytes(data) in _INF:
+                return None
+            return super().load(data)
+
+    class _SafeTimestamptz(TimestamptzLoader):
+        def load(self, data):  # noqa: ANN001
+            if data is not None and bytes(data) in _INF:
+                return None
+            return super().load(data)
+
+    adapters = dbapi_connection.adapters
+    adapters.register_loader("date", _SafeDate)
+    adapters.register_loader("timestamp", _SafeTimestamp)
+    adapters.register_loader("timestamptz", _SafeTimestamptz)
+
+
 def _quote_ident(dialect_name: str, identifier: str) -> str:
     """Dialect-literal quoting. Postgres/DuckDB both use double quotes; never
     re-derive by casing (SPEC §1.3 "NEVER re-derive by casing").
@@ -82,6 +126,15 @@ class SqlAlchemyIntrospector:
                 cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
             finally:
                 cursor.close()
+            # Real clinical data contains Postgres `infinity`/`-infinity` date &
+            # timestamp sentinels (open-ended ranges). psycopg's default loaders
+            # raise `DataError: date too small` on `-infinity`, which would crash
+            # profiling of any sampled row that holds one. Register per-connection
+            # loaders that map ±infinity to None so aggregation treats them as a
+            # null/absent value (we only ever compute counts/min/max/mean over
+            # these columns — never emit the raw value). Read-only-safe: loaders
+            # affect how values are *read*, never written. psycopg3 only.
+            _register_infinity_safe_loaders(dbapi_connection)
 
         dialect_name = engine.dialect.name
         self._connections[source_id] = _Connection(
