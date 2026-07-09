@@ -63,6 +63,18 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("NL2SQL_LLM_MODEL_REPAIR", "openai_model_repair"),
     )
 
+    # R2 static-context mode (OPTIONAL, opt-in): when set and the WHOLE bundle
+    # renders within this estimated-token bound, the retriever skips selection
+    # and every prompt carries the full schema in a deterministic order — no
+    # retrieval misses, no embed latency, and a byte-identical prompt prefix
+    # across questions (provider prompt-cache discount). Unset = hybrid
+    # retrieval unchanged. Sensible starting value for a small scoped bundle
+    # (e.g. the 14-table staging scope): 6000.
+    nl2sql_static_context_max_tokens: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("NL2SQL_STATIC_CONTEXT_MAX_TOKENS", "nl2sql_static_context_max_tokens"),
+    )
+
     # ── internal service auth (§2.1) ─────────────────────────────────────────
     nl2sql_service_token: str | None = None
 

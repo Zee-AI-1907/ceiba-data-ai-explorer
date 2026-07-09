@@ -306,3 +306,78 @@ def test_bridge_table_renders_with_role_bridge_when_pruned_to_stub(retriever: Hy
     assert "mock.public.MeasurementsMock" in roles
     # At least the primary hosting table must always render as "primary".
     assert roles["mock.public.MeasurementsMock"] == "primary"
+
+
+# ── R2 static-context mode ───────────────────────────────────────────────────
+
+
+def _static_retriever(max_tokens: int = 100_000) -> HybridRetriever:
+    calls: list[str] = []
+    inner = _embed_query_factory()
+
+    def counting_embed(text: str):
+        calls.append(text)
+        return inner(text)
+
+    r = HybridRetriever(
+        embed_query=counting_embed,
+        dialect="duckdb",
+        expected_embedding_model_id=TEST_FALLBACK_EMBEDDING_MODEL_ID,
+        static_context_max_tokens=max_tokens,
+    )
+    r._embed_calls = calls  # test-only handle
+    r.load(FIXTURE_BUNDLE_DIR)
+    return r
+
+
+def test_static_mode_returns_all_tables_ignoring_max_tables():
+    r = _static_retriever()
+    try:
+        bundle_table_count = len(r._bundle.catalog["tables"])
+        ctx = r.retrieve("heart rate over 120", RetrieveOptions(token_budget=100, max_tables=1))
+        assert len(ctx.tables) == bundle_table_count
+        assert ctx.static_context is True
+    finally:
+        r.dispose()
+
+
+def test_static_mode_table_order_identical_across_questions():
+    r = _static_retriever()
+    try:
+        ctx_a = r.retrieve("heart rate over 120", RetrieveOptions(token_budget=2500, max_tables=6))
+        ctx_b = r.retrieve("patients admitted yesterday", RetrieveOptions(token_budget=2500, max_tables=6))
+        assert [t.table_id for t in ctx_a.tables] == [t.table_id for t in ctx_b.tables]
+        assert ctx_a.join_hints == ctx_b.join_hints
+    finally:
+        r.dispose()
+
+
+def test_static_mode_never_invokes_the_embedder():
+    r = _static_retriever()
+    try:
+        r.retrieve("heart rate over 120", RetrieveOptions(token_budget=2500, max_tables=6))
+        assert r._embed_calls == []
+    finally:
+        r.dispose()
+
+
+def test_static_mode_still_produces_question_dependent_hints_and_exemplars():
+    r = _static_retriever()
+    try:
+        ctx = r.retrieve(
+            "heart rate over 120 in the last 3 hours", RetrieveOptions(token_budget=2500, max_tables=6, exemplar_k=3)
+        )
+        assert any("heart_rate" in e.id for e in ctx.exemplars)
+        assert len(ctx.cardinality_warnings) > 0  # large tables still warned
+    finally:
+        r.dispose()
+
+
+def test_static_mode_disabled_when_bundle_exceeds_bound():
+    r = _static_retriever(max_tokens=10)  # fixture bundle cannot fit 10 tokens
+    try:
+        ctx = r.retrieve("heart rate over 120", RetrieveOptions(token_budget=2500, max_tables=2))
+        assert ctx.static_context is False
+        assert len(ctx.tables) <= 2  # hybrid path honors max_tables again
+    finally:
+        r.dispose()

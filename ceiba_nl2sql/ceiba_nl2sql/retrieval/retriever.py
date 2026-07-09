@@ -222,6 +222,10 @@ class SchemaContext:
     # Fix A: Tier-2 bridge paths (JOINGRAPH_SURFACING.md §8.3), restricted to
     # bridges that made it into the final rendered `tables` set.
     join_paths: list[JoinPath] = field(default_factory=list)
+    # R2: True when this context is the WHOLE bundle in deterministic order —
+    # prompt assembly then orders question-varying sections last so the static
+    # prefix is byte-identical across questions (provider prompt-cache hits).
+    static_context: bool = False
 
 
 @dataclass
@@ -473,6 +477,7 @@ class HybridRetriever:
         llm_prune: LlmPrune | None = None,
         dialect: str = "duckdb",
         expected_embedding_model_id: str = EXPECTED_EMBEDDING_MODEL_ID,
+        static_context_max_tokens: int | None = None,
     ) -> None:
         self._embed_query = embed_query
         self._llm_prune = llm_prune or deterministic_stub_llm_prune()
@@ -483,6 +488,15 @@ class HybridRetriever:
         self._table_bm25: Bm25Index | None = None
         self._column_bm25: Bm25Index | None = None
         self._adjacency: JoinAdjacency = {}
+        # R2 static-context mode (opt-in): when the WHOLE bundle renders within
+        # this estimated-token bound, retrieve() short-circuits selection and
+        # returns every table in a deterministic order. No retrieval miss is
+        # possible, the embedder is never invoked (latency), and the prompt
+        # prefix is byte-identical across questions (provider prompt-cache
+        # hits at the discounted cached-input rate). None = disabled.
+        self._static_context_max_tokens = static_context_max_tokens
+        self._static_tables: list[RenderedTable] | None = None
+        self._static_token_estimate = 0
 
     def load(self, bundle_dir: str | Path) -> None:
         self._bundle = load_bundle(bundle_dir, expected_embedding_model_id=self._expected_embedding_model_id)
@@ -514,6 +528,20 @@ class HybridRetriever:
 
         self._table_bm25 = Bm25Index(table_docs)
         self._column_bm25 = Bm25Index(column_docs)
+
+        # R2: decide static-context mode ONCE at load. Deterministic table
+        # order (importance desc, then tableId) so every question renders the
+        # exact same byte sequence — the whole point of the mode.
+        if self._static_context_max_tokens is not None:
+            all_tables = sorted(
+                self._bundle.catalog.get("tables", []),
+                key=lambda t: (-(t.get("importanceScore") or 0), t["tableId"]),
+            )
+            rendered_all = [self._render_table(t, None) for t in all_tables]
+            estimate = sum(_estimate_tokens(_render_table_for_estimate(t)) for t in rendered_all)
+            if rendered_all and estimate <= self._static_context_max_tokens:
+                self._static_tables = rendered_all
+                self._static_token_estimate = estimate
 
     def dispose(self) -> None:
         if self._vss is not None:
@@ -927,6 +955,11 @@ class HybridRetriever:
     def retrieve(self, question: str, opts: RetrieveOptions) -> SchemaContext:
         bundle, *_ = self._ensure_loaded()
 
+        # R2 static-context short-circuit: the whole bundle fits, so selection
+        # can only LOSE information. Skips embed + recall + prune entirely.
+        if self._static_tables is not None:
+            return self._retrieve_static(question, opts)
+
         recall_tables_count = opts.recall_tables or DEFAULT_RECALL_TABLES
         recall_columns_count = opts.recall_columns or DEFAULT_RECALL_COLUMNS
         exemplar_k = opts.exemplar_k or DEFAULT_EXEMPLAR_K
@@ -1073,6 +1106,35 @@ class HybridRetriever:
             exemplars=exemplars,
             token_estimate=running_tokens,
             dialect=self._dialect,
+        )
+
+    def _retrieve_static(self, question: str, opts: RetrieveOptions) -> SchemaContext:
+        """R2 static-context mode: every table, full columns, all edges — in
+        the deterministic order computed at load(). Only the question-varying
+        parts still run per request: glossary expansion (semantic hints) and
+        exemplar recall (BM25, no embedding). No retrieval miss is possible
+        and the schema/join-graph prompt sections are byte-identical across
+        questions. `opts.max_tables`/`token_budget` are deliberately ignored —
+        the mode only activates when the whole bundle fits the configured
+        static bound.
+        """
+        _expanded, glossary_hits = self._expand_question(question)
+        tables = self._static_tables or []
+        cardinality_warnings = [
+            self._build_cardinality_warning(t) for t in tables if t.is_large_time_series
+        ]
+        join_hints = self._build_join_hints([t.table_id for t in tables])
+        exemplars = self._recall_exemplars(question, opts.exemplar_k or DEFAULT_EXEMPLAR_K)
+        return SchemaContext(
+            tables=tables,
+            join_hints=join_hints,
+            join_paths=[],  # every table is present; no bridge paths needed
+            cardinality_warnings=cardinality_warnings,
+            glossary_hits=glossary_hits,
+            exemplars=exemplars,
+            token_estimate=self._static_token_estimate,
+            dialect=self._dialect,
+            static_context=True,
         )
 
 

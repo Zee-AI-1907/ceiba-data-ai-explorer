@@ -132,6 +132,8 @@ def create_app_state(settings: Settings) -> AppState:
         embed_query=embed_query,
         dialect="duckdb" if settings.nl2sql_engine == "duckdb" else settings.nl2sql_engine,
         expected_embedding_model_id=resolved_expected_model_id,
+        # R2: opt-in static-context mode (NL2SQL_STATIC_CONTEXT_MAX_TOKENS).
+        static_context_max_tokens=settings.nl2sql_static_context_max_tokens,
     )
     retriever.load(settings.nl2sql_bundle_dir)
 

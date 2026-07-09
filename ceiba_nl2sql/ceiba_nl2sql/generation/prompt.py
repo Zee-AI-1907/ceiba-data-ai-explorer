@@ -507,6 +507,7 @@ def assemble_prompt(
     join_paths: list[JoinPath] | None = None,
     glossary_hits: list[GlossaryHit] | None = None,
     token_budget: int | None = None,
+    semantic_hints_last: bool = False,
 ) -> str:
     """Builds the full NL->SQL generation prompt. Mirrors
     lib/rag/promptAssembly.ts `assemblePrompt` line-for-line.
@@ -518,6 +519,12 @@ def assemble_prompt(
       4. JOIN GRAPH (Fix A) — edges among survivors + bridge paths + bridge stubs.
       5. Cardinality warnings (verbatim, one per large/time-series survivor).
       6. The untrusted NL question, delimited and marked as data-not-instructions.
+
+    `semantic_hints_last` (R2 static-context mode): moves SEMANTIC HINTS (the
+    only question-VARYING section besides the question itself) after the
+    cardinality warnings, so sections 1-2-4-5 form a byte-identical prefix
+    across questions and the provider's prompt cache prices them at the
+    discounted cached-input rate.
     """
     warnings = cardinality_warnings if cardinality_warnings else derive_cardinality_warnings(tables)
     join_hints = join_hints or []
@@ -552,7 +559,7 @@ def assemble_prompt(
     )
 
     meaningful_hits = [h for h in glossary_hits if h.resolved_column_id or h.hosting_table_id or h.time_column_id]
-    if meaningful_hits:
+    if meaningful_hits and not semantic_hints_last:
         sections.append(_render_semantic_hints(glossary_hits, tables))
 
     if join_hints or join_paths:
@@ -569,6 +576,9 @@ def assemble_prompt(
                 ]
             )
         )
+
+    if meaningful_hits and semantic_hints_last:
+        sections.append(_render_semantic_hints(glossary_hits, tables))
 
     sections.append(
         "\n".join(
@@ -605,6 +615,7 @@ def assemble_repair_prompt(
     join_paths: list[JoinPath] | None = None,
     glossary_hits: list[GlossaryHit] | None = None,
     token_budget: int | None = None,
+    semantic_hints_last: bool = False,
 ) -> str:
     """Builds the SELF-REPAIR round prompt. Mirrors
     lib/rag/promptAssembly.ts `assembleRepairPrompt`. Inherits the JOIN GRAPH
@@ -621,6 +632,7 @@ def assemble_repair_prompt(
         join_paths=join_paths,
         glossary_hits=glossary_hits,
         token_budget=token_budget,
+        semantic_hints_last=semantic_hints_last,
     )
 
     repair_lines = [

@@ -493,6 +493,9 @@ async def generate_sql(
         join_paths=context.join_paths,
         glossary_hits=context.glossary_hits,
         token_budget=context.token_estimate or None,
+        # R2: static context orders question-varying sections last so the
+        # schema/join-graph prefix is byte-identical across questions.
+        semantic_hints_last=getattr(context, "static_context", False),
     )
     # R1 routing: the cheap tier drives ONLY when retrieval proves the
     # question join-free; anything that could join uses the strong model.
@@ -551,6 +554,7 @@ async def generate_sql(
             join_paths=context.join_paths,
             glossary_hits=context.glossary_hits,
             token_budget=context.token_estimate or None,
+            semantic_hints_last=getattr(context, "static_context", False),
         )
         # R1 escalation: never retry the model that just failed — repair
         # rounds run on the escalation model (or the strong default).
