@@ -36,7 +36,15 @@
  * 'unavailable'. NO raw upstream body is ever surfaced (H20).
  */
 
-import type { SqlDialect } from '@/lib/engine/QueryEngine'
+/**
+ * The SQL dialects the NL→SQL runtime targets. Rehomed here (from the retired
+ * lib/engine/QueryEngine.ts) as part of the TS-runtime retirement
+ * (docs/TS_RUNTIME_RETIREMENT_PLAN.md §2.3): this client is the coordination
+ * seam between Next and the Python service and already defines the wire types,
+ * so the dialect literal lives here now. Python (ceiba_nl2sql) is authoritative
+ * for the engines themselves.
+ */
+export type SqlDialect = 'duckdb' | 'postgres' | 'trino'
 
 /** The additive per-query cost/token metering block (Phase 3). */
 export interface Nl2sqlUsage {

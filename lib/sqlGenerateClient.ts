@@ -23,7 +23,7 @@
  * see vitest.config.ts's scope note) and without a live fetch.
  */
 
-import type { SqlDialect } from '@/lib/engine/QueryEngine'
+import type { SqlDialect } from '@/lib/nl2sqlServiceClient'
 import type { ErrorCode } from '@/lib/errors'
 
 /** Mirrors `lib/rag/generate.ts`'s `SqlGenerateResponse` (SPEC §5.2) — duplicated as a
