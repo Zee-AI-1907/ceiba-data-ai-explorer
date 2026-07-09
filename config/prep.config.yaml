@@ -1,0 +1,48 @@
+# prep.config.yaml — prep toolchain source topology + embedding + PHI-gate config.
+# SPEC §2.2. Credentials are NEVER inline: `dsnEnv` names an environment variable
+# whose value is the DSN. Do not add secrets to this file.
+
+bundleFormatVersion: "1.0.0"
+
+embedding:
+  provider: local # LOCAL ONLY — no external API (locked decision #2). Enforced by config.py at load time.
+  modelId: bge-small-en-v1.5
+  dimension: 384
+
+sources:
+  - sourceId: staging
+    engine: postgres
+    dsnEnv: STAGING_DSN # env var name; value is the DSN (never in repo)
+    readOnly: true # enforced: default_transaction_read_only + SET TRANSACTION READ ONLY
+    introspect:
+      includeSchemas: ["Shared", "public", "ICU", "NICU", "VEM"]
+      excludeSchemas: ["hangfire", "repack"]
+    profile:
+      sampleRowsPerTable: 5000 # bounded scan; large tables get a time-windowed sample
+      largeTableRowThreshold: 10000000
+      timeWindowedSampleFor:
+        - "Shared.MonitorMeasurements"
+        - "Shared.VentilatorMeasurements"
+
+  - sourceId: mock
+    engine: postgres
+    dsnEnv: MOCK_DSN
+    readOnly: true
+    introspect:
+      includeSchemas: ["public"]
+      excludeSchemas: []
+    profile:
+      sampleRowsPerTable: 5000
+      largeTableRowThreshold: 10000000
+      timeWindowedSampleFor: []
+
+enrich:
+  glossary: config/glossary.seed.yaml # hand-authored seed, extended by the tool
+  inferJoinEdges:
+    enabled: true
+    minConfidence: 0.8
+    nameMatchStrategy: "col-eq-pk"
+
+phiGate:
+  phiColumnset: reuse-phiScrubber # authoritative set = lib/phiScrubber.ts PHI_COLUMNS (§2.5)
+  failOnViolation: true

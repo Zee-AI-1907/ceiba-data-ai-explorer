@@ -3,6 +3,13 @@ node_modules/
 .pnp
 .pnp.js
 
+# Python (prep toolchain)
+__pycache__/
+*.pyc
+prep/.venv/
+prep/*.egg-info/
+.pytest_cache/
+
 # Next.js
 .next/
 out/

@@ -1,0 +1,13 @@
+# glossary.seed.yaml — hand-authored clinical glossary seed (SPEC §1.9, §2.4).
+#
+# Empty seed for P3a. The prep tool's enrich stage (P3b, prep/prep/enrich/glossary.py)
+# reads this file and extends it programmatically from the introspected catalog
+# (table/column names, code-system columns, units). Left empty here — P3a owns only
+# the file's existence/shape contract, not its content; P3b is the consumer/extender.
+#
+# Shape (mirrors glossary.json §1.9 — populated by P3b):
+synonyms: []
+abbreviations: {}
+codeSystems: []
+units: []
+temporal: []

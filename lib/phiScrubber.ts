@@ -37,6 +37,7 @@ const PHI_COLUMNS = new Set([
   'name',
   'ssn',
   'mrn',
+  'medicalrecordnumber',
   'dob',
   'dateofbirth',
   'phone',

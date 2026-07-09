@@ -10,6 +10,7 @@
     "full_name",
     "fullname",
     "lastname",
+    "medicalrecordnumber",
     "mrn",
     "name",
     "national_id",
@@ -26,5 +27,5 @@
     "tc_kimlik",
     "tckimlik"
   ],
-  "phiColumnsetHash": "9da6c67d014af9b2d57b39980b3d278c7630dbefb92e6d379384f5c569b6cc9e"
+  "phiColumnsetHash": "5ae714624c229cb2d30921b466254b7b79122f7be71d15e6c5d3353d183e5080"
 }
