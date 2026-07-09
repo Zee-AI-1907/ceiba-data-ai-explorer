@@ -23,7 +23,13 @@ call once the golden set exists.
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+logger = logging.getLogger("prep.exemplars")
 
 
 @dataclass(frozen=True)
@@ -172,9 +178,107 @@ def load_additional_exemplars(raw_exemplars: list[dict]) -> list[Exemplar]:
     return exemplars
 
 
+# P4 exemplar factory: an injected validator — returns True iff the SQL
+# EXPLAINs clean against the build's topology (typically DuckDbEngine.explain,
+# metadata-only, zero rows). Injection keeps this module engine-free and the
+# factory hermetically testable.
+ExemplarValidator = Callable[[str], bool]
+
+
+def build_golden_exemplars(
+    golden_dir: str | Path,
+    *,
+    validator: ExemplarValidator | None = None,
+    exclude_questions: set[str] | None = None,
+    dialect: str = "duckdb",
+) -> list[Exemplar]:
+    """P4 exemplar factory: turn the eval golden corpus (eval/golden/*.jsonl,
+    SPEC §6.1) into VALIDATED few-shot exemplars.
+
+    Every failing benchmark question that gets fixed lands in the golden set —
+    this factory makes each one a retrievable few-shot example on the next
+    bundle build, so accuracy work compounds instead of relying on 2-3
+    hand-written literals.
+
+    Inclusion gates (SPEC §1.10 'validated gates inclusion'):
+      - the entry parses and carries id/question/goldSql;
+      - its question is not already covered (`exclude_questions`, normally the
+        seed exemplars');
+      - `validator(goldSql)` passes when a validator is provided — an
+        EXPLAIN-based validator proves the SQL binds against THIS build's real
+        topology (a golden written for a source this build did not introspect
+        correctly fails and is excluded, never falsely marked validated).
+        With no validator, entries are included but marked validated=False so
+        a consumer can tell proof-backed exemplars apart.
+
+    Fail-open everywhere: a missing dir, unreadable file, or malformed line
+    contributes nothing and never fails the build.
+    """
+    golden_dir = Path(golden_dir)
+    if not golden_dir.is_dir():
+        return []
+    excluded = {q.strip().lower() for q in (exclude_questions or set())}
+
+    exemplars: list[Exemplar] = []
+    for path in sorted(golden_dir.glob("*.jsonl")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            logger.warning("exemplar factory: cannot read %s: %s", path, exc)
+            continue
+        for line_number, line in enumerate(lines, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logger.warning("exemplar factory: %s:%d malformed JSON: %s", path, line_number, exc)
+                continue
+            golden_id = record.get("id")
+            question = record.get("question")
+            gold_sql = record.get("goldSql")
+            if not (golden_id and question and gold_sql):
+                continue
+            if question.strip().lower() in excluded:
+                continue
+            validated = False
+            if validator is not None:
+                try:
+                    validated = bool(validator(gold_sql))
+                except Exception as exc:  # noqa: BLE001 - a validator crash must never fail the build
+                    logger.warning("exemplar factory: validator failed on %s: %s", golden_id, exc)
+                    validated = False
+                if not validated:
+                    logger.info("exemplar factory: excluding %s (failed validation)", golden_id)
+                    continue
+            tags = tuple(record.get("tags", []))
+            if record.get("difficulty"):
+                tags = (*tags, f"difficulty:{record['difficulty']}")
+            exemplars.append(
+                Exemplar(
+                    id=f"ex_golden_{golden_id}",
+                    question=question,
+                    sql=gold_sql,
+                    dialect=record.get("dialect", dialect),
+                    tables=tuple(record.get("expectedTables", [])),
+                    tags=tags,
+                    validated=validated,
+                )
+            )
+    return exemplars
+
+
 def build_exemplars_json(include_staging: bool = False, extra: list[Exemplar] | None = None) -> dict:
     """Build the full exemplars.json document (SPEC §1.10)."""
     exemplars = seed_exemplars(include_staging=include_staging)
     if extra:
-        exemplars = exemplars + extra
+        seen_questions = {e.question.strip().lower() for e in exemplars}
+        seen_ids = {e.id for e in exemplars}
+        for exemplar in extra:
+            if exemplar.question.strip().lower() in seen_questions or exemplar.id in seen_ids:
+                continue
+            seen_questions.add(exemplar.question.strip().lower())
+            seen_ids.add(exemplar.id)
+            exemplars.append(exemplar)
     return {"exemplars": [e.to_json() for e in exemplars]}

@@ -757,7 +757,51 @@ def _run_build_pipeline_p3b(
     glossary_seed_path = REPO_ROOT / config.enrich.glossary
     glossary = build_glossary_from_seed_file(catalog, glossary_seed_path, auto_synonyms=auto_synonyms_json)
     include_staging_exemplars = any(s.source_id == "staging" for s in sources)
-    exemplars = build_exemplars_json(include_staging=include_staging_exemplars)
+
+    # P4 exemplar factory: turn the eval golden corpus into validated few-shot
+    # exemplars, EXPLAIN-proven against THIS build's real topology (read-only
+    # ATTACH; explain is metadata-only, zero rows). Fail-open: if the engine
+    # cannot attach, the bundle ships with the seed exemplars only. A golden
+    # written for a source this build did not introspect fails explain and is
+    # excluded — never falsely marked validated.
+    from prep.exemplars import build_golden_exemplars, seed_exemplars
+
+    golden_exemplars: list = []
+    validation_engine = None
+    try:
+        from ceiba_nl2sql.engine.base import AttachSpec as _AttachSpec
+        from ceiba_nl2sql.engine.duckdb_engine import DuckDbEngine as _DuckDbEngine
+
+        validation_engine = _DuckDbEngine()
+        validation_engine.attach(
+            [
+                _AttachSpec(
+                    source_id=s.source_id,
+                    engine="postgres",
+                    dsn=s.resolve_dsn(),
+                    read_only=True,
+                    alias=s.source_id,
+                )
+                for s in sources
+            ]
+        )
+
+        def _explain_ok(sql: str) -> bool:
+            verdict = validation_engine.explain(sql)
+            return bool(getattr(verdict, "ok", False))
+
+        golden_exemplars = build_golden_exemplars(
+            REPO_ROOT / "eval" / "golden",
+            validator=_explain_ok,
+            exclude_questions={e.question for e in seed_exemplars(include_staging_exemplars)},
+        )
+    except Exception as exc:  # noqa: BLE001 - exemplar enrichment must never fail the build
+        logger.warning("golden exemplar factory skipped (engine unavailable): %s", exc)
+    finally:
+        if validation_engine is not None:
+            validation_engine.dispose()
+
+    exemplars = build_exemplars_json(include_staging=include_staging_exemplars, extra=golden_exemplars)
 
     # Stage [3] PROFILE's synthetic-descriptor extension (SPEC §2.4 stage[3]
     # "-> profiles.json, synthetic.json descriptors", §1.8): built here, after
