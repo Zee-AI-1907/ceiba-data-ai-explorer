@@ -59,6 +59,18 @@ export async function POST(req: Request) {
   }
 
   const newRole = roleInOrg(user, targetOrgId)!
+
+  // Same-org switch → clean no-op: do NOT re-audit (log noise) and do NOT
+  // re-issue the cookie (which would reset the 8h TTL). Return the current
+  // active org/role so the client stays consistent.
+  if (targetOrgId === session.orgId) {
+    return NextResponse.json({
+      activeOrgId: targetOrgId,
+      role: newRole,
+      orgName: ORG_REGISTRY[targetOrgId] ?? targetOrgId,
+    })
+  }
+
   const previousOrgId = session.orgId
   const previousRole = session.role
 

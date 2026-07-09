@@ -155,15 +155,37 @@ type LegacyUser = {
 }
 
 /**
- * Normalise one raw record to the multi-org User shape. Returns the record
- * unchanged if it is already migrated (has a `memberships` array).
+ * True iff a raw record is a usable multi-org User: it has a non-empty
+ * `memberships` array in which every entry has a truthy orgId AND role, and a
+ * truthy defaultOrgId. Records that fail this are corrupt and are quarantined
+ * (dropped + warned) rather than served as a broken principal.
  */
-function migrateRecord(raw: User | LegacyUser): User {
-  if (Array.isArray((raw as User).memberships)) {
-    return raw as User
-  }
-  const legacy = raw as LegacyUser
-  return {
+function isValidUser(record: unknown): record is User {
+  if (!record || typeof record !== 'object') return false
+  const u = record as Partial<User>
+  if (typeof u.id !== 'string' || !u.id) return false
+  if (typeof u.defaultOrgId !== 'string' || !u.defaultOrgId) return false
+  if (!Array.isArray(u.memberships) || u.memberships.length === 0) return false
+  return u.memberships.every(
+    (m) =>
+      m !== null &&
+      m !== undefined &&
+      typeof m.orgId === 'string' &&
+      m.orgId.length > 0 &&
+      typeof m.role === 'string' &&
+      m.role.length > 0
+  )
+}
+
+/**
+ * Normalise one raw legacy record to the multi-org User shape. Returns null if
+ * the legacy record lacks the truthy orgId/role needed to build a valid single
+ * membership (caller quarantines it) — this prevents producing a corrupt
+ * `memberships: [{orgId: undefined, role: undefined}]` user.
+ */
+function migrateLegacyRecord(legacy: LegacyUser): User | null {
+  if (!legacy.orgId || !legacy.role) return null
+  const migrated: User = {
     id: legacy.id,
     email: legacy.email,
     passwordHash: legacy.passwordHash,
@@ -172,14 +194,20 @@ function migrateRecord(raw: User | LegacyUser): User {
     name: legacy.name,
     createdAt: legacy.createdAt,
   }
+  return isValidUser(migrated) ? migrated : null
 }
 
 // ── Read / write ─────────────────────────────────────────────────────────────
 
 /**
- * Read all users, migrating any legacy single-org records on the fly. If any
- * record needed migrating, the migrated array is written back ONCE so the
- * on-disk file becomes the new shape and subsequent reads short-circuit.
+ * Read all users, migrating any legacy single-org records on the fly and
+ * QUARANTINING any record that is malformed (missing/empty memberships, or a
+ * membership missing orgId/role). Quarantined records are dropped from the
+ * served set and console.warn'd — a corrupt record must never surface as a
+ * broken principal (which would produce a silent 401 loop or, worse, an
+ * unscoped session). If the served set differs from disk (a legacy record was
+ * migrated OR a corrupt record was dropped), the cleaned array is written back
+ * ONCE so subsequent reads short-circuit.
  */
 function readAll(): User[] {
   ensureDataDir()
@@ -194,25 +222,75 @@ function readAll(): User[] {
   if (!Array.isArray(raw)) return []
 
   let mutated = false
-  const migrated = raw.map((record) => {
-    if (!Array.isArray((record as User).memberships)) {
-      mutated = true
-      return migrateRecord(record)
+  const cleaned: User[] = []
+  for (const record of raw) {
+    // Already-migrated record: keep only if it validates; else quarantine.
+    if (Array.isArray((record as User).memberships)) {
+      if (isValidUser(record)) {
+        cleaned.push(record as User)
+      } else {
+        mutated = true
+        console.warn(
+          `[authStore] Quarantined malformed user record (invalid/empty memberships): id=${
+            (record as Partial<User>).id ?? 'unknown'
+          }`
+        )
+      }
+      continue
     }
-    return record as User
-  })
-
-  // Write-back-once: persist the upgraded shape the first time a legacy record
-  // is detected. Guarded by `mutated` so already-migrated reads never rewrite.
-  if (mutated) {
-    writeAll(migrated)
+    // Legacy single-org record: migrate + validate; quarantine if unmigratable.
+    mutated = true
+    const migrated = migrateLegacyRecord(record as LegacyUser)
+    if (migrated) {
+      cleaned.push(migrated)
+    } else {
+      console.warn(
+        `[authStore] Quarantined malformed legacy user record (missing orgId/role): id=${
+          (record as Partial<LegacyUser>).id ?? 'unknown'
+        }`
+      )
+    }
   }
-  return migrated
+
+  // Write-back-once: persist the cleaned shape the first time a legacy record is
+  // migrated OR a corrupt record is dropped. Guarded by `mutated` so a fully
+  // valid, already-migrated read never rewrites.
+  if (mutated) {
+    writeAll(cleaned)
+  }
+  return cleaned
 }
 
+/**
+ * Persist the full user set ATOMICALLY: write to a unique temp file then rename
+ * over the target. rename(2) is atomic on POSIX, so a crash mid-write can never
+ * truncate/corrupt users.json — a reader sees either the old file or the new one
+ * in full. This mirrors repository.ts's writeAll (the data-scoping seam) so both
+ * flat-file stores share the same durability guarantee.
+ */
 function writeAll(users: User[]): void {
   ensureDataDir()
-  fs.writeFileSync(usersFile(), JSON.stringify(users, null, 2), 'utf-8')
+  const target = usersFile()
+  const tmp = `${target}.${randomUUID()}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(users, null, 2), 'utf-8')
+  fs.renameSync(tmp, target)
+}
+
+/**
+ * Serialize a read-modify-write mutation of the user store so concurrent admin
+ * actions (grant/revoke/setDefault/addUser) cannot lost-update each other.
+ *
+ * Node is single-threaded and these mutators are fully SYNCHRONOUS (no `await`
+ * between the read and the write), so within one process JS run-to-completion
+ * already makes each mutation an indivisible critical section — one cannot
+ * observe another's partial state, and a REVOKE can never be silently dropped by
+ * a concurrent GRANT. This wrapper makes that invariant explicit and gives us a
+ * single place to add cross-process locking (e.g. flock / advisory lock) when
+ * this store moves off a single Node process. It MUST stay synchronous — adding
+ * an `await` inside `mutator` would reintroduce the interleaving hazard.
+ */
+function withStoreMutation<T>(mutator: () => T): T {
+  return mutator()
 }
 
 /**
@@ -255,11 +333,18 @@ export function getUsers(): User[] {
 let testUserResolver: ((id: string) => User | null) | null = null
 
 export function __setUserResolverForTest(resolver: ((id: string) => User | null) | null): void {
+  // Hard production guard: this seam lets a caller inject an attacker-chosen
+  // principal (total auth bypass). It must NEVER be reachable in production.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('__setUserResolverForTest is not available in production')
+  }
   testUserResolver = resolver
 }
 
 export function findUserById(id: string): User | null {
-  if (testUserResolver) {
+  // Never consult the test resolver in production, even if one was somehow set —
+  // defence-in-depth against the auth-bypass seam (P2-1).
+  if (testUserResolver && process.env.NODE_ENV !== 'production') {
     const resolved = testUserResolver(id)
     if (resolved) return resolved
   }
@@ -295,14 +380,33 @@ export function roleInOrg(user: User, orgId: string): Role | null {
 }
 
 /**
+ * Thrown when a user with zero memberships reaches org resolution. A valid User
+ * always has ≥1 membership (enforced at load/migrate time), so this indicates a
+ * corrupt record slipped through; the login route maps it to a clean 500 rather
+ * than letting an index-out-of-bounds TypeError escape.
+ */
+export class NoMembershipError extends Error {
+  constructor(userId: string) {
+    super(`User '${userId}' has no memberships — cannot resolve an active org`)
+    this.name = 'NoMembershipError'
+  }
+}
+
+/**
  * Choose the active org at login: preferred (if a member), else defaultOrgId
  * (if still a member), else the first membership. NEVER returns an org the
  * user is not a member of — this is a session-issuance isolation boundary.
+ *
+ * Defensive: a User should always carry ≥1 membership (validated on load), but
+ * if an empty-memberships record ever reaches here we throw a typed
+ * NoMembershipError instead of indexing `memberships[0]` (TypeError).
  */
 export function resolveActiveOrg(user: User, preferred?: string): string {
   if (preferred && isMemberOf(user, preferred)) return preferred
   if (isMemberOf(user, user.defaultOrgId)) return user.defaultOrgId
-  return user.memberships[0].orgId
+  const first = user.memberships[0]
+  if (!first) throw new NoMembershipError(user.id)
+  return first.orgId
 }
 
 /**
@@ -311,18 +415,20 @@ export function resolveActiveOrg(user: User, preferred?: string): string {
  * updated PublicUser, or null if the user does not exist.
  */
 export function grantMembership(userId: string, orgId: string, role: Role): PublicUser | null {
-  const users = getUsers()
-  const idx = users.findIndex((u) => u.id === userId)
-  if (idx === -1) return null
-  const user = users[idx]
-  const existing = user.memberships.find((m) => m.orgId === orgId)
-  if (existing) {
-    existing.role = role
-  } else {
-    user.memberships.push({ orgId, role })
-  }
-  writeAll(users)
-  return toPublicUser(user)
+  return withStoreMutation(() => {
+    const users = getUsers()
+    const idx = users.findIndex((u) => u.id === userId)
+    if (idx === -1) return null
+    const user = users[idx]
+    const existing = user.memberships.find((m) => m.orgId === orgId)
+    if (existing) {
+      existing.role = role
+    } else {
+      user.memberships.push({ orgId, role })
+    }
+    writeAll(users)
+    return toPublicUser(user)
+  })
 }
 
 /**
@@ -332,31 +438,35 @@ export function grantMembership(userId: string, orgId: string, role: Role): Publ
  * to the first remaining membership.
  */
 export function revokeMembership(userId: string, orgId: string): PublicUser | null {
-  const users = getUsers()
-  const idx = users.findIndex((u) => u.id === userId)
-  if (idx === -1) return null
-  const user = users[idx]
-  if (!user.memberships.some((m) => m.orgId === orgId)) return null
-  // Refuse to remove the last membership — a user must always keep ≥1.
-  if (user.memberships.length <= 1) return null
-  user.memberships = user.memberships.filter((m) => m.orgId !== orgId)
-  if (user.defaultOrgId === orgId) {
-    user.defaultOrgId = user.memberships[0].orgId
-  }
-  writeAll(users)
-  return toPublicUser(user)
+  return withStoreMutation(() => {
+    const users = getUsers()
+    const idx = users.findIndex((u) => u.id === userId)
+    if (idx === -1) return null
+    const user = users[idx]
+    if (!user.memberships.some((m) => m.orgId === orgId)) return null
+    // Refuse to remove the last membership — a user must always keep ≥1.
+    if (user.memberships.length <= 1) return null
+    user.memberships = user.memberships.filter((m) => m.orgId !== orgId)
+    if (user.defaultOrgId === orgId) {
+      user.defaultOrgId = user.memberships[0].orgId
+    }
+    writeAll(users)
+    return toPublicUser(user)
+  })
 }
 
 /** Persist last-active org after a switch. No-op if not a member (defence-in-depth). */
 export function setDefaultOrg(userId: string, orgId: string): void {
-  const users = getUsers()
-  const idx = users.findIndex((u) => u.id === userId)
-  if (idx === -1) return
-  const user = users[idx]
-  if (!isMemberOf(user, orgId)) return
-  if (user.defaultOrgId === orgId) return
-  user.defaultOrgId = orgId
-  writeAll(users)
+  withStoreMutation(() => {
+    const users = getUsers()
+    const idx = users.findIndex((u) => u.id === userId)
+    if (idx === -1) return
+    const user = users[idx]
+    if (!isMemberOf(user, orgId)) return
+    if (user.defaultOrgId === orgId) return
+    user.defaultOrgId = orgId
+    writeAll(users)
+  })
 }
 
 /**
@@ -370,23 +480,25 @@ export function addUser(input: {
   name: string
   membership: Membership
 }): PublicUser {
-  const users = getUsers()
-  const email = input.email.trim().toLowerCase()
-  if (users.some((u) => u.email === email)) {
-    throw new Error(`User with email '${email}' already exists`)
-  }
-  const user: User = {
-    id: randomUUID(),
-    email,
-    passwordHash: bcrypt.hashSync(input.password, 10),
-    memberships: [{ orgId: input.membership.orgId, role: input.membership.role }],
-    defaultOrgId: input.membership.orgId,
-    name: input.name,
-    createdAt: new Date().toISOString(),
-  }
-  users.push(user)
-  writeAll(users)
-  return toPublicUser(user)
+  return withStoreMutation(() => {
+    const users = getUsers()
+    const email = input.email.trim().toLowerCase()
+    if (users.some((u) => u.email === email)) {
+      throw new Error(`User with email '${email}' already exists`)
+    }
+    const user: User = {
+      id: randomUUID(),
+      email,
+      passwordHash: bcrypt.hashSync(input.password, 10),
+      memberships: [{ orgId: input.membership.orgId, role: input.membership.role }],
+      defaultOrgId: input.membership.orgId,
+      name: input.name,
+      createdAt: new Date().toISOString(),
+    }
+    users.push(user)
+    writeAll(users)
+    return toPublicUser(user)
+  })
 }
 
 export function toPublicUser(user: User): PublicUser {

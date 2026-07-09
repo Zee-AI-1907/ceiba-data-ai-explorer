@@ -5,6 +5,7 @@ import {
   resolveActiveOrg,
   roleInOrg,
   setDefaultOrg,
+  NoMembershipError,
 } from '@/lib/authStore'
 import {
   SESSION_COOKIE_NAME,
@@ -43,14 +44,17 @@ export async function POST(req: Request) {
 
   const user = verifyCredentials(email, password)
   if (!user) {
+    // Length-cap the attacker-supplied email before logging so a hostile client
+    // cannot bloat the audit trail with an unbounded string (log-injection / DoS).
+    const safeEmail = email.slice(0, 200)
     logAuditEvent({
       action: 'LOGIN_FAILED',
       resourceType: 'auth',
-      detail: `Failed login for '${email}'`,
+      detail: `Failed login for '${safeEmail}'`,
       severity: 'WARNING',
       userId: 'unauthenticated',
       orgId: '', // no authenticated org for a failed login
-      userEmail: email,
+      userEmail: safeEmail,
       ipAddress: ip,
       userAgent,
     })
@@ -60,7 +64,18 @@ export async function POST(req: Request) {
   // MULTI-ORG: choose the active org (preferred → default → first membership),
   // then resolve the effective role FOR that active org. resolveActiveOrg never
   // returns a non-member org, so the session is always scoped to a member org.
-  const activeOrgId = resolveActiveOrg(user, preferredOrgId)
+  // A validated user always has ≥1 membership; a corrupt zero-membership record
+  // (should have been quarantined at load) throws NoMembershipError → clean 500
+  // rather than an index-out-of-bounds TypeError / 500 with a stack.
+  let activeOrgId: string
+  try {
+    activeOrgId = resolveActiveOrg(user, preferredOrgId)
+  } catch (e) {
+    if (e instanceof NoMembershipError) {
+      return NextResponse.json({ error: 'Account has no organisation access' }, { status: 500 })
+    }
+    throw e
+  }
   const activeRole = roleInOrg(user, activeOrgId)!
   // Persist last-active so a returning user lands where they left off.
   setDefaultOrg(user.id, activeOrgId)

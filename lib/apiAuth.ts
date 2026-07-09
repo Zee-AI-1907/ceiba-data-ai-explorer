@@ -100,6 +100,13 @@ async function readSessionCookie(request?: Request): Promise<string | undefined>
 /**
  * getSession — Validate the session cookie server-side and return the payload,
  * or null if there is no valid session. Does NOT produce an HTTP response.
+ *
+ * STATELESS: this is the low-level decode (signature + expiry only). It does NOT
+ * consult the user store. The GUARDS below (requireAuth/requireOrg/
+ * requireAuthWithPermission) perform the live-membership re-check that makes
+ * revocation take effect — getSession stays stateless so it can be reused by
+ * callers that only need the decoded principal (and the Edge middleware path
+ * uses verifySessionEdge, which is likewise cookie-only for page gating).
  */
 export async function getSession(request?: Request): Promise<Session | null> {
   const raw = await readSessionCookie(request)
@@ -109,23 +116,55 @@ export async function getSession(request?: Request): Promise<Session | null> {
 }
 
 /**
- * requireAuth — 401 if there is no valid session.
- * Returns `{ session, error: null }` on success. CHECK `error` FIRST.
+ * Live-membership re-resolution — the revocation FLOOR for every authenticated
+ * DATA path. Decodes the cookie, then re-checks the user against the live store:
+ *   - no valid cookie                    → 401
+ *   - user no longer exists              → 401
+ *   - user no longer a member of orgId   → 401 (revoked mid-session)
+ * On success it returns the session with the role RE-DERIVED from the live
+ * active-org membership, so a downgraded (not fully revoked) role can never ride
+ * its stale cookie. This mirrors requireAuthWithPermission's re-resolution and
+ * makes revocation take effect on the very next request — everywhere, not just
+ * on permission-gated routes.
  */
-export async function requireAuth(request?: Request): Promise<AuthResult> {
+async function resolveLiveSession(request?: Request): Promise<AuthResult> {
   const session = await getSession(request)
   if (!session) return unauthorized()
-  return { session, error: null }
+
+  // Re-resolve the effective role against the live store (revocation-safe).
+  const user = findUserById(session.userId)
+  const effectiveRole: Role | null = user ? roleInOrg(user, session.orgId) : null
+  if (!user || effectiveRole === null) {
+    // The user is gone OR no longer a member of the active org → the session is
+    // invalid (not merely forbidden): the cookie is scoped to an org the caller
+    // can no longer access.
+    return unauthorized()
+  }
+
+  // Return the freshly-resolved role so downstream reads the current truth.
+  return { session: { ...session, role: effectiveRole }, error: null }
+}
+
+/**
+ * requireAuth — 401 if there is no valid session OR the user is no longer a
+ * member of the session's active org (revocation floor). Returns
+ * `{ session, error: null }` on success with the role re-derived live.
+ * CHECK `error` FIRST.
+ */
+export async function requireAuth(request?: Request): Promise<AuthResult> {
+  return resolveLiveSession(request)
 }
 
 /**
  * requireOrg — same as requireAuth, but additionally guarantees the session
  * carries a tenant key (`orgId`). Use in any route that scopes data by org.
  * (In practice every session has an orgId; this makes the intent explicit and
- * guards against a malformed/legacy cookie.)
+ * guards against a malformed/legacy cookie.) Like requireAuth it enforces the
+ * live-membership floor, so a REVOKED user can no longer read their former org's
+ * data on requireOrg-guarded PHI paths (e.g. GET /api/dashboards).
  */
 export async function requireOrg(request?: Request): Promise<AuthResult> {
-  const { session, error } = await requireAuth(request)
+  const { session, error } = await resolveLiveSession(request)
   if (error) return { session: null, error }
   if (!session.orgId) return unauthorized()
   return { session, error: null }
@@ -153,20 +192,14 @@ export async function requireAuthWithPermission(
   request: Request | undefined,
   permission: Permission
 ): Promise<AuthResult> {
-  const { session, error } = await requireAuth(request)
+  // resolveLiveSession already does the revocation-safe re-resolution (401 if
+  // the user is gone or no longer a member of the active org) and returns the
+  // session with the freshly-resolved role.
+  const { session, error } = await resolveLiveSession(request)
   if (error) return { session: null, error }
 
-  // Re-resolve the effective role against the live store (revocation-safe).
-  const user = findUserById(session.userId)
-  const effectiveRole: Role | null = user ? roleInOrg(user, session.orgId) : null
-  if (!user || effectiveRole === null) {
-    // Membership for the active org was revoked → treat the session as invalid.
-    return unauthorized()
+  if (!hasPermission(session.role, permission)) {
+    return forbidden(permission, session.role)
   }
-
-  if (!hasPermission(effectiveRole, permission)) {
-    return forbidden(permission, effectiveRole)
-  }
-  // Return the freshly-resolved role so downstream reads the current truth.
-  return { session: { ...session, role: effectiveRole }, error: null }
+  return { session, error: null }
 }

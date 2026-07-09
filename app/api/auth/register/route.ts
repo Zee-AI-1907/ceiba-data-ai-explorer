@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireAuthWithPermission } from '@/lib/apiAuth'
-import { addUser } from '@/lib/authStore'
+import { addUser, findUserById } from '@/lib/authStore'
 import { logAuditEvent } from '@/lib/auditLog'
 import type { Role } from '@/lib/permissions'
 
@@ -69,6 +69,10 @@ export async function POST(req: Request) {
 
   try {
     const created = addUser({ email, password, name, membership: { orgId, role } })
+    // Attribute the audit event to the ACTING admin's real email (P3-5), not the
+    // literal string 'admin'. Fall back to the userId if the admin record cannot
+    // be re-read (should not happen — they just passed the permission gate).
+    const actingAdmin = findUserById(session.userId)
     logAuditEvent({
       action: 'USER_CREATED',
       resourceType: 'auth',
@@ -76,7 +80,7 @@ export async function POST(req: Request) {
       severity: 'WARNING',
       userId: session.userId,
       orgId: session.orgId,
-      userEmail: 'admin',
+      userEmail: actingAdmin?.email ?? session.userId,
     })
     return NextResponse.json({ user: created }, { status: 201 })
   } catch (e) {

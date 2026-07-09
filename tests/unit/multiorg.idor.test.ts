@@ -35,9 +35,11 @@ import {
 import { SESSION_COOKIE_NAME, signSession } from '@/lib/session'
 import { dashboardRepository } from '@/lib/repository'
 import type { Session } from '@/lib/apiAuth'
+import { getRecentAuditEvents } from '@/lib/auditLog'
 import { POST as loginPOST } from '@/app/api/auth/login/route'
 import { POST as switchPOST } from '@/app/api/auth/switch-org/route'
 import { GET as meGET } from '@/app/api/auth/me/route'
+import { GET as dashboardsGET } from '@/app/api/dashboards/route'
 import { POST as membershipsPOST, DELETE as membershipsDELETE } from '@/app/api/auth/memberships/route'
 /* eslint-enable import/first */
 
@@ -204,15 +206,91 @@ describe('IDOR-4 — forged / stale cookie', () => {
   })
 })
 
+describe('P1-1 — revocation floor on non-permission-gated DATA paths', () => {
+  it('a revoked user hitting GET /api/dashboards (requireOrg) gets 401, not their former org PHI', async () => {
+    // `both` is admin in org-A. Sign a valid A-active cookie.
+    const cookieA = cookieHeaderFor(both.id, 'org-A', 'admin')
+    // Sanity: before revocation, the requireOrg-guarded list succeeds.
+    const before = await dashboardsGET(
+      new Request('http://localhost/api/dashboards', { headers: { cookie: cookieA } }) as never
+    )
+    expect(before.status).toBe(200)
+
+    // Revoke org-A (they still have org-B, so revoke succeeds).
+    expect(revokeMembership(both.id, 'org-A')).not.toBeNull()
+
+    // The same still-signed A-active cookie now resolves no membership → 401.
+    // Revocation takes effect on the very next request, WITHOUT waiting for the
+    // 8h cookie TTL — even on a path guarded only by requireOrg (not a
+    // permission gate).
+    const after = await dashboardsGET(
+      new Request('http://localhost/api/dashboards', { headers: { cookie: cookieA } }) as never
+    )
+    expect(after.status).toBe(401)
+
+    // Restore for other tests / idempotency.
+    grantMembership(both.id, 'org-A', 'admin')
+  })
+
+  it('a revoked user hitting GET /api/auth/me gets 401 (activeRole re-resolved from the live store)', async () => {
+    const cookieA = cookieHeaderFor(both.id, 'org-A', 'admin')
+    const before = await meGET(new Request('http://localhost/api/auth/me', { headers: { cookie: cookieA } }))
+    expect(before.status).toBe(200)
+    expect((await before.json()).activeRole).toBe('admin')
+
+    expect(revokeMembership(both.id, 'org-A')).not.toBeNull()
+
+    const after = await meGET(new Request('http://localhost/api/auth/me', { headers: { cookie: cookieA } }))
+    expect(after.status).toBe(401)
+
+    grantMembership(both.id, 'org-A', 'admin')
+  })
+
+  it('me re-resolves a DOWNGRADED role from the live store (stale admin cookie → analyst)', async () => {
+    // A cookie signed as admin must not keep showing admin after a downgrade.
+    const cookieAdmin = cookieHeaderFor(both.id, 'org-A', 'admin')
+    // Downgrade both's org-A role to analyst.
+    grantMembership(both.id, 'org-A', 'analyst')
+    const res = await meGET(new Request('http://localhost/api/auth/me', { headers: { cookie: cookieAdmin } }))
+    expect(res.status).toBe(200)
+    // activeRole is the LIVE role, not the stale 'admin' in the cookie.
+    expect((await res.json()).activeRole).toBe('analyst')
+    // Restore admin for other tests.
+    grantMembership(both.id, 'org-A', 'admin')
+  })
+})
+
 describe('switch-org & me contracts', () => {
-  it('switching to the already-active org is a 200 no-op that re-issues the cookie', async () => {
+  it('switching to the already-active org is a 200 clean no-op (no cookie re-issue, no TTL reset)', async () => {
+    // P3-2: a same-org switch must NOT re-issue the cookie (which would reset the
+    // 8h TTL) nor emit an ORG_SWITCH audit event. It returns the current active
+    // org/role so the client stays consistent.
     const cookie = cookieHeaderFor(both.id, 'org-A', 'admin')
+    const auditBefore = getRecentAuditEvents(50, 'org-A').filter((e) => e.action === 'ORG_SWITCH').length
     const res = await switchPOST(jsonReq('http://localhost/api/auth/switch-org', { orgId: 'org-A' }, cookie))
     expect(res.status).toBe(200)
-    expect(setCookieValue(res)).not.toBeNull()
+    // No cookie re-issue → no Set-Cookie → no TTL reset.
+    expect(setCookieValue(res)).toBeNull()
     const body = await res.json()
     expect(body.activeOrgId).toBe('org-A')
     expect(body.role).toBe('admin')
+    // No ORG_SWITCH audit for a no-op switch.
+    const auditAfter = getRecentAuditEvents(50, 'org-A').filter((e) => e.action === 'ORG_SWITCH').length
+    expect(auditAfter).toBe(auditBefore)
+  })
+
+  it('switching to a DIFFERENT member org still re-issues the cookie and audits', async () => {
+    // Regression guard for P3-2: a real switch must still fully re-issue + audit.
+    const cookie = cookieHeaderFor(both.id, 'org-A', 'admin')
+    const auditBefore = getRecentAuditEvents(50, 'org-B').filter((e) => e.action === 'ORG_SWITCH').length
+    const res = await switchPOST(jsonReq('http://localhost/api/auth/switch-org', { orgId: 'org-B' }, cookie))
+    expect(res.status).toBe(200)
+    expect(setCookieValue(res)).not.toBeNull()
+    const body = await res.json()
+    expect(body.activeOrgId).toBe('org-B')
+    expect(body.role).toBe('analyst')
+    const auditAfter = getRecentAuditEvents(50, 'org-B').filter((e) => e.action === 'ORG_SWITCH').length
+    expect(auditAfter).toBe(auditBefore + 1)
   })
 
   it('me returns memberships + activeOrgId + activeRole from the session', async () => {

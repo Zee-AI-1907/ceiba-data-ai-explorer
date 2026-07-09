@@ -166,6 +166,35 @@ describe('POST /api/sql-generate — hardening is preserved', () => {
     expect(res.status).toBe(401)
   })
 
+  it('401 when the live store shows the caller is NOT a member of the forged org (membership boundary, not just HMAC)', async () => {
+    // Prove the route enforces LIVE membership, not merely a validly-signed
+    // cookie: the synthetic user has NO membership in the forged org, so
+    // requireAuthWithPermission's re-resolution finds no role → 401.
+    __setUserResolverForTest((id: string): User => ({
+      id,
+      email: `${id}@test.local`,
+      passwordHash: 'x',
+      memberships: [{ orgId: 'some-other-org', role: 'clinician' as const }],
+      defaultOrgId: 'some-other-org',
+      name: id,
+      createdAt: new Date(0).toISOString(),
+    }))
+    try {
+      const res = await POST(makeReq({ orgId: 'orgA' }))
+      expect(res.status).toBe(401)
+    } finally {
+      __setUserResolverForTest((id: string): User => ({
+        id,
+        email: `${id}@test.local`,
+        passwordHash: 'x',
+        memberships: FORGED_ORGS.map((orgId) => ({ orgId, role: 'clinician' as const })),
+        defaultOrgId: FORGED_ORGS[0],
+        name: id,
+        createdAt: new Date(0).toISOString(),
+      }))
+    }
+  })
+
   it('400 when the body fails the schema (missing userMessage)', async () => {
     const res = await POST(makeReq({ body: { notUserMessage: 'x' } }))
     expect(res.status).toBe(400)
