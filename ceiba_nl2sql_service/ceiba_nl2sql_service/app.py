@@ -254,11 +254,11 @@ async def nl2sql_explain(payload: ExplainRequest, state: AppState = Depends(get_
         return ExplainResponse(ok=False, error=guard_verdict.reason or "SQL rejected by the read-only guard.")
 
     # DuckDB's engine methods are BLOCKING (synchronous C calls). Running them
-    # directly on the event loop would serialize every request behind one query;
-    # offload to Starlette's threadpool. The engine keeps its own lock around
-    # attach/execute for DuckDB connection safety (a single shared connection
-    # still caps real concurrency — a connection pool is a future improvement,
-    # deliberately NOT built here; §2.1).
+    # directly on the event loop would stall it for every request; offload to
+    # Starlette's threadpool. The engine runs each explain() on a per-call
+    # DuckDB cursor (its lock covers only attach/dispose/harden), so
+    # threadpool workers run queries genuinely in parallel — concurrency is
+    # capped by the threadpool size, not by the engine.
     result = await run_in_threadpool(state.engine.explain, payload.sql)
     if result.ok:
         return ExplainResponse(ok=True, plan=result.plan)  # type: ignore[union-attr]
@@ -290,9 +290,10 @@ async def nl2sql_execute(payload: ExecuteRequest, state: AppState = Depends(get_
     try:
         # Offload the BLOCKING DuckDB execute to the threadpool so a single
         # long query does not stall the event loop for all other requests.
-        # The engine's internal lock still serializes DuckDB connection access;
-        # a connection pool (to raise real concurrency past one) is a future
-        # improvement, intentionally not built here.
+        # The engine runs each execute() on a per-call DuckDB cursor (its lock
+        # covers only attach/dispose/harden), so a slow query here does NOT
+        # serialize other requests' queries — concurrency is capped by the
+        # threadpool size, not by the engine.
         result = await run_in_threadpool(
             state.engine.execute,
             payload.sql,

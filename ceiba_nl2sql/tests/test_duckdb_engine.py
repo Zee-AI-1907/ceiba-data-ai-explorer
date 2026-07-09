@@ -6,6 +6,8 @@ is engine-level and language-agnostic").
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import duckdb
@@ -246,5 +248,139 @@ def test_native_single_source_flag_disables_routing(seed_db_path: str):
         engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
         engine._postgres_aliases.add("pg")
         assert engine._passthrough_sql('SELECT count(*) FROM pg."Shared"."Monitors"') is None
+    finally:
+        engine.dispose()
+
+
+# ── per-call cursor concurrency (execute/explain no longer hold a global lock) ─
+
+
+def test_concurrent_fast_query_not_serialized_behind_slow_query(seed_db_path: str):
+    """PERFORMANCE CONTRACT: execute() runs each call on its own cursor, so a
+    slow query (e.g. a long federated join) must NOT block another user's
+    sub-second query. A deliberately slow cross-join (~2s locally, well over
+    0.5s even on much faster hardware) runs in one thread; a trivial query
+    issued while it is in flight must COMPLETE while the slow one is still
+    running. Under the old single-lock design the fast query waited for the
+    full slow-query duration, so `slow_done` would already be set here.
+    """
+    engine = DuckDbEngine()
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        # Warm up / trigger _harden outside the timed section.
+        engine.execute("SELECT 1 AS n", ExecuteOptions(max_rows=1, deadline_ms=5000))
+
+        slow_started = threading.Event()
+        slow_done = threading.Event()
+        slow_error: list[Exception] = []
+
+        def run_slow() -> None:
+            slow_started.set()
+            try:
+                # ~9e8 combinations forced through max() — no shortcut for the
+                # optimizer; calibrated ~2s on a dev laptop (duckdb 1.5).
+                engine.execute(
+                    "SELECT max(a.range * b.range) AS m FROM range(30000) a, range(30000) b",
+                    ExecuteOptions(max_rows=1, deadline_ms=60_000),
+                )
+            except Exception as exc:  # pragma: no cover - surfaced via assertion below
+                slow_error.append(exc)
+            finally:
+                slow_done.set()
+
+        slow_thread = threading.Thread(target=run_slow)
+        slow_thread.start()
+        try:
+            assert slow_started.wait(timeout=5.0)
+            time.sleep(0.2)  # let the slow query actually enter DuckDB
+            fast_t0 = time.monotonic()
+            fast = engine.execute('SELECT count(*) AS n FROM mock.public."T"', ExecuteOptions(max_rows=10, deadline_ms=10_000))
+            fast_elapsed = time.monotonic() - fast_t0
+            slow_still_running = not slow_done.is_set()
+        finally:
+            slow_thread.join(timeout=60.0)
+
+        assert not slow_error, f"slow query failed: {slow_error}"
+        assert fast.rows == [{"n": 3}]
+        # The fast query finished while the slow query was still executing —
+        # i.e. the two overlapped instead of serializing.
+        assert slow_still_running, "fast query was serialized behind the slow query"
+        # Generous margin: the fast query is a 3-row count; even sharing CPU
+        # with the slow scan it must come back well under the slow duration.
+        assert fast_elapsed < 1.0, f"fast query took {fast_elapsed:.2f}s — looks serialized"
+    finally:
+        engine.dispose()
+
+
+def test_cursor_write_fails_on_read_only_attach(seed_db_path: str):
+    """READ_ONLY attach semantics are database-instance-level, so they must
+    hold through per-call cursors too: a write attempted on a cursor
+    duplicated from the engine's connection fails at the DuckDB level.
+    """
+    engine = DuckDbEngine()
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        cursor = engine._conn.cursor()
+        try:
+            with pytest.raises(Exception) as excinfo:
+                cursor.execute('INSERT INTO mock.public."T" VALUES (99, 99.0)')
+            assert "read" in str(excinfo.value).lower() or "insert" in str(excinfo.value).lower()
+        finally:
+            cursor.close()
+        # And via the public path (which now runs on a cursor internally).
+        with pytest.raises(Exception):
+            engine.execute('DELETE FROM mock.public."T"', ExecuteOptions(max_rows=10, deadline_ms=5000))
+    finally:
+        engine.dispose()
+
+
+def test_hardening_applies_to_cursors(seed_db_path: str):
+    """SECURITY: `enable_external_access=false` + `lock_configuration=true`
+    are GLOBAL (database-instance) settings, so hardening applied once on the
+    parent connection must also seal every cursor: no INSTALL/LOAD, no
+    filesystem reads, no un-locking — even on a fresh cursor.
+    """
+    engine = DuckDbEngine()
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        engine.execute("SELECT 1 AS n", ExecuteOptions(max_rows=1, deadline_ms=5000))  # triggers _harden
+        cursor = engine._conn.cursor()
+        try:
+            with pytest.raises(Exception):
+                cursor.execute("INSTALL json")
+            # NOTE: json is statically linked into the Python wheel (LOAD json
+            # is a no-op), so probe with httpfs — a genuinely external
+            # extension whose LOAD must be refused after hardening.
+            with pytest.raises(Exception):
+                cursor.execute("LOAD httpfs")
+            with pytest.raises(Exception) as read_exc:
+                cursor.execute("SELECT * FROM read_csv('/etc/hostname')")
+            read_message = str(read_exc.value).lower()
+            assert "external access" in read_message or "disabled" in read_message or "permission" in read_message
+            with pytest.raises(Exception) as unlock_exc:
+                cursor.execute("SET enable_external_access=true")
+            assert "locked" in str(unlock_exc.value).lower() or "cannot change" in str(unlock_exc.value).lower()
+            # Reads from the attached READ_ONLY catalog still work on the cursor.
+            assert cursor.execute('SELECT count(*) FROM mock.public."T"').fetchall() == [(3,)]
+        finally:
+            cursor.close()
+    finally:
+        engine.dispose()
+
+
+def test_explain_use_does_not_leak_into_other_calls(seed_db_path: str):
+    """explain()'s `USE catalog.schema` runs on a per-call cursor, so it is
+    session-local: it must not change the default catalog of the shared parent
+    connection (previously the USE leaked into every subsequent query).
+    """
+    engine = DuckDbEngine()
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        result = engine.explain('SELECT * FROM "T"', catalog="mock", schema="public")
+        assert result.ok is True
+        # An UNQUALIFIED reference on the next execute() must still fail —
+        # proof the USE did not persist on the shared connection.
+        with pytest.raises(Exception):
+            engine.execute('SELECT * FROM "T"', ExecuteOptions(max_rows=10, deadline_ms=5000))
     finally:
         engine.dispose()

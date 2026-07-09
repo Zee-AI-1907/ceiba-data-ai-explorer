@@ -14,6 +14,15 @@ both `opts.max_rows` (clamp + `truncated` flag) and `opts.deadline_ms`
 (interrupt the connection when the budget elapses, via a background thread
 + `connection.interrupt()` — Python's duckdb binding exposes `interrupt()`
 the same way the Node binding does).
+
+Concurrency: `execute()` and `explain()` each run on a per-call cursor
+(`self._conn.cursor()`), a cheap duplicate connection sharing the same DuckDB
+database instance — including its ATTACHed catalogs, READ_ONLY flags, and the
+instance-global hardening settings — so concurrent queries run in parallel
+instead of serializing behind one connection. `self._lock` guards only
+connection LIFECYCLE (attach/dispose) and first-use hardening; it is never
+held while user SQL runs. A per-call cursor also confines `explain()`'s `USE`
+and the deadline `interrupt()` to that one query.
 """
 
 from __future__ import annotations
@@ -95,6 +104,9 @@ class DuckDbEngine:
         self._conn.execute("LOAD postgres")
         self._conn.execute("INSTALL vss")
         self._conn.execute("LOAD vss")
+        # Guards connection LIFECYCLE only (attach/dispose) plus the one-time
+        # hardening — NEVER held while user SQL runs. execute()/explain() get
+        # concurrency from per-call cursors instead (see module docstring).
         self._lock = threading.Lock()
         # Whether the read-path lockdown has been applied. External access
         # (arbitrary filesystem/HTTP table functions such as read_csv/
@@ -106,6 +118,10 @@ class DuckDbEngine:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     def attach(self, specs: Iterable[AttachSpec]) -> None:
+        with self._lock:
+            self._attach_locked(specs)
+
+    def _attach_locked(self, specs: Iterable[AttachSpec]) -> None:
         for spec in specs:
             if spec.read_only is not True:
                 raise NonReadOnlyAttachError(
@@ -139,8 +155,12 @@ class DuckDbEngine:
                 self._postgres_aliases.add(spec.alias)
 
     def dispose(self) -> None:
-        self._conn.close()
-        self._attached_aliases.clear()
+        with self._lock:
+            # Closing the parent connection also invalidates every cursor
+            # duplicated from it, so in-flight per-call cursors fail fast
+            # rather than touching a dead database instance.
+            self._conn.close()
+            self._attached_aliases.clear()
 
     # ── external-access lockdown (defense in depth, security boundary) ────────
 
@@ -163,12 +183,19 @@ class DuckDbEngine:
         (both need external access), which is why it is applied lazily on the
         first read rather than in the constructor. Reads from already-attached
         READ_ONLY catalogs continue to work after the lockdown.
+
+        Both options are GLOBAL (database-instance-level) DuckDB settings, so
+        hardening applied once through `self._conn` also seals every cursor
+        duplicated from it (see test_hardening_applies_to_cursors).
         """
         if self._hardened:
             return
-        self._conn.execute("SET enable_external_access=false")
-        self._conn.execute("SET lock_configuration=true")
-        self._hardened = True
+        with self._lock:
+            if self._hardened:
+                return
+            self._conn.execute("SET enable_external_access=false")
+            self._conn.execute("SET lock_configuration=true")
+            self._hardened = True
 
     # ── single-source native routing (docs/research/DUCKDB_PUSHDOWN.md §5.1) ──
 
@@ -214,29 +241,37 @@ class DuckDbEngine:
         # back to `sql` unchanged for cross-source (or unanalyzable) queries.
         sql_to_run = self._passthrough_sql(sql) or sql
 
+        # Seal external filesystem/network access before running ANY user SQL
+        # (defense in depth against read_csv/read_parquet exfiltration/SSRF);
+        # idempotent after the first call. The settings are instance-global,
+        # so they cover the per-call cursor below.
+        self._harden()
+
+        # Run on a per-call cursor — a cheap duplicate connection to the same
+        # database instance (same ATTACHes, same hardened config) — so
+        # concurrent execute()/explain() calls do NOT serialize behind one
+        # shared connection, and the deadline interrupt() cancels ONLY this
+        # query.
+        cursor = self._conn.cursor()
         deadline_hit = threading.Event()
-        timer = threading.Timer(deadline_ms / 1000.0, self._on_deadline, args=(deadline_hit,))
+        timer = threading.Timer(deadline_ms / 1000.0, self._on_deadline, args=(deadline_hit, cursor))
         timer.start()
         try:
-            with self._lock:
-                # Seal external filesystem/network access before running ANY
-                # user SQL (defense in depth against read_csv/read_parquet
-                # exfiltration/SSRF); idempotent after the first call.
-                self._harden()
-                # Ask for one more row than the cap so a single extra row
-                # proves more data existed beyond max_rows, mirroring the TS
-                # engine's `runAndReadUntil(sql, maxRows + 1)`.
-                cursor = self._conn.execute(sql_to_run)
-                desc = cursor.description or []
-                col_names = [d[0] for d in desc]
-                engine_columns = [EngineColumn(name=d[0], type=str(d[1])) for d in desc]
-                all_rows = cursor.fetchmany(max_rows + 1)
+            # Ask for one more row than the cap so a single extra row
+            # proves more data existed beyond max_rows, mirroring the TS
+            # engine's `runAndReadUntil(sql, maxRows + 1)`.
+            cursor.execute(sql_to_run)
+            desc = cursor.description or []
+            col_names = [d[0] for d in desc]
+            engine_columns = [EngineColumn(name=d[0], type=str(d[1])) for d in desc]
+            all_rows = cursor.fetchmany(max_rows + 1)
         except Exception:
             if deadline_hit.is_set():
                 raise EngineDeadlineExceededError(f"execute(): exceeded deadlineMs budget of {deadline_ms}ms")
             raise
         finally:
             timer.cancel()
+            cursor.close()
 
         if deadline_hit.is_set():
             raise EngineDeadlineExceededError(f"execute(): exceeded deadlineMs budget of {deadline_ms}ms")
@@ -247,10 +282,13 @@ class DuckDbEngine:
 
         return EngineResult(columns=engine_columns, rows=row_dicts, row_count=len(row_dicts), truncated=truncated)
 
-    def _on_deadline(self, deadline_hit: threading.Event) -> None:
+    def _on_deadline(self, deadline_hit: threading.Event, cursor: duckdb.DuckDBPyConnection) -> None:
         deadline_hit.set()
         try:
-            self._conn.interrupt()
+            # Interrupt the per-call cursor, not the shared parent connection —
+            # only THIS query's deadline elapsed; concurrent queries on other
+            # cursors keep running.
+            cursor.interrupt()
         except Exception:
             pass
 
@@ -265,14 +303,17 @@ class DuckDbEngine:
         # (~1s, planning only — no rows executed) and validates correctly, so
         # explain() runs the SQL as-given regardless of native_single_source.
         try:
-            with self._lock:
-                self._harden()
+            self._harden()
+            # Per-call cursor: runs concurrently with other queries, and the
+            # `USE` below is session-local to the cursor — it no longer leaks
+            # a default catalog/schema into the shared parent connection.
+            with self._conn.cursor() as cursor:
                 if catalog:
                     use_clause = _quote_ident(catalog)
                     if schema:
                         use_clause += f".{_quote_ident(schema)}"
-                    self._conn.execute(f"USE {use_clause}")
-                rows = self._conn.execute(f"EXPLAIN {sql}").fetchall()
+                    cursor.execute(f"USE {use_clause}")
+                rows = cursor.execute(f"EXPLAIN {sql}").fetchall()
             # EXPLAIN never returns data rows to the caller — only the
             # textual plan, concatenated from every returned column value.
             plan = "\n".join("\n".join(str(v) for v in row) for row in rows)
