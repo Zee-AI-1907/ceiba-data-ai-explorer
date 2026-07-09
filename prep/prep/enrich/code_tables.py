@@ -18,8 +18,17 @@ A table `T` qualifies as a lookup/code vocabulary when ALL of:
   4. >=1 non-PK text label column.
   5. Referenced by >=1 FK edge from a LARGER fact table (`T` is the `to` side
      of a joingraph.json edge whose `from` table has a bigger approxRowCount).
-  6. The label column is low-cardinality (`distinctCount <= 20`) and
-     `phiClass == "non-phi"` per profiles.json/phi.json.
+  6. The label column is low-cardinality (`distinctCount <= 20`) and either
+     `phiClass == "non-phi"`, OR it qualifies under the narrowly-scoped
+     PHI-flagged code-table LABEL EXEMPTION (see
+     `_label_qualifies_under_phi_exemption`): a name-only PHI flag on a SHORT
+     coded label that is a true enumeration on a tiny FK-referenced lookup
+     table (e.g. `MonitorMeasurementTypes.Name` — CVP/HR/SPO2, a controlled
+     clinical vocabulary the name-only classifier cannot tell from
+     `Patients.Name`). The exemption NEVER changes the global classify_column
+     result (the column stays phi-suppressed in phi.json); it lives ONLY in
+     this detector's acceptance decision, and mined values are additionally
+     re-validated at the VALUE level by `_mined_labels_look_like_vocabulary`.
 
 The label column is picked by name preference (Name/Label/Code/ShortName/
 Description), else the single non-PK non-FK text column, else the table is
@@ -35,6 +44,7 @@ already is (see `prep/prep/phi_gate.py`).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -49,6 +59,99 @@ _LABEL_COLUMN_NAME_PREFERENCE = ("name", "label", "code", "shortname", "descript
 _INTEGER_TYPE_HINTS = ("int", "serial", "numeric", "decimal")
 _SHORT_STRING_TYPE_HINTS = ("char", "text", "varchar")
 _TEXT_TYPE_HINTS = ("char", "text", "varchar")
+
+# ── PHI-flagged code-table LABEL EXEMPTION (SEMANTIC_HINTS.md §1.2 / Fix D) ──
+# The name-only PHI classifier (ceiba_nl2sql.compliance.phi.classify_column)
+# cannot tell `Patients.Name` (real PHI) from `MonitorMeasurementTypes.Name`
+# (a controlled clinical vocabulary: CVP, HR, MAP, SPO2, …). Both normalize to
+# the key "name" and are flagged direct-identifier. That name-only flag REJECTS
+# genuine lookup vocabularies from code-table detection, silently no-op-ing the
+# whole semantic-hint feature on real data.
+#
+# A DETECTED code table is, structurally, a controlled vocabulary: it is tiny,
+# has an (id, label) shape, is FK-referenced by a strictly-LARGER fact table,
+# and its label column is a bounded low-cardinality enumeration. THAT structure
+# — not the column name — is the real discriminator against a patient-name
+# column (which lives on a large/growing table, is not FK-referenced as a
+# lookup, and whose distinctCount tracks the patient population, not a fixed
+# vocabulary). This exemption is applied ONLY inside the detector's acceptance
+# logic; it NEVER changes the global `classify_column` result (Patients.Name
+# etc. stay direct-identifier globally, phi.json stays phi-suppressed).
+
+# phiClasses eligible for the exemption. `free-text` is deliberately EXCLUDED:
+# a free-text/narrative column is exactly the unbounded-text shape a clinician
+# types PHI into, and must never be treated as a controlled vocabulary even if
+# it structurally slipped through. Only the name-based identifier flags
+# (direct/quasi) — the ones that misfire on a vocabulary column named "Name" —
+# are exemptible.
+_PHI_EXEMPTABLE_CLASSES = frozenset({"direct-identifier", "quasi-identifier"})
+
+# Definitively-large / unbounded string types that indicate a free-text
+# narrative, NOT a short coded label: CLOB / NTEXT, and VARCHAR(max) /
+# NVARCHAR(max). These are the shapes a clinician types PHI narrative into and
+# are NEVER eligible under the exemption.
+#
+# NOTE on bare `TEXT`: on PostgreSQL (this project's staging engine) `text` is
+# the ORDINARY, universal string type — BOTH a coded lookup label
+# (`MonitorMeasurementTypes.Name`) AND a patient-name column (`Patients.Name`)
+# introspect to exactly `TEXT`. So `text` carries ZERO discriminating signal
+# here and MUST NOT be treated as disqualifying, or the exemption would reject
+# the real staging lookup table and the whole feature would no-op (the very
+# bug this fix targets). `text` is therefore ACCEPTED at the type level; the
+# real discriminator between the two is the STRUCTURAL gate the caller already
+# applied (tiny, FK-referenced by a strictly-larger fact table) PLUS the
+# true-enumeration check (distinctCount ≈ approxRowCount) PLUS the value-level
+# vocabulary net — exactly as the fix spec calls out ("the FK-referenced-tiny-
+# table structure is the real discriminator"). We reject only the LARGE/CLOB
+# shapes below, which no coded label ever legitimately has.
+_DISQUALIFYING_TEXT_TYPE_HINTS = ("clob", "ntext")
+_MAX_LENGTH_LITERAL_PATTERN = re.compile(r"\(\s*max\s*\)", re.IGNORECASE)
+_LENGTH_LITERAL_PATTERN = re.compile(r"\(\s*(\d+)\s*\)")
+# A true coded label (HR, SPO2, "Respirations", "Non-invasive BP", "Mean
+# Arterial Pressure") is comfortably under this; a VARCHAR(N) with N above this
+# is treated as free-text-shaped and NOT exempted.
+_SHORT_STRING_MAX_DECLARED_LENGTH = 128
+
+# ── Vocabulary-validation net (secondary safety, Fix D step 4) ──────────────
+# Even after the structural exemption accepts a table, the MINED label VALUES
+# are validated to look like a small controlled vocabulary, not PHI. This is a
+# belt-and-suspenders guard against a mis-detected table (e.g. a small
+# FK-referenced table that happens to hold person names). A vocabulary like
+# HR/SPO2/TEMP/"Respirations"/"Non-invasive BP" passes; "John Smith" is
+# rejected. Applied to the WHOLE hint: any single PHI-looking value rejects the
+# entire code table (fail closed).
+_VOCAB_MAX_VALUE_LENGTH = 64
+# Bound the mined enumeration by the structural code-table row cap (200), NOT
+# the smaller profiling top-categories cap (20) — a legitimate coded vocabulary
+# (e.g. 30-row VentilatorMeasurementTypes) is still a bounded enumeration.
+_VOCAB_MAX_DISTINCT = CODE_TABLE_MAX_ROWS
+# A person-name shape: two-or-more whitespace-separated words that are each
+# Title-case alphabetic (e.g. "John Smith", "Mary Ann Jones"). NOTE this
+# pattern ALSO matches legitimate multi-word clinical vocabulary phrases like
+# "Mean Arterial Pressure" — Title-case alone cannot separate the two. So we do
+# NOT reject on a single match; instead we reject only when the mined set is
+# DOMINATED by this shape (a person-name table), which a real coded vocabulary
+# (rich in all-caps/short/digit-bearing coded tokens like HR, SPO2, TEMP) never
+# is. This keeps the net from dropping genuine vocabulary while still catching
+# a mis-detected person-name table (fail closed on the population signal).
+_PERSON_NAME_SHAPE_PATTERN = re.compile(r"^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+$")
+# If more than this fraction of the mined labels are Title-case multi-word
+# (person-name-shaped) AND none of the labels carry a coded-token signal, the
+# whole set reads as a person-name table and is rejected.
+_VOCAB_PERSON_NAME_FRACTION_THRESHOLD = 0.5
+
+
+def _has_coded_token_signal(value: str) -> bool:
+    """A coded vocabulary token: contains a digit, OR is an all-caps/short
+    acronym token (HR, SPO2, CVP, MAP, TEMP). Real clinical vocabularies are
+    rich in these; person-name tables have none."""
+    if any(ch.isdigit() for ch in value):
+        return True
+    for token in value.split():
+        alpha = "".join(ch for ch in token if ch.isalpha())
+        if alpha and alpha.isupper():  # ALL-CAPS token like HR / SPO2 / BP
+            return True
+    return False
 
 # RowFetcher: (table_id, id_column_name, label_column_name) -> list of
 # (id_value, label_value) tuples. Injected so this module never issues its
@@ -78,6 +181,141 @@ def _is_integer_or_short_string_type(data_type: str) -> bool:
 
 def _is_text_type(data_type: str) -> bool:
     return any(hint in data_type.lower() for hint in _TEXT_TYPE_HINTS)
+
+
+def _is_acceptable_label_string_type(data_type: str) -> bool:
+    """True IFF `data_type` is an ordinary string type acceptable as a coded
+    label — i.e. a string type that is NOT a definitively-large/unbounded
+    free-text/narrative shape.
+
+    Rejected (definitively large / narrative shape):
+      * CLOB / NTEXT,
+      * VARCHAR(max) / NVARCHAR(max) (SQL Server unbounded),
+      * VARCHAR(N)/CHAR(N) with N > _SHORT_STRING_MAX_DECLARED_LENGTH.
+    Accepted:
+      * bare TEXT (PostgreSQL universal string type — no discriminating signal;
+        see the module-level note — the structural + enumeration + vocab gates
+        do the discriminating, not the type),
+      * (N)VARCHAR(N)/CHAR(N) with a small explicit length,
+      * a char/varchar with no explicit length modifier.
+
+    A non-string type is rejected (a label must be a text-ish column).
+    """
+    lowered = data_type.lower()
+    if not _is_text_type(lowered):
+        return False
+    if any(hint in lowered for hint in _DISQUALIFYING_TEXT_TYPE_HINTS):
+        return False  # ntext/clob — definitively unbounded narrative shape
+    if _MAX_LENGTH_LITERAL_PATTERN.search(lowered):
+        return False  # varchar(max)/nvarchar(max) — unbounded
+    length_match = _LENGTH_LITERAL_PATTERN.search(lowered)
+    if length_match is not None:
+        return int(length_match.group(1)) <= _SHORT_STRING_MAX_DECLARED_LENGTH
+    return True  # bare text / char / varchar with no explicit length
+
+
+def _label_qualifies_under_phi_exemption(
+    phi_class: str,
+    label_data_type: str,
+    distinct_count: int,
+    approx_row_count: int,
+) -> bool:
+    """The narrowly-scoped PHI-flagged code-table LABEL EXEMPTION (Fix D step 1).
+
+    Returns True IFF a label column that `classify_column` flagged as PHI may
+    STILL serve as a code-table label. This is ONLY ever reached after the
+    caller has already verified EVERY structural code-table gate (rowcount <=
+    CODE_TABLE_MAX_ROWS, <= CODE_TABLE_MAX_COLS, single integer/short-string
+    PK, FK-referenced by a strictly-LARGER fact table, a resolvable non-PK
+    non-FK label column). Those structural gates are the real discriminator
+    against a patient-name column; the extra conditions here are belt-and-
+    suspenders so a false-positive requires ALL of them to line up:
+
+      1. phiClass is a NAME-BASED identifier flag (direct/quasi) — the class of
+         flag that misfires on a vocabulary column named "Name". `free-text`
+         is NOT exemptible (unbounded narrative may embed PHI).
+      2. The label column is an ordinary string type — NOT a definitively-large
+         narrative shape (CLOB/NTEXT, VARCHAR(max), or an oversized VARCHAR(N)).
+         Bare PostgreSQL `TEXT` is accepted because it carries no discriminating
+         signal (a patient-name column is also `TEXT`) — so this condition
+         alone is INSUFFICIENT; the structural FK-referenced-tiny-table gate the
+         caller already applied plus condition (4) below are the real
+         discriminators.
+      3. Bounded cardinality: 0 < distinctCount <= CODE_TABLE_MAX_ROWS. NOTE we
+         bound on CODE_TABLE_MAX_ROWS (200 — the structural table-size cap the
+         caller already enforced), NOT on the much smaller
+         HIGH_CARDINALITY_ABSOLUTE (20, which is a profiling top-categories cap,
+         unrelated to how large a legitimate coded vocabulary may be). Real
+         staging lookups exceed 20 (e.g. VentilatorMeasurementTypes has 30
+         rows) yet are plainly bounded controlled vocabularies. The table is
+         already gated to <= CODE_TABLE_MAX_ROWS rows, so the label can have at
+         most that many distinct values.
+      4. True enumeration: distinctCount ≈ approxRowCount (the label column is
+         essentially unique per lookup row — a fixed vocabulary, not a
+         high-repeat or high-card free-text column). We allow the label to have
+         a few fewer distinct values than rows (dupes/nulls) but require it to
+         be a substantial fraction of the row count and never exceed it.
+
+    NOTE: this NEVER mutates the global classify_column result. The column stays
+    PHI-suppressed in phi.json; the exemption lives only in this detector's
+    acceptance decision + the mined hint path.
+    """
+    if phi_class not in _PHI_EXEMPTABLE_CLASSES:
+        return False
+    if not _is_acceptable_label_string_type(label_data_type):
+        return False
+    if not (0 < distinct_count <= CODE_TABLE_MAX_ROWS):
+        return False
+    if approx_row_count <= 0:
+        return False
+    # A true enumeration: never more distinct labels than rows, and distinct
+    # count is a substantial fraction of the (tiny) row count. Guards against a
+    # small table whose "label" column is actually high-repeat/low-signal.
+    if distinct_count > approx_row_count:
+        return False
+    if distinct_count < max(1, approx_row_count // 2):
+        return False
+    return True
+
+
+def _mined_labels_look_like_vocabulary(codes: list[dict]) -> bool:
+    """Vocabulary-validation net (Fix D step 4): a HARD secondary safety check
+    on the actually-mined label VALUES, run AFTER extraction. Confirms the
+    mined labels look like a small controlled vocabulary and NOT PHI /
+    free-text. Fails CLOSED — one bad value rejects the whole hint.
+
+    Passes: HR, SPO2, TEMP, CVP, "Respirations", "Non-invasive BP", "Mean
+    Arterial Pressure" (short, coded, bounded set).
+    Rejected: "John Smith" / "Mary Ann Jones" (person-name shape), any value
+    longer than _VOCAB_MAX_VALUE_LENGTH, or a set larger than the low-card cap
+    (not a bounded enumeration).
+    """
+    label_values = [str(code.get("name")) for code in codes if code.get("name") is not None]
+    if not label_values:
+        return False
+    if len(set(label_values)) > _VOCAB_MAX_DISTINCT:
+        return False  # not a bounded enumeration
+
+    person_name_shaped = 0
+    any_coded_token = False
+    for value in label_values:
+        stripped = value.strip()
+        if not stripped:
+            return False
+        if len(stripped) > _VOCAB_MAX_VALUE_LENGTH:
+            return False  # too long to be a coded label -> free-text shape
+        if _PERSON_NAME_SHAPE_PATTERN.match(stripped):
+            person_name_shaped += 1
+        if _has_coded_token_signal(stripped):
+            any_coded_token = True
+
+    # Reject a set DOMINATED by person-name-shaped values that carries no coded
+    # token signal at all — that reads as a person-name table, not a controlled
+    # vocabulary. A real vocabulary ("HR"/"SPO2"/"Mean Arterial Pressure")
+    # always carries coded tokens, so it never trips this.
+    if not any_coded_token and person_name_shaped / len(label_values) > _VOCAB_PERSON_NAME_FRACTION_THRESHOLD:
+        return False
+    return True
 
 
 def _pick_label_column(table: dict, non_pk_non_fk_column_names: set[str]) -> dict | None:
@@ -170,12 +408,32 @@ def detect_code_tables(catalog: dict, joingraph: dict, profiles: dict, phi: dict
             continue
 
         label_column_id = label_column["columnId"]
+        distinct_count = distinct_count_by_column.get(label_column_id, HIGH_CARDINALITY_ABSOLUTE + 1)
+
         phi_class = phi_class_by_column.get(label_column_id)
         if phi_class is not None and phi_class != "non-phi":
-            continue  # PHI-gated: never mine a label column that isn't non-phi
-
-        distinct_count = distinct_count_by_column.get(label_column_id, HIGH_CARDINALITY_ABSOLUTE + 1)
-        if distinct_count > HIGH_CARDINALITY_ABSOLUTE:
+            # PHI-flagged label. By default we STILL never mine a non-non-phi
+            # label — EXCEPT under the narrowly-scoped code-table LABEL
+            # EXEMPTION: at this point the table has already passed EVERY
+            # structural code-table gate above (rowcount<=MAX, cols<=MAX,
+            # single int/short-string PK, FK-referenced by a strictly-larger
+            # fact table, a resolvable label column). Only then do we allow a
+            # name-flagged label (e.g. MonitorMeasurementTypes.Name, a clinical
+            # vocabulary the name-only classifier can't distinguish from
+            # Patients.Name) to qualify — see
+            # `_label_qualifies_under_phi_exemption`. This does NOT change the
+            # global classify_column result; the column stays phi-suppressed in
+            # phi.json. A mined table is additionally re-validated at the VALUE
+            # level by the vocabulary net after extraction.
+            if not _label_qualifies_under_phi_exemption(
+                phi_class=phi_class,
+                label_data_type=label_column["dataType"],
+                distinct_count=distinct_count,
+                approx_row_count=approx_rows,
+            ):
+                continue
+        elif distinct_count > HIGH_CARDINALITY_ABSOLUTE:
+            # non-phi label: keep the original low-cardinality gate.
             continue
 
         candidates.append(
@@ -260,6 +518,16 @@ def build_code_table_hints(
         )
         if not codes:
             continue  # no real rows -> no hint (never fabricate)
+
+        # Vocabulary-validation net (Fix D step 4): a HARD secondary safety
+        # check on the actually-mined label values. Even though the detector's
+        # structural gates + PHI exemption already accepted this table, we
+        # re-validate at the VALUE level that the mined labels look like a
+        # bounded controlled vocabulary (HR/SPO2/…) and not PHI (person names,
+        # free text). If ANY value looks like PHI, the WHOLE hint is dropped
+        # (fail closed) — this protects against a mis-detected table.
+        if not _mined_labels_look_like_vocabulary(codes):
+            continue
 
         referenced_by = [
             {"factTableId": edge["from"], "fkColumnId": f"{edge['from']}.{edge['fromColumns'][0]}"}

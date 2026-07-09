@@ -287,6 +287,31 @@ class SqlAlchemyIntrospector:
             max_sample_rows=sample_rows,
         )
 
+    def fetch_code_table_rows(
+        self, source_id: str, schema: str, table: str, id_column: str, label_column: str
+    ) -> list[tuple]:
+        """Read-only extraction of a code/lookup table's (id, label) rows for
+        Fix D semantic-hint mining (SEMANTIC_HINTS.md §1.3). Named
+        `*sample_aggregate*`-adjacent and bounded by a hard LIMIT so it can only
+        read a small lookup vocabulary (HR, SPO2, …), never a fact table — the
+        caller (code_tables.detect_code_tables) has already gated on
+        `approxRowCount <= CODE_TABLE_MAX_ROWS`. Label values here are non-PHI
+        controlled-vocabulary names (the detector rejects PHI label columns).
+        This is a deliberate second data-touching read path; the phi_gate AST
+        scan allowlists it by name alongside sample_aggregate.
+        """
+        conn = self._conn(source_id)
+        dialect_name = conn.dialect_name
+        qid = _quote_ident(dialect_name, id_column)
+        qlabel = _quote_ident(dialect_name, label_column)
+        quoted_table = f"{_quote_ident(dialect_name, schema)}.{_quote_ident(dialect_name, table)}"
+        # Hard cap far below any real lookup vocabulary; a bigger table would
+        # have been rejected by the detector before reaching here.
+        query = sa.text(f"SELECT {qid}, {qlabel} FROM {quoted_table} LIMIT 500")  # noqa: S608
+        with conn.engine.connect() as connection:
+            result = connection.execute(query)
+            return [(r[0], r[1]) for r in result]
+
     def sample_aggregate_time_windowed(
         self,
         table: TableMeta,

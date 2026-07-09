@@ -29,9 +29,13 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from ceiba_nl2sql.compliance.aggregate_profile import (
     ProfileColumn,
@@ -589,14 +593,45 @@ def _run_build_pipeline_p3b(
     # detector/extractor/synonym-matrix machinery itself is fully
     # implemented and exercised by prep/tests/test_code_tables.py via an
     # injected fake row_fetcher.
-    code_table_row_fetcher = None
-    code_table_hints = build_code_table_hints(
-        catalog=catalog,
-        joingraph=joingraph,
-        profiles=profiles,
-        phi=phi,
-        row_fetcher=code_table_row_fetcher,
-    )
+    # Fix D (row-fetcher wired): the introspector connections from the P3b loop
+    # above are disposed, so open a fresh SHORT-LIVED read-only connection per
+    # source on demand to extract the small (id,label) rows of a DETECTED code
+    # table (<=200 rows). Read-only + bounded (the detector only flags tiny
+    # lookup tables), PHI-safe (label columns are non-PHI by the detector's own
+    # gate). This is what makes the auto-mined HR->2 / SPO2->12 hints real in a
+    # live build (previously row_fetcher=None -> hints degraded to []).
+    _dsn_by_source = {s.source_id: os.environ[s.dsn_env] for s in sources}
+    _fetch_introspectors: dict[str, SqlAlchemyIntrospector] = {}
+
+    def code_table_row_fetcher(table_id: str, id_column: str, label_column: str) -> list[tuple]:
+        # table_id is "sourceId.schema.table" (SPEC §1 tableId format).
+        source_id, schema, table = table_id.split(".", 2)
+        dsn = _dsn_by_source.get(source_id)
+        if not dsn:
+            return []
+        intro = _fetch_introspectors.get(source_id)
+        if intro is None:
+            intro = SqlAlchemyIntrospector(repo_root=str(REPO_ROOT))
+            intro.connect_read_only(source_id, dsn)
+            _fetch_introspectors[source_id] = intro
+        try:
+            return intro.fetch_code_table_rows(source_id, schema, table, id_column, label_column)
+        except Exception as exc:  # noqa: BLE001 - a mining miss must never fail the build
+            logger.warning("code-table row fetch failed for %s: %s", table_id, exc)
+            return []
+
+    try:
+        code_table_hints = build_code_table_hints(
+            catalog=catalog,
+            joingraph=joingraph,
+            profiles=profiles,
+            phi=phi,
+            row_fetcher=code_table_row_fetcher,
+        )
+    finally:
+        for intro in _fetch_introspectors.values():
+            for sid in list(_dsn_by_source):
+                intro.dispose(sid)
     alias_seed_path = REPO_ROOT / "config" / "synonym_aliases.seed.yaml"
     alias_seed = load_synonym_alias_seed(alias_seed_path)
     auto_synonyms = build_auto_synonyms(

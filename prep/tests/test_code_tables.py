@@ -23,7 +23,11 @@ Asserts:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from prep.enrich.code_tables import (
+    _label_qualifies_under_phi_exemption,
+    _mined_labels_look_like_vocabulary,
     build_auto_synonyms,
     build_code_table_hints,
     detect_code_tables,
@@ -31,6 +35,8 @@ from prep.enrich.code_tables import (
     resolve_auto_synonym_columns,
 )
 from prep.enrich.glossary import build_glossary_json
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _measurement_type_column(name: str, **overrides) -> dict:
@@ -235,13 +241,144 @@ def test_unreferenced_tiny_table_not_detected_as_code_table():
     assert "staging.Shared.UnreferencedTiny" not in table_ids
 
 
-def test_phi_label_column_excludes_table_from_detection():
+def test_phi_flagged_bare_text_label_qualifies_on_postgres():
+    """On PostgreSQL (staging) a coded lookup label introspects to bare `TEXT`
+    — the SAME type a patient-name column has — so `TEXT` carries no
+    discriminating signal and must NOT disqualify. The base fixture uses
+    `TEXT`, distinctCount==approxRowCount==12 (a true enumeration), so a
+    PHI-name-flagged `TEXT` label on this tiny FK-referenced lookup table IS
+    detected under the exemption. (This is the exact real-staging shape.)
+    """
     phi = _base_phi()
     for col in phi["columns"]:
         if col["columnId"] == "staging.Shared.MonitorMeasurementTypes.Name":
             col["phiClass"] = "direct-identifier"
     candidates = detect_code_tables(_base_catalog(), _base_joingraph(), _base_profiles(), phi)
-    assert "staging.Shared.MonitorMeasurementTypes" not in {c.table_id for c in candidates}
+    assert "staging.Shared.MonitorMeasurementTypes" in {c.table_id for c in candidates}
+
+
+def test_phi_flagged_unbounded_narrative_label_column_excludes_table():
+    """A PHI-flagged label whose SQL type is a DEFINITIVELY-large narrative
+    shape (NTEXT/CLOB/VARCHAR(max)/oversized VARCHAR(N)) is NEVER eligible for
+    the exemption — that is the free-text shape a clinician types PHI into. It
+    stays rejected even on a tiny FK-referenced table.
+    """
+    for narrative_type in ("NTEXT", "CLOB", "VARCHAR(max)", "NVARCHAR(4000)"):
+        catalog = _base_catalog()
+        for table in catalog["tables"]:
+            if table["tableId"] == "staging.Shared.MonitorMeasurementTypes":
+                for col in table["columns"]:
+                    if col["name"] == "Name":
+                        col["dataType"] = narrative_type
+        phi = _base_phi()
+        for col in phi["columns"]:
+            if col["columnId"] == "staging.Shared.MonitorMeasurementTypes.Name":
+                col["phiClass"] = "direct-identifier"
+        candidates = detect_code_tables(catalog, _base_joingraph(), _base_profiles(), phi)
+        assert "staging.Shared.MonitorMeasurementTypes" not in {c.table_id for c in candidates}, narrative_type
+
+
+def _catalog_with_short_string_label() -> dict:
+    """The base catalog but with MonitorMeasurementTypes.Name typed as a SHORT
+    string (NVARCHAR(50)) — matching the real staging schema, where the label
+    is a bounded coded vocabulary column, not an unbounded TEXT narrative.
+    """
+    catalog = _base_catalog()
+    for table in catalog["tables"]:
+        if table["tableId"] == "staging.Shared.MonitorMeasurementTypes":
+            for col in table["columns"]:
+                if col["name"] == "Name":
+                    col["dataType"] = "NVARCHAR(50)"
+    return catalog
+
+
+def test_phi_flagged_short_string_label_qualifies_under_exemption():
+    """THE FIX: a name-only PHI flag on `MonitorMeasurementTypes.Name` must NOT
+    block detection when the table is a genuine tiny FK-referenced (id,label)
+    lookup with a SHORT coded label that is a true enumeration
+    (distinctCount≈approxRowCount). The name-only classifier cannot tell this
+    clinical vocabulary from `Patients.Name`; the structural code-table shape
+    is the discriminator. Under the exemption the table IS detected.
+    """
+    phi = _base_phi()
+    for col in phi["columns"]:
+        if col["columnId"] == "staging.Shared.MonitorMeasurementTypes.Name":
+            col["phiClass"] = "direct-identifier"
+    candidates = detect_code_tables(
+        _catalog_with_short_string_label(), _base_joingraph(), _base_profiles(), phi
+    )
+    table_ids = {c.table_id for c in candidates}
+    assert "staging.Shared.MonitorMeasurementTypes" in table_ids
+    candidate = next(c for c in candidates if c.table_id == "staging.Shared.MonitorMeasurementTypes")
+    assert candidate.label_column_name == "Name"
+
+
+def test_large_fact_table_with_phi_name_column_is_not_mined():
+    """A LARGE fact/patient table with a PHI `Name` column must NEVER be mined,
+    even if it structurally has a PK and a Name column. Here `Patients` is a
+    5000-row table with a direct-identifier `Name`; it is NOT FK-referenced by
+    a strictly-larger fact table AND it is far too large / non-enumeration, so
+    the exemption never applies. This proves the fact/patient PHI boundary is
+    unchanged.
+    """
+    catalog = _catalog_with_short_string_label()
+    catalog["tables"].append(
+        {
+            "tableId": "staging.Shared.Patients",
+            "sourceId": "staging",
+            "schema": "Shared",
+            "name": "Patients",
+            "quotedRef": '"Shared"."Patients"',
+            "grain": None,
+            "columns": [
+                {
+                    "columnId": "staging.Shared.Patients.Id",
+                    "name": "Id",
+                    "quotedName": '"Id"',
+                    "dataType": "INTEGER",
+                    "nullable": False,
+                    "isPrimaryKey": True,
+                    "isTimeColumn": False,
+                    "isIndexed": True,
+                    "unit": None,
+                    "ordinalPosition": 1,
+                },
+                {
+                    "columnId": "staging.Shared.Patients.Name",
+                    "name": "Name",
+                    "quotedName": '"Name"',
+                    "dataType": "NVARCHAR(200)",
+                    "nullable": False,
+                    "isPrimaryKey": False,
+                    "isTimeColumn": False,
+                    "isIndexed": False,
+                    "unit": None,
+                    "ordinalPosition": 2,
+                },
+            ],
+        }
+    )
+    profiles = _base_profiles()
+    profiles["tables"].append(
+        {
+            "tableId": "staging.Shared.Patients",
+            "approxRowCount": 5000,
+            "rowCountSource": "pg_class.reltuples",
+            "columns": [
+                {"columnId": "staging.Shared.Patients.Id", "distinctCount": 5000, "kind": "numeric"},
+                {"columnId": "staging.Shared.Patients.Name", "distinctCount": 5000, "kind": "phi-suppressed"},
+            ],
+        }
+    )
+    phi = _base_phi()
+    phi["columns"].append(
+        {"columnId": "staging.Shared.Patients.Id", "phiClass": "non-phi"}
+    )
+    phi["columns"].append(
+        {"columnId": "staging.Shared.Patients.Name", "phiClass": "direct-identifier"}
+    )
+    candidates = detect_code_tables(catalog, _base_joingraph(), profiles, phi)
+    assert "staging.Shared.Patients" not in {c.table_id for c in candidates}
 
 
 def test_high_cardinality_label_excludes_table_from_detection():
@@ -414,3 +551,182 @@ def test_hand_seeded_coded_measurement_gets_hosting_table_id():
     doc = build_glossary_json(_base_catalog(), seed=seed)
     hr = next(s for s in doc["synonyms"] if s["term"] == "heart rate")
     assert hr["maps"][0]["hostingTableId"] == "staging.Shared.MonitorMeasurements"
+
+
+# ── PHI-flagged label EXEMPTION: unit-level gate conditions ─────────────────
+
+
+def test_exemption_gate_accepts_short_string_true_enumeration():
+    assert _label_qualifies_under_phi_exemption(
+        phi_class="direct-identifier", label_data_type="NVARCHAR(50)", distinct_count=17, approx_row_count=17
+    )
+
+
+def test_exemption_gate_rejects_free_text_phi_class():
+    """A free-text phiClass is NEVER exemptible (unbounded narrative may embed
+    PHI), even with a short type and a perfect enumeration count.
+    """
+    assert not _label_qualifies_under_phi_exemption(
+        phi_class="free-text", label_data_type="NVARCHAR(50)", distinct_count=17, approx_row_count=17
+    )
+
+
+def test_exemption_gate_rejects_unbounded_narrative_type():
+    for unbounded in ("NTEXT", "CLOB", "VARCHAR(max)", "NVARCHAR(MAX)", "VARCHAR(4000)"):
+        assert not _label_qualifies_under_phi_exemption(
+            phi_class="direct-identifier", label_data_type=unbounded, distinct_count=17, approx_row_count=17
+        ), unbounded
+
+
+def test_exemption_gate_accepts_bare_postgres_text():
+    """Bare PostgreSQL TEXT is accepted at the type level (no discriminating
+    signal); the structural + enumeration gates do the discriminating."""
+    assert _label_qualifies_under_phi_exemption(
+        phi_class="direct-identifier", label_data_type="TEXT", distinct_count=17, approx_row_count=17
+    )
+    assert _label_qualifies_under_phi_exemption(
+        phi_class="quasi-identifier", label_data_type="NVARCHAR(50)", distinct_count=17, approx_row_count=17
+    )
+
+
+def test_exemption_gate_rejects_non_enumeration():
+    """A label whose distinctCount is far below the row count is NOT a true
+    enumeration (a high-repeat / low-signal column) -> not exemptible.
+    """
+    assert not _label_qualifies_under_phi_exemption(
+        phi_class="direct-identifier", label_data_type="NVARCHAR(50)", distinct_count=2, approx_row_count=200
+    )
+
+
+def test_exemption_gate_accepts_thirty_row_vocabulary():
+    """Real staging VentilatorMeasurementTypes has 30 rows / 30 distinct labels
+    — a bounded controlled vocabulary above the profiling top-categories cap
+    (20) but well within the structural code-table row cap (200). It must
+    qualify (the fix bounds cardinality on CODE_TABLE_MAX_ROWS, not 20).
+    """
+    from prep.enrich.code_tables import CODE_TABLE_MAX_ROWS
+
+    assert CODE_TABLE_MAX_ROWS >= 30
+    assert _label_qualifies_under_phi_exemption(
+        phi_class="direct-identifier", label_data_type="TEXT", distinct_count=30, approx_row_count=30
+    )
+
+
+def test_exemption_gate_rejects_cardinality_above_code_table_cap():
+    from prep.enrich.code_tables import CODE_TABLE_MAX_ROWS
+
+    over = CODE_TABLE_MAX_ROWS + 1
+    assert not _label_qualifies_under_phi_exemption(
+        phi_class="direct-identifier", label_data_type="TEXT", distinct_count=over, approx_row_count=over
+    )
+
+
+# ── vocabulary-validation net: value-level secondary safety ─────────────────
+
+
+def test_vocab_net_accepts_clinical_vocabulary():
+    codes = [
+        {"id": 1, "name": "TEMP"},
+        {"id": 2, "name": "HR"},
+        {"id": 12, "name": "SPO2"},
+        {"id": 5, "name": "Respirations"},
+        {"id": 7, "name": "Non-invasive BP"},
+        {"id": 8, "name": "Mean Arterial Pressure"},
+    ]
+    assert _mined_labels_look_like_vocabulary(codes)
+
+
+def test_vocab_net_rejects_person_name_labels():
+    """A mis-detected table whose 'labels' are dominated by person names (and
+    carry NO coded-token signal) must be rejected wholesale — the hard
+    secondary net protecting against a structural false-positive.
+    """
+    codes = [
+        {"id": 1, "name": "John Smith"},
+        {"id": 2, "name": "Mary Ann Jones"},
+        {"id": 3, "name": "Peter Parker"},
+        {"id": 4, "name": "Bruce Wayne"},
+    ]
+    assert not _mined_labels_look_like_vocabulary(codes)
+
+
+def test_vocab_net_rejects_overlong_free_text_labels():
+    codes = [
+        {"id": 1, "name": "HR"},
+        {"id": 2, "name": "x" * 100},  # far too long to be a coded label
+    ]
+    assert not _mined_labels_look_like_vocabulary(codes)
+
+
+def test_vocab_net_rejects_unbounded_enumeration():
+    from prep.enrich.code_tables import CODE_TABLE_MAX_ROWS
+
+    codes = [{"id": i, "name": f"CODE{i}"} for i in range(CODE_TABLE_MAX_ROWS + 5)]
+    assert not _mined_labels_look_like_vocabulary(codes)
+
+
+def test_vocab_net_accepts_thirty_code_vocabulary():
+    """A 30-entry coded vocabulary (VentilatorMeasurementTypes shape) is a
+    bounded enumeration and passes the value-level net."""
+    codes = [{"id": i, "name": f"CODE{i}"} for i in range(30)]
+    assert _mined_labels_look_like_vocabulary(codes)
+
+
+# ── end-to-end: mining under the exemption + vocab net ──────────────────────
+
+
+def _phi_flagged_short_string_catalog_phi():
+    catalog = _catalog_with_short_string_label()
+    phi = _base_phi()
+    for col in phi["columns"]:
+        if col["columnId"] == "staging.Shared.MonitorMeasurementTypes.Name":
+            col["phiClass"] = "direct-identifier"
+    return catalog, phi
+
+
+def test_build_hints_mines_hr_under_phi_exemption():
+    """End-to-end: with a PHI-name-flagged short-string label on a genuine
+    lookup table, the mined hint carries HR->2 and hostingTableId=Measurements.
+    """
+    catalog, phi = _phi_flagged_short_string_catalog_phi()
+    hints = build_code_table_hints(
+        catalog, _base_joingraph(), _base_profiles(), phi, row_fetcher=_fake_row_fetcher
+    )
+    assert len(hints) == 1
+    hint = hints[0]
+    assert hint.code_table_id == "staging.Shared.MonitorMeasurementTypes"
+    assert {c["name"]: c["id"] for c in hint.codes}["HR"] == 2
+    assert hint.referenced_by[0]["factTableId"] == "staging.Shared.MonitorMeasurements"
+
+
+def test_build_hints_dropped_when_vocab_net_rejects_mined_values():
+    """If the detector accepts a table but the mined VALUES look like person
+    names, the vocab net drops the WHOLE hint (fail closed).
+    """
+    catalog, phi = _phi_flagged_short_string_catalog_phi()
+
+    def _person_name_row_fetcher(table_id: str, id_col: str, label_col: str) -> list[tuple]:
+        return [(1, "John Smith"), (2, "Mary Ann Jones")]
+
+    hints = build_code_table_hints(
+        catalog, _base_joingraph(), _base_profiles(), phi, row_fetcher=_person_name_row_fetcher
+    )
+    assert hints == []
+
+
+# ── global PHI boundary is UNCHANGED ────────────────────────────────────────
+
+
+def test_patients_name_global_classification_unchanged():
+    """The exemption lives ONLY in the code-table detector's acceptance logic.
+    The GLOBAL classify_column result for a name column is UNCHANGED —
+    Patients.Name (and any plain "Name") stays direct-identifier / suppress.
+    """
+    from ceiba_nl2sql.compliance.phi import classify_column, egress_policy_for, load_phi_columnset
+
+    repo_root = REPO_ROOT
+    phi_columns = load_phi_columnset(repo_root).columns
+    for name, data_type in (("Name", "NVARCHAR(50)"), ("Name", "NVARCHAR(200)"), ("FirstName", "NVARCHAR(50)")):
+        phi_class, _rule = classify_column(name, phi_columns, data_type)
+        assert phi_class == "direct-identifier", (name, data_type)
+        assert egress_policy_for(phi_class) == "suppress"
