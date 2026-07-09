@@ -1,0 +1,33 @@
+[project]
+name = "ceiba-nl2sql-service"
+version = "0.0.0"
+description = "Ceiba NL->SQL FastAPI runtime service (dark this phase — no TS route calls it yet). Implements /nl2sql/generate, /nl2sql/execute, /nl2sql/explain, /healthz, /readyz over the shared ceiba_nl2sql library (docs/PYTHON_NL2SQL_SERVICE_PLAN.md Phase 2)."
+requires-python = ">=3.10"
+dependencies = [
+    "ceiba-nl2sql",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "openai>=1.0",
+]
+
+[project.optional-dependencies]
+# Test deps kept separate so CI can install them explicitly.
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ceiba_nl2sql_service*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

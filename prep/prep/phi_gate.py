@@ -265,8 +265,19 @@ _ALLOWED_FUNCTION_PREFIXES = ("sample_aggregate",)
 # schema-only, never cell data — SPEC §2.5 #5 explicitly allows metadata
 # introspection. These are exempted from the "SELECT only inside
 # sample_aggregate*" rule because they never touch a data row.
+#
+# `duckdb_databases()`/`duckdb_constraints()`/`duckdb_indexes()` (added
+# docs/PYTHON_NL2SQL_SERVICE_PLAN.md Phase 2, when `ceiba_nl2sql.engine.
+# duckdb_engine` — the query RUNTIME, ported from lib/engine/DuckDbEngine.ts
+# — joined this package) are DuckDB's own catalog/introspection
+# pseudo-tables, the exact same kind of schema-only metadata as
+# `information_schema`/`pg_catalog`, just DuckDB-specific spellings: they
+# report attach read-only status, constraint/FK metadata, and index
+# expressions — never a patient-row cell value. `duckdb_tables()` was
+# already allowlisted; these are its siblings.
 _METADATA_ONLY_PATTERN = re.compile(
     r"information_schema|pg_catalog|pg_class|pg_namespace|duckdb_tables\(\)|"
+    r"duckdb_databases\(\)|duckdb_constraints\(\)|duckdb_indexes\(\)|"
     r"table_constraints|key_column_usage",
     re.IGNORECASE,
 )
