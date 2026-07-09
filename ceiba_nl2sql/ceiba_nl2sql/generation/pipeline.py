@@ -433,7 +433,22 @@ async def generate_sql(
     # schema-metadata: the prompt is BAA-safe by construction (no
     # patient-row values) — never gated by OPENAI_BAA_SIGNED.
     initial_prompt = assemble_prompt(
-        context.tables, context.cardinality_warnings, question, capabilities, resolved_dialect, default_limit=default_limit
+        context.tables,
+        context.cardinality_warnings,
+        question,
+        capabilities,
+        resolved_dialect,
+        default_limit=default_limit,
+        # CRITICAL: forward the retrieved join graph + semantic hints. Without
+        # these, assemble_prompt silently omits the JOIN GRAPH and SEMANTIC
+        # HINTS sections (they default to empty), so the model never sees the
+        # FK edges (-> guesses wrong join columns like mm.Id=m.Id) or the coded
+        # value mapping (-> wrong MeasurementTypeId). This was the root cause of
+        # the multi-hop-query failures in staging benchmarking.
+        join_hints=context.join_hints,
+        join_paths=context.join_paths,
+        glossary_hits=context.glossary_hits,
+        token_budget=context.token_estimate or None,
     )
     result = await call_llm(llm, initial_prompt, "schema-metadata")
     llm_calls += 1
@@ -485,6 +500,12 @@ async def generate_sql(
             error=failure.error,
             hint=failure.hint,
             default_limit=default_limit,
+            # same as the initial prompt: the repair round MUST also carry the
+            # join graph + semantic hints, or the model repairs blind.
+            join_hints=context.join_hints,
+            join_paths=context.join_paths,
+            glossary_hits=context.glossary_hits,
+            token_budget=context.token_estimate or None,
         )
         repair_result = await call_llm(llm, repair_prompt, "schema-metadata")
         llm_calls += 1
