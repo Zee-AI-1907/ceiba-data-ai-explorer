@@ -190,4 +190,50 @@ export function assemblePrompt(
   return sections.join('\n\n---\n\n')
 }
 
-export { USER_REQUEST_OPEN, USER_REQUEST_CLOSE }
+/**
+ * assembleRepairPrompt — builds the SELF-REPAIR round prompt (SPEC §5.5).
+ *
+ * When a candidate SQL fails guardSql, cardinalityGuard, or engine.explain(),
+ * the pipeline feeds the failing SQL + the error/hint back to the LLM asking
+ * for a corrected read-only query. This reuses the SAME base prompt (schema
+ * context, dialect/capabilities, cardinality warnings, H25-delimited question)
+ * so the model keeps all the original grounding, then appends:
+ *   - the exact SQL it just produced (as DATA, delimited), and
+ *   - the reason it was rejected + a concrete repair instruction.
+ *
+ * The prior candidate SQL is UNTRUSTED model output, but it is not user text —
+ * it is delimited defensively all the same so a model that emitted an injection
+ * string cannot smuggle it back as an instruction on the repair round.
+ */
+export function assembleRepairPrompt(
+  context: PromptSchemaContext,
+  question: string,
+  capabilities: EngineCapabilities,
+  dialect: SqlDialect,
+  failure: { failedSql: string; error: string; hint?: string },
+  options: PromptAssemblyOptions = {}
+): string {
+  const basePrompt = assemblePrompt(context, question, capabilities, dialect, options)
+
+  const repairSection = [
+    'REPAIR REQUIRED — your previous SQL was rejected. Produce a corrected, single',
+    'read-only SELECT (or WITH ... SELECT) statement that fixes the problem below.',
+    'Keep using ONLY the tables/columns in the SCHEMA CONTEXT above and honor every',
+    'CARDINALITY WARNING. Respond with the corrected SQL only.',
+    '',
+    'The previous (rejected) SQL was:',
+    PRIOR_SQL_OPEN,
+    failure.failedSql,
+    PRIOR_SQL_CLOSE,
+    '',
+    `Rejection reason: ${failure.error}`,
+    ...(failure.hint ? [`How to fix it: ${failure.hint}`] : []),
+  ].join('\n')
+
+  return [basePrompt, repairSection].join('\n\n---\n\n')
+}
+
+const PRIOR_SQL_OPEN = '<prior_sql>'
+const PRIOR_SQL_CLOSE = '</prior_sql>'
+
+export { USER_REQUEST_OPEN, USER_REQUEST_CLOSE, PRIOR_SQL_OPEN, PRIOR_SQL_CLOSE }

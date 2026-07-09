@@ -40,6 +40,7 @@
  */
 
 import { stripCommentsAndSplit } from '../sqlGuard'
+import type { RenderedTable, SchemaContext } from './Retriever'
 
 export interface LargeTableSpec {
   /** Bare table name as it appears in SQL (e.g. `MeasurementsMock`). */
@@ -170,4 +171,70 @@ export function cardinalityGuard(sql: string, options: CardinalityGuardOptions):
   }
 
   return { ok: true, action: 'pass' }
+}
+
+// ── SPEC §5.4 context-driven entry point ──────────────────────────────────────
+
+/**
+ * Extracts the bare table name from a rendered table. `RenderedTable.quotedRef`
+ * is dialect-literal and may be schema-qualified (`"public"."MeasurementsMock"`)
+ * or bare (`"MeasurementsMock"`); we take the LAST quoted segment as the table
+ * name the lexical matcher keys on, falling back to the tail of the tableId
+ * (`mock.public.MeasurementsMock` -> `MeasurementsMock`) when quotedRef is
+ * unparseable.
+ */
+function bareTableNameOf(table: RenderedTable): string {
+  const quotedSegments = table.quotedRef.match(/"([^"]+)"/g)
+  if (quotedSegments && quotedSegments.length > 0) {
+    return quotedSegments[quotedSegments.length - 1]!.replace(/"/g, '')
+  }
+  const idParts = table.tableId.split('.')
+  return idParts[idParts.length - 1] ?? table.quotedRef
+}
+
+/** Strips surrounding double-quotes from a rendered `requiredTimeColumn` (e.g. `"RecordedAt"` -> `RecordedAt`). */
+function bareColumnNameOf(quotedColumn: string): string {
+  const match = quotedColumn.match(/"([^"]+)"/)
+  return match ? match[1]! : quotedColumn
+}
+
+/**
+ * buildCardinalityGuardOptions — derive the large-table bounding policy directly
+ * from a retrieved `SchemaContext` (SPEC §5.4: `cardinalityGuard(sql, ctx)`).
+ * Every survivor table flagged `isLargeTimeSeries` becomes a `LargeTableSpec`,
+ * and its `requiredTimeColumn` (already the indexed time column the retriever
+ * resolved) becomes the bound the guard enforces. This is the production wiring;
+ * the lower-level options-based `cardinalityGuard` above stays the reusable core
+ * (and remains what the M1 thin-slice test calls with a hand-authored policy).
+ */
+export function buildCardinalityGuardOptions(
+  ctx: Pick<SchemaContext, 'tables'>,
+  defaultLimit = 1000
+): CardinalityGuardOptions {
+  const largeTables: LargeTableSpec[] = []
+  const requiredTimeColumnByTable: Record<string, string> = {}
+  for (const table of ctx.tables) {
+    if (!table.isLargeTimeSeries) continue
+    const tableName = bareTableNameOf(table)
+    largeTables.push({ tableName, quotedRef: table.quotedRef })
+    if (table.requiredTimeColumn) {
+      requiredTimeColumnByTable[tableName] = bareColumnNameOf(table.requiredTimeColumn)
+    }
+  }
+  return { largeTables, requiredTimeColumnByTable, defaultLimit }
+}
+
+/**
+ * cardinalityGuardFromContext — the SPEC §5.4 signature `cardinalityGuard(sql,
+ * ctx)`. Thin adapter that derives the policy from the retrieved SchemaContext
+ * (via `buildCardinalityGuardOptions`) and delegates to the core guard. Named
+ * distinctly from `cardinalityGuard` so the options-based overload the M1 test
+ * relies on is not broken by a signature change.
+ */
+export function cardinalityGuardFromContext(
+  sql: string,
+  ctx: Pick<SchemaContext, 'tables'>,
+  defaultLimit = 1000
+): CardinalityVerdict {
+  return cardinalityGuard(sql, buildCardinalityGuardOptions(ctx, defaultLimit))
 }

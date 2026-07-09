@@ -229,11 +229,28 @@ export const ChartSuggestBodySchema = z.object({
 export type ChartSuggestBody = z.infer<typeof ChartSuggestBodySchema>
 
 /**
- * SqlGenerateBodySchema — POST /api/sql-generate (WS-H).
- * Route destructures `{ userMessage, schemaHint }`.
+ * SqlDialect enum — the SQL dialects a generation request may target
+ * (mirrors `SqlDialect` in lib/engine/QueryEngine.ts; kept as a local zod enum
+ * so validation.ts has no runtime import of the engine layer). Additive.
+ */
+export const SqlDialectSchema = z.enum(['duckdb', 'postgres', 'trino'])
+export type SqlDialectValue = z.infer<typeof SqlDialectSchema>
+
+/**
+ * SqlGenerateBodySchema — POST /api/sql-generate (WS-H; NL2SQL §5.2).
+ * Route destructures `{ userMessage, schemaHint }` (unchanged, still valid).
+ *
+ * ADDITIVE (NL2SQL P5, SPEC §5.2 SqlGenerateRequest): two new OPTIONAL fields
+ * — `sourceScope` (restrict retrieval to specific sourceIds) and `dialect`
+ * (override the target dialect; default = engine.dialect()). Both are optional
+ * so every existing caller/test that sends only `{ userMessage, schemaHint }`
+ * still validates unchanged — this is a backward-compatible extension, never a
+ * new required field.
  */
 export const SqlGenerateBodySchema = z.object({
   userMessage: z.string().min(1, 'userMessage is required').max(4000),
   schemaHint: z.string().max(4000).optional(),
+  sourceScope: z.array(z.string().min(1).max(128)).max(32).optional(),
+  dialect: SqlDialectSchema.optional(),
 })
 export type SqlGenerateBody = z.infer<typeof SqlGenerateBodySchema>

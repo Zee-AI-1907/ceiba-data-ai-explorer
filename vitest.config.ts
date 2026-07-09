@@ -25,6 +25,8 @@ export default defineConfig({
       // the tests/** globs above are unchanged.
       'lib/**/__tests__/*.test.ts',
       'eval/**/*.test.ts',
+      // NL2SQL P5: co-located API route tests (e.g. app/api/sql-generate). Additive.
+      'app/**/__tests__/*.test.ts',
     ],
     coverage: {
       provider: 'v8',
