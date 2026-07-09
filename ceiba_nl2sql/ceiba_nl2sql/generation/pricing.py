@@ -121,6 +121,15 @@ def estimate_cost_usd(
     table = resolve_prices(prices)
     entry = table.get(model)
     if entry is None:
+        # OpenAI echoes a DATED model id (e.g. "gpt-4o-mini-2024-07-18") that
+        # won't exactly match a bare price key ("gpt-4o-mini"). Fall back to the
+        # LONGEST price-table key that `model` starts with, so dated snapshots
+        # are priced from their family entry. (Longest-prefix so "gpt-4o-mini-*"
+        # matches "gpt-4o-mini" rather than "gpt-4o".)
+        prefix_matches = [key for key in table if model.startswith(key)]
+        if prefix_matches:
+            entry = table[max(prefix_matches, key=len)]
+    if entry is None:
         return CostEstimate(model=model, estimated_cost_usd=0.0, priced=False)
     input_price = entry.get("input", 0.0)
     output_price = entry.get("output", 0.0)

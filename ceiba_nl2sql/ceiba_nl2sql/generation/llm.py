@@ -54,6 +54,12 @@ DEFAULT_LLM_MODEL = "gpt-4o-mini"
 # tokens, so this caps a runaway generation without truncating real output).
 LLM_TEMPERATURE = 0.0
 LLM_MAX_TOKENS = 600
+# Reasoning models (gpt-5*, o-series) spend completion tokens on internal
+# reasoning BEFORE emitting any answer text, and that reasoning counts against
+# `max_completion_tokens`. A 600 cap leaves nothing for the actual SQL (the
+# model returns an EMPTY completion). Give reasoning models a much larger cap so
+# reasoning + the SQL both fit; chat models keep the tight 600 bound.
+LLM_MAX_COMPLETION_TOKENS_REASONING = 4000
 
 
 @dataclass(frozen=True)
@@ -216,13 +222,27 @@ class OpenAiLlmClient:
         self._client = AsyncOpenAI(api_key=api_key, timeout=timeout_seconds)
 
     async def complete(self, prompt: str) -> LlmCompletion:
+        # Newer OpenAI models (gpt-5*, o-series reasoning models) renamed
+        # `max_tokens` -> `max_completion_tokens` and reject a custom
+        # `temperature` (only the default 1 is allowed). Older chat models
+        # (gpt-4o*, gpt-4.1*) still take `max_tokens` + a custom temperature.
+        # Detect by model-id family and send the params that model accepts.
+        params: dict = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        model_id = self._model.lower()
+        uses_completion_tokens = model_id.startswith(("gpt-5", "o1", "o3", "o4"))
+        if uses_completion_tokens:
+            # reasoning models burn completion tokens on hidden reasoning, so
+            # cap must be large enough for reasoning + the emitted SQL.
+            params["max_completion_tokens"] = LLM_MAX_COMPLETION_TOKENS_REASONING
+            # do NOT set temperature — these models only allow the default (1).
+        else:
+            params["max_tokens"] = LLM_MAX_TOKENS
+            params["temperature"] = LLM_TEMPERATURE
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=LLM_TEMPERATURE,
-                max_tokens=LLM_MAX_TOKENS,
-            )
+            response = await self._client.chat.completions.create(**params)
         except Exception as exc:  # noqa: BLE001 - deliberately broad: any SDK error is scrubbed before surfacing
             logger.error("OpenAI completion failed: %s", exc)
             raise LlmUpstreamError("The driving language model is temporarily unavailable.") from exc

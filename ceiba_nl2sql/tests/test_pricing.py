@@ -45,6 +45,21 @@ def test_unknown_model_is_zero_cost_and_not_priced():
     assert result.model == "some-unlisted-model"
 
 
+def test_dated_model_id_is_priced_via_longest_prefix():
+    # OpenAI echoes a dated snapshot id; it must still price from its family key.
+    dated = estimate_cost_usd("gpt-4o-mini-2024-07-18", 1000, 500)
+    bare = estimate_cost_usd("gpt-4o-mini", 1000, 500)
+    assert dated.priced is True
+    assert dated.estimated_cost_usd == bare.estimated_cost_usd > 0.0
+
+
+def test_longest_prefix_wins_over_shorter_family():
+    # "gpt-4o-mini-*" must match "gpt-4o-mini", not the shorter "gpt-4o".
+    prices = {"gpt-4o": {"input": 2.5, "output": 10.0}, "gpt-4o-mini": {"input": 0.15, "output": 0.60}}
+    r = estimate_cost_usd("gpt-4o-mini-2024-07-18", 1_000_000, 0, prices=prices)
+    assert r.estimated_cost_usd == 0.15  # mini price, not the 2.50 gpt-4o price
+
+
 def test_env_price_override_merges_over_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv(MODEL_PRICES_ENV, '{"gpt-4o-mini": {"input": 10.0, "output": 20.0}}')
     # gpt-4o-mini overridden...
