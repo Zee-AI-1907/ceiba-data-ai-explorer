@@ -13,6 +13,13 @@ prep/*.egg-info/
 # NL2SQL generated artifact bundles (build output — regenerable via prep toolchain)
 artifacts/bundles/
 
+# NL2SQL eval harness (P6): generated synthetic DuckDB files. Default runs write to the
+# OS temp dir, never here — this guards any debugging run that passes an explicit dbPath
+# under eval/fixtures/ (docs/NL2SQL_PLAN.md §7 "fixtures/ generated synthetic DuckDB
+# files (gitignored)"). eval/fixtures/recordedLlm.ts itself IS committed source, not output.
+eval/fixtures/*.duckdb
+eval/fixtures/generated/
+
 # Next.js
 .next/
 out/

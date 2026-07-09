@@ -65,11 +65,25 @@ jobs:
   eval:
     name: eval (synthetic golden subset)
     runs-on: ubuntu-latest
+    # P6: runs eval/**/*.test.ts (eval/__tests__/eval.test.ts) in SYNTHETIC mode only — the
+    # hermetic DuckDB topology (eval/synthetic/loadSynthetic.ts) + the recorded/stub driving
+    # LLM (eval/fixtures/recordedLlm.ts, NL2SQL_PLAN.md §0a decision #3). No network, no
+    # mock/staging DB, no model download (SPEC §6.3(a)). STAGING_DSN is deliberately left
+    # UNSET in this job's environment so gated-staging mode (§6.3(b)) can never accidentally
+    # activate in CI — runEval()/runAdversarial() fall back to synthetic when it's absent.
+    # Retriever is exercised against the committed P4 fixture bundle's real catalog (a stand-
+    # in for the full ~1,200-table schema in this context), not a hand-authored stub.
     steps:
       - uses: actions/checkout@v4
-      - name: No-op (eval harness lands in P6)
-        run: echo "eval harness is a no-op stub until P6 (synthetic golden + adversarial, stub LLM)."
-      # TODO(P6): setup-node + npm ci, then run the synthetic-mode golden subset and the
-      # adversarial (prompt-injection) set with the recorded/stub driving LLM (0a decision #3).
-      # Retriever must be exercised against the full introspected schema even under synthetic
-      # execution. Staging mode stays gated off.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install deps
+        run: npm ci
+      - name: Run eval (synthetic mode, stub/recorded LLM)
+        # Explicitly unset STAGING_DSN (defense in depth beyond "just don't set it in the
+        # workflow env") so a stray runner-level env var can never gate staging mode on.
+        env:
+          STAGING_DSN: ''
+        run: npx vitest run eval
