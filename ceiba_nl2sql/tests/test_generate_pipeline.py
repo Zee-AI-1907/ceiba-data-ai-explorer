@@ -328,3 +328,111 @@ class TestOutOfScopeSentinel:
             assert response.sql == ""
         finally:
             retriever.dispose()
+
+
+class TestModelRoutingAndEscalation:
+    """R1: cheap tier ONLY for retrieval-proven join-free questions; repair
+    rounds escalate instead of retrying the failed model; mixed-model requests
+    price per call.
+    """
+
+    async def test_simple_llm_not_used_when_multiple_tables_retrieved(self, engine):
+        # The HR question retrieves several tables (joins possible) -> the
+        # strong model must drive even though a simple_llm is configured.
+        retriever = _build_retriever()
+        try:
+            strong = StubLlmClient([GOOD_HEART_RATE_SQL], model="strong-model")
+            cheap = StubLlmClient([GOOD_HEART_RATE_SQL], model="cheap-model")
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION,
+                engine=engine,
+                retriever=retriever,
+                llm=strong,
+                simple_llm=cheap,
+            )
+            assert len(strong.prompts) == 1
+            assert len(cheap.prompts) == 0
+            assert response.usage is not None and response.usage.model == "strong-model"
+        finally:
+            retriever.dispose()
+
+    async def test_simple_llm_used_when_single_table_retrieved(self, engine):
+        from ceiba_nl2sql.generation.pipeline import GenerateOptions
+
+        retriever = _build_retriever()
+        try:
+            strong = StubLlmClient([GOOD_ADMITTED_SQL], model="strong-model")
+            cheap = StubLlmClient([GOOD_ADMITTED_SQL], model="cheap-model")
+            response = await generate_sql(
+                question=ADMITTED_QUESTION,
+                engine=engine,
+                retriever=retriever,
+                llm=strong,
+                simple_llm=cheap,
+                options=GenerateOptions(max_tables=1),
+            )
+            assert len(cheap.prompts) == 1
+            assert len(strong.prompts) == 0
+            assert response.usage is not None and response.usage.model == "cheap-model"
+        finally:
+            retriever.dispose()
+
+    async def test_repair_rounds_escalate_instead_of_retrying_failed_model(self, engine):
+        retriever = _build_retriever()
+        try:
+            # The main model produces an unbounded draft; the escalation model
+            # must produce the repair — the failed model is never re-asked.
+            main = StubLlmClient([UNBOUNDED_HEART_RATE_SQL], model="main-model")
+            escalation = StubLlmClient([GOOD_HEART_RATE_SQL], model="escalation-model")
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION,
+                engine=engine,
+                retriever=retriever,
+                llm=main,
+                escalation_llm=escalation,
+            )
+            assert response.repair is not None and response.repair.rounds == 1
+            assert len(main.prompts) == 1
+            assert len(escalation.prompts) == 1
+            assert "REPAIR REQUIRED" in escalation.prompts[0]
+            assert response.usage is not None and response.usage.model == "escalation-model"
+        finally:
+            retriever.dispose()
+
+    async def test_mixed_model_request_prices_each_call_at_its_own_rate(self, engine, monkeypatch):
+        import json as _json
+
+        # Two very different per-token prices; the summed cost must reflect
+        # BOTH, not the last model's rate applied to all tokens.
+        monkeypatch.setenv(
+            "NL2SQL_MODEL_PRICES",
+            _json.dumps(
+                {
+                    "main-model": {"input": 100.0, "output": 100.0},
+                    "escalation-model": {"input": 1.0, "output": 1.0},
+                }
+            ),
+        )
+        retriever = _build_retriever()
+        try:
+            main = StubLlmClient([UNBOUNDED_HEART_RATE_SQL], model="main-model")
+            escalation = StubLlmClient([GOOD_HEART_RATE_SQL], model="escalation-model")
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION,
+                engine=engine,
+                retriever=retriever,
+                llm=main,
+                escalation_llm=escalation,
+            )
+            usage = response.usage
+            assert usage is not None and usage.priced is True and usage.llm_calls == 2
+            # Pricing everything at the escalation model's cheap rate would
+            # yield a tiny cost; the expensive first call must dominate.
+            from ceiba_nl2sql.generation.pricing import estimate_cost_usd
+
+            all_at_cheap_rate = estimate_cost_usd(
+                "escalation-model", usage.prompt_tokens, usage.completion_tokens
+            ).estimated_cost_usd
+            assert usage.estimated_cost_usd > all_at_cheap_rate * 10
+        finally:
+            retriever.dispose()

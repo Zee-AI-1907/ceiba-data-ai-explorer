@@ -177,6 +177,8 @@ async def nl2sql_generate(payload: GenerateRequest, request: Request, state: App
 
     try:
         llm = state.llm_client()
+        simple_llm = state.llm_client_simple()
+        escalation_llm = state.llm_client_repair()
     except LlmUpstreamError as exc:
         return safe_error_response(exc, context="generate.llm_client", kind="engine")
 
@@ -186,6 +188,9 @@ async def nl2sql_generate(payload: GenerateRequest, request: Request, state: App
             engine=state.engine,
             retriever=state.retriever,
             llm=llm,
+            # R1 routing tiers (None when unconfigured — single-model behavior).
+            simple_llm=simple_llm,
+            escalation_llm=escalation_llm,
             dialect=payload.dialect,
             options=generate_options,
             cached=False,

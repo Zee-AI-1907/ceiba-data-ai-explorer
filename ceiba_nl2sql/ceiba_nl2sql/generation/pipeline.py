@@ -357,6 +357,18 @@ def _validate_candidate(
     return True, sql_for_explain, None
 
 
+def route_is_simple(context: SchemaContext) -> bool:
+    """R1 model routing: evidence that this generation cannot involve a join —
+    exactly ONE table survived retrieval, so there is no join for a small
+    model to get wrong. Deliberately the STRONGEST simplicity signal only:
+    the staging benchmarks showed the cheap tier silently mis-joining
+    (Id=Id) on multi-hop questions, so anything that could join routes to
+    the strong model. Conservative by design; widen only with benchmark
+    evidence.
+    """
+    return len(context.tables) == 1
+
+
 def _retrieval_summary(context: SchemaContext) -> RetrievalSummary:
     return RetrievalSummary(
         tables=[t.table_id for t in context.tables],
@@ -383,11 +395,25 @@ async def generate_sql(
     options: GenerateOptions | None = None,
     cached: bool = False,
     offload: Offload = _direct_offload,
+    simple_llm: LlmClient | None = None,
+    escalation_llm: LlmClient | None = None,
 ) -> SqlGenerateResponse:
     """The SPEC §5.1 pipeline as an injectable, testable function. Retrieves
     schema context, prompts the (injected) LLM, guards + cardinality-checks +
     explains the candidate, and self-repairs (<= max_repair_rounds) on any
     repairable failure. Mirrors lib/rag/generate.ts `generateSql` line-for-line.
+
+    R1 model routing (both optional; behavior is unchanged when absent):
+      - `simple_llm`: used for the INITIAL call when retrieval proves the
+        question join-free (`route_is_simple`) — the cheap tier is safe
+        exactly when there is no join to get wrong.
+      - `escalation_llm`: used for every REPAIR round instead of retrying the
+        model that just failed (falls back to `llm` — so when the cheap tier's
+        draft fails, the repair escalates to the strong model rather than
+        burning a round on the same model). A same-model retry frequently
+        re-fails; escalation converts two likely-failing calls into one
+        likely-passing call — cheaper AND faster in expectation, never less
+        accurate.
 
     Throws only on retrieval/LLM/egress infrastructure errors; a SQL that
     cannot be made safe within the repair budget raises `GenerationError`.
@@ -399,32 +425,40 @@ async def generate_sql(
     max_repair_rounds = min(options.max_repair_rounds, 2)
 
     # ── cost/token metering accumulators (Phase 3 KEY deliverable) ──────────
-    # Summed across EVERY LLM call in this request (initial + each repair
-    # round). `metering_model` is the model the LLM client reports (the real
-    # OpenAI client echoes the resolved snapshot; the stub reports its
-    # configured id) — used to price the summed tokens.
+    # One (model, usage) record per LLM call (initial + each repair round).
+    # Priced PER CALL: with model routing a request can mix tiers, and pricing
+    # the summed tokens at one model's rate would misprice the others.
     start_ns = time.monotonic_ns()
-    total_usage = TokenUsage()
-    llm_calls = 0
-    metering_model = DEFAULT_LLM_MODEL
+    metered_calls: list[tuple[str, TokenUsage]] = []
 
     def _build_usage() -> UsageSummary:
         latency_ms = int((time.monotonic_ns() - start_ns) / 1_000_000)
-        estimate = estimate_cost_usd(
-            metering_model,
-            total_usage.prompt_tokens,
-            total_usage.completion_tokens,
-            cached_prompt_tokens=total_usage.cached_prompt_tokens,
-        )
+        total_usage = TokenUsage()
+        total_cost = 0.0
+        all_priced = True
+        for call_model, call_usage in metered_calls:
+            total_usage = total_usage + call_usage
+            estimate = estimate_cost_usd(
+                call_model,
+                call_usage.prompt_tokens,
+                call_usage.completion_tokens,
+                cached_prompt_tokens=call_usage.cached_prompt_tokens,
+            )
+            total_cost += estimate.estimated_cost_usd
+            all_priced = all_priced and estimate.priced
+        # `model` reports the LAST call's resolved model (the one that produced
+        # the returned SQL); per-call pricing above already accounted for any
+        # earlier calls on a different tier.
+        metering_model = metered_calls[-1][0] if metered_calls else DEFAULT_LLM_MODEL
         return UsageSummary(
             model=metering_model,
             prompt_tokens=total_usage.prompt_tokens,
             completion_tokens=total_usage.completion_tokens,
             total_tokens=total_usage.total_tokens,
-            llm_calls=llm_calls,
-            estimated_cost_usd=estimate.estimated_cost_usd,
+            llm_calls=len(metered_calls),
+            estimated_cost_usd=round(total_cost, 6),
             latency_ms=latency_ms,
-            priced=estimate.priced,
+            priced=all_priced if metered_calls else True,
             cached_prompt_tokens=total_usage.cached_prompt_tokens,
         )
 
@@ -460,10 +494,11 @@ async def generate_sql(
         glossary_hits=context.glossary_hits,
         token_budget=context.token_estimate or None,
     )
-    result = await call_llm(llm, initial_prompt, "schema-metadata")
-    llm_calls += 1
-    total_usage = total_usage + result.usage
-    metering_model = result.model
+    # R1 routing: the cheap tier drives ONLY when retrieval proves the
+    # question join-free; anything that could join uses the strong model.
+    initial_llm = simple_llm if (simple_llm is not None and route_is_simple(context)) else llm
+    result = await call_llm(initial_llm, initial_prompt, "schema-metadata")
+    metered_calls.append((result.model, result.usage))
     completion = result.text
 
     candidate_sql, description = extract_sql(completion)
@@ -517,10 +552,10 @@ async def generate_sql(
             glossary_hits=context.glossary_hits,
             token_budget=context.token_estimate or None,
         )
-        repair_result = await call_llm(llm, repair_prompt, "schema-metadata")
-        llm_calls += 1
-        total_usage = total_usage + repair_result.usage
-        metering_model = repair_result.model
+        # R1 escalation: never retry the model that just failed — repair
+        # rounds run on the escalation model (or the strong default).
+        repair_result = await call_llm(escalation_llm or llm, repair_prompt, "schema-metadata")
+        metered_calls.append((repair_result.model, repair_result.usage))
         completion = repair_result.text
         extracted_sql, extracted_description = extract_sql(completion)
         candidate_sql = extracted_sql

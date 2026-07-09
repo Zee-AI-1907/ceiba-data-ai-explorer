@@ -47,6 +47,21 @@ class Settings(BaseSettings):
         default="gpt-4o-mini",
         validation_alias=AliasChoices("NL2SQL_LLM_MODEL", "OPENAI_MODEL", "openai_model"),
     )
+    # R1 model routing (both OPTIONAL — unset means no routing, single-model
+    # behavior unchanged):
+    #   NL2SQL_LLM_MODEL_SIMPLE — cheap tier for retrieval-proven join-free
+    #     questions (pipeline.route_is_simple).
+    #   NL2SQL_LLM_MODEL_REPAIR — escalation tier for self-repair rounds
+    #     (defaults to the main model when unset; a failed draft is never
+    #     retried on the model that produced it when this is set).
+    openai_model_simple: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("NL2SQL_LLM_MODEL_SIMPLE", "openai_model_simple"),
+    )
+    openai_model_repair: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("NL2SQL_LLM_MODEL_REPAIR", "openai_model_repair"),
+    )
 
     # ── internal service auth (§2.1) ─────────────────────────────────────────
     nl2sql_service_token: str | None = None

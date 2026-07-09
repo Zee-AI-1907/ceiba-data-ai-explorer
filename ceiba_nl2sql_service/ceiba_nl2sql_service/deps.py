@@ -47,11 +47,37 @@ class AppState:
     bundle_version: str
     embedding_model_id: str
     _llm: LlmClient | None = None
+    _llm_simple: LlmClient | None = None
+    _llm_repair: LlmClient | None = None
 
     def llm_client(self) -> LlmClient:
         if self._llm is None:
             self._llm = build_llm_client(api_key=self.settings.openai_api_key, model=self.settings.openai_model)
         return self._llm
+
+    def llm_client_simple(self) -> LlmClient | None:
+        """R1 routing: the cheap tier for join-free questions. None when
+        NL2SQL_LLM_MODEL_SIMPLE is unset (no routing).
+        """
+        if not self.settings.openai_model_simple:
+            return None
+        if self._llm_simple is None:
+            self._llm_simple = build_llm_client(
+                api_key=self.settings.openai_api_key, model=self.settings.openai_model_simple
+            )
+        return self._llm_simple
+
+    def llm_client_repair(self) -> LlmClient | None:
+        """R1 escalation: the repair-round tier. None when
+        NL2SQL_LLM_MODEL_REPAIR is unset (repairs use the main model).
+        """
+        if not self.settings.openai_model_repair:
+            return None
+        if self._llm_repair is None:
+            self._llm_repair = build_llm_client(
+                api_key=self.settings.openai_api_key, model=self.settings.openai_model_repair
+            )
+        return self._llm_repair
 
     def dispose(self) -> None:
         self.engine.dispose()
