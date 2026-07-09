@@ -114,7 +114,7 @@ def _non_fk_non_pk_column_count(table: dict) -> int:
     return total - _fk_count(table) - sum(1 for c in table.get("columns", []) if c.get("isPrimaryKey"))
 
 
-def derive_grain(table: dict) -> str:
+def derive_grain(table: dict, fk_columns: list[str] | None = None) -> str:
     """Templated grain-sentence derivation (Fix A-bonus §1): deterministic,
     pattern-based — NOT NLP. Branches on FK count, time-column presence, and
     name-suffix heuristics (reusing the same kind of hints
@@ -128,13 +128,30 @@ def derive_grain(table: dict) -> str:
       - Code/lookup shape (name matches Types/Statuses/Categories/Codes/Ref
         suffix hints) -> "one row per <TableName> code/lookup value".
       - Else -> generic fallback "one row per <TableName> record".
+
+    `fk_columns` are the table's REAL outgoing foreign-key columns (from
+    keys.json). When supplied they drive the "keyed by"/"linking" clauses;
+    absent them, the old `endswith("id") and not PK` name heuristic is used —
+    but that heuristic mislabels a non-FK identifier column (e.g.
+    `Patients.ExternalId`, an external system id that is NOT a foreign key) as
+    the join key, and the emitted "keyed by ExternalId" then misdirects the
+    generator into joining on that column instead of the true FK. Callers with
+    keys.json on hand (apply_importance_and_large_flag) MUST pass the real
+    foreign keys so the grain never names a non-FK as the key.
     """
     name = table.get("name") or table["tableId"].split(".")[-1]
     name_lower = name.lower()
     fk_count = _fk_count(table)
     non_fk_non_pk_count = _non_fk_non_pk_column_count(table)
     has_time_column = any(c.get("isTimeColumn") for c in table.get("columns", []))
-    fk_column_names = [c["name"] for c in table.get("columns", []) if not c.get("isPrimaryKey") and c["name"].lower().endswith("id")]
+    if fk_columns is not None:
+        fk_column_names = list(fk_columns)
+    else:
+        fk_column_names = [
+            c["name"]
+            for c in table.get("columns", [])
+            if not c.get("isPrimaryKey") and c["name"].lower().endswith("id")
+        ]
 
     if fk_count >= 2 and non_fk_non_pk_count <= 2:
         if len(fk_column_names) >= 2:
@@ -233,9 +250,16 @@ def apply_importance_and_large_flag(
         t["isLargeTimeSeries"] = approx_rows > large_table_row_threshold
         # Fix A-bonus: populate `grain` when the catalog doesn't already
         # carry one (e.g. a not-yet-enriched build, or a hand-authored
-        # fixture) — never overwrite an already-populated grain.
+        # fixture) — never overwrite an already-populated grain. Pass the REAL
+        # outgoing FK columns (keys.json) so the grain never names a non-FK
+        # identifier (e.g. Patients.ExternalId) as the join key.
         if not t.get("grain"):
-            t["grain"] = derive_grain(t)
+            real_fk_columns = [
+                col
+                for edge in _declared_fk_edges_from(table_id, foreign_keys)
+                for col in (edge.get("fromColumns") or [])
+            ]
+            t["grain"] = derive_grain(t, fk_columns=real_fk_columns)
 
     scores = compute_importance_scores(tables_copy, foreign_keys, weights=weights)
     for t in tables_copy:
