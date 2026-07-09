@@ -1,0 +1,113 @@
+# =============================================================================
+# Ceiba NL->SQL — local two-process topology (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §6)
+# =============================================================================
+# Brings up the full split locally:
+#   web           — Next.js app / API gateway (the ONLY public ingress, :3000)
+#   nl2sql        — FastAPI NL->SQL runtime (uvicorn, private, :8088)
+#   mock-postgres — NO-PHI synthetic Postgres (:55433), the "mock" federation
+#                   source, seeded read-only via the ceiba_ro role
+#                   (folded in from docker/mock-postgres/, same port + role).
+#
+# Startup ordering (plan §6): mock-postgres must be healthy before nl2sql
+# attaches it; nl2sql must be /readyz-green before web routes flag-on traffic.
+#
+#   Bring up:  make dev         (or: docker compose up --build)
+#   Tear down: make dev-down     (or: docker compose down)
+#
+# By DEFAULT web uses NL2SQL_RUNTIME=ts (in-process TS runtime) so nothing needs
+# the service to be green to serve traffic. Flip NL2SQL_RUNTIME=python (below)
+# to route generate+execute through the nl2sql service.
+# =============================================================================
+
+services:
+  mock-postgres:
+    image: postgres:16
+    container_name: ceiba-mock-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mock_admin
+      POSTGRES_PASSWORD: mock_admin_pw
+      POSTGRES_DB: mockdb
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "55433:5432"
+    volumes:
+      - mock_pgdata:/var/lib/postgresql/data
+      - ./docker/mock-postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mock_admin -d mockdb -h 127.0.0.1"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  nl2sql:
+    build:
+      context: .
+      dockerfile: docker/nl2sql-service.Dockerfile
+    container_name: ceiba-nl2sql
+    restart: unless-stopped
+    depends_on:
+      mock-postgres:
+        condition: service_healthy
+    environment:
+      # The service ATTACHes this read-only DSN (the ceiba_ro role, NEVER the
+      # superuser). Host is the compose service name on the private network.
+      MOCK_DSN: "postgresql://ceiba_ro:ceiba_ro_pw@mock-postgres:5432/mockdb"
+      # Artifact bundle the retriever loads. Point this at a bundle dir on the
+      # host (bind-mounted below). Uses the committed fixture bundle by default
+      # so the service boots /readyz-green without a full prep build.
+      NL2SQL_BUNDLE_DIR: "/app/lib/rag/__tests__/fixtures/bundles/mock-v1"
+      NL2SQL_EMBEDDING_MODEL_ID: "test-deterministic-hash-v1"
+      NL2SQL_ENGINE: "duckdb"
+      NL2SQL_SERVICE_PORT: "8088"
+      # Shared internal Bearer token (MUST match web's value). Override for real.
+      NL2SQL_SERVICE_TOKEN: "${NL2SQL_SERVICE_TOKEN:-dev-internal-token}"
+      # BAA/egress gate: default CLOSED (schema-only generation still works).
+      OPENAI_BAA_SIGNED: "${OPENAI_BAA_SIGNED:-false}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    ports:
+      # Exposed on localhost for direct probing (curl /readyz); web reaches it
+      # over the private network, not this published port.
+      - "8088:8088"
+    volumes:
+      # Live-reload bind mounts (uvicorn --reload).
+      - ./ceiba_nl2sql:/app/ceiba_nl2sql
+      - ./ceiba_nl2sql_service:/app/ceiba_nl2sql_service
+      - ./lib/rag/__tests__/fixtures:/app/lib/rag/__tests__/fixtures:ro
+    healthcheck:
+      # readiness gate: bundle loaded + engine attached + embedder resolvable.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8088/readyz').status==200 else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    container_name: ceiba-web
+    restart: unless-stopped
+    depends_on:
+      nl2sql:
+        condition: service_healthy
+    environment:
+      # DEFAULT ts: nothing routes to the service until an operator opts in.
+      # Flip to "python" to route generate+execute through nl2sql.
+      NL2SQL_RUNTIME: "${NL2SQL_RUNTIME:-ts}"
+      # Where the TS client reaches the service (private compose network).
+      NL2SQL_SERVICE_URL: "http://nl2sql:8088"
+      NL2SQL_SERVICE_TOKEN: "${NL2SQL_SERVICE_TOKEN:-dev-internal-token}"
+      # While NL2SQL_RUNTIME=ts, web keeps its own DB creds; drop once python.
+      MOCK_DSN: "postgresql://ceiba_ro:ceiba_ro_pw@mock-postgres:5432/mockdb"
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      # Keep the image's node_modules (do not let the bind-mount shadow it).
+      - /app/node_modules
+
+volumes:
+  mock_pgdata:
+    name: ceiba_mock_pgdata

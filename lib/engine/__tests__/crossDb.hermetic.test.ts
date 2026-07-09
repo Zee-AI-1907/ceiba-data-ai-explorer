@@ -118,6 +118,32 @@ describe('cross-DB hermetic integration (two DuckDB catalogs)', () => {
     ).rejects.toThrow(/read-?only/i)
   })
 
+  it('blocks filesystem/network table functions at execute time (external access sealed)', async () => {
+    // P1 SECURITY: even a syntactically read-only SELECT must not be able to
+    // read arbitrary local files (secret exfiltration) or remote URLs (SSRF)
+    // via a DuckDB filesystem/network table function. The engine disables
+    // external access (+ locks the config) on the first execute().
+    const specs: AttachSpec[] = [
+      { sourceId: 'mock', engine: 'duckdb', dsn: referenceDbPath, readOnly: true, alias: 'mock' },
+    ]
+    await engine.attach(specs)
+
+    // A normal read against the attached READ_ONLY catalog still works AFTER
+    // the lockdown is applied (the lockdown does not affect attached catalogs).
+    const ok = await engine.execute('SELECT COUNT(*) AS n FROM mock."public"."HospitalRef"', {
+      maxRows: 10,
+      deadlineMs: 5_000,
+    })
+    // DuckDB returns COUNT(*) as a BigInt; compare via Number to avoid a
+    // BigInt literal (the project's TS target predates ES2020 BigInt literals).
+    expect(Number(ok.rows[0]!.n)).toBe(3)
+
+    // read_csv of a local file is now blocked by DuckDB's own config.
+    await expect(
+      engine.execute("SELECT * FROM read_csv('/etc/hostname')", { maxRows: 10, deadlineMs: 5_000 })
+    ).rejects.toThrow(/disabled by configuration|external access|permission/i)
+  })
+
   it('attach() hard-errors before a bad spec ever reaches DuckDB (defense in depth)', async () => {
     const badSpec = {
       sourceId: 'mock',

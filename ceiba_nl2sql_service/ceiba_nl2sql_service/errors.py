@@ -9,8 +9,13 @@ Every error response is exactly:
 `ErrorCodes`:
     scope       -> 422 SCOPE       (model declined / out-of-clinical-scope)
     generation  -> 422 SCOPE       (repair budget exhausted)
-    guard       -> 502 UPSTREAM    (safeError, raw detail logged not returned)
-    engine      -> 502 UPSTREAM
+    guard       -> 422 VALIDATION  (SQL rejected by the read-only re-guard —
+                                    a REJECTED REQUEST, not an upstream failure:
+                                    the caller submitted a write/DDL/unsafe
+                                    statement. Reconciled to 422 to match the
+                                    /nl2sql/execute route + its contract test;
+                                    the TS client keys off `kind`, not status.)
+    engine      -> 502 UPSTREAM    (DuckDB/driver failure — a genuine upstream)
     internal    -> 500 INTERNAL
     bad_request -> 400 VALIDATION
     auth        -> 401 UNAUTHENTICATED
@@ -37,7 +42,10 @@ _KIND_TO_STATUS: dict[ErrorKind, int] = {
     "auth": 401,
     "scope": 422,
     "generation": 422,
-    "guard": 502,
+    # `guard` is 422 (a rejected request), reconciled with the /nl2sql/execute
+    # route + its contract test. It is NOT 502 — a guard rejection is not an
+    # upstream failure, it is the caller submitting unsafe SQL.
+    "guard": 422,
     "engine": 502,
     "internal": 500,
 }

@@ -61,6 +61,12 @@ class UsageModel(BaseModel):
     """Per-query LLM cost + token metering (Phase 3 KEY deliverable). Summed
     across EVERY LLM call in the generate request (initial + each self-repair
     round). `estimatedCostUsd` is priced from generation/pricing.py's table.
+
+    `priced` distinguishes `estimatedCostUsd: 0.0` because the model had NO
+    entry in the price table (`priced=False` — the cost is UNKNOWN, not zero)
+    from a genuinely near-zero cost (`priced=True`). Without it a consumer
+    cannot tell "we don't know the price of this model" from "this really cost
+    ~nothing", which matters for cost dashboards + alerting.
     """
 
     model: str
@@ -70,6 +76,7 @@ class UsageModel(BaseModel):
     llmCalls: int
     estimatedCostUsd: float
     latencyMs: int
+    priced: bool = True
 
 
 class GenerateResponse(BaseModel):

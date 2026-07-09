@@ -193,3 +193,65 @@ def test_guard_result_is_frozen_dataclass():
     assert isinstance(result, GuardResult)
     with pytest.raises(Exception):
         result.allowed = False  # type: ignore[misc]
+
+
+# ── P1 SECURITY: filesystem/network table-function denylist ──────────────────
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_rejects_read_csv_local_file(dialect):
+    """A read-only SELECT that reads a local file (secret exfiltration) is
+    rejected by the guard even though its leading verb is SELECT.
+    """
+    result = guard_sql("SELECT * FROM read_csv('/proc/self/environ')", dialect=dialect)
+    assert result.allowed is False
+    assert "filesystem/network access" in (result.reason or "").lower()
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_rejects_read_parquet_remote_url(dialect):
+    """A read-only SELECT that reads a remote URL (SSRF) is rejected."""
+    result = guard_sql("SELECT * FROM read_parquet('http://attacker.example/x')", dialect=dialect)
+    assert result.allowed is False
+    assert "filesystem/network access" in (result.reason or "").lower()
+
+
+def test_rejects_read_text_read_blob_read_json_glob():
+    for sql in (
+        "SELECT read_text('/etc/passwd')",
+        "SELECT read_blob('/etc/passwd')",
+        "SELECT * FROM read_json('/etc/x.json')",
+        "SELECT * FROM glob('/etc/*')",
+    ):
+        assert guard_sql(sql, dialect="duckdb").allowed is False, sql
+
+
+def test_rejects_copy_to_and_select_into():
+    assert guard_sql("COPY (SELECT 1) TO '/tmp/x.csv'", dialect="duckdb").allowed is False
+    into = guard_sql("SELECT 1 AS a INTO newtable FROM t", dialect="duckdb")
+    assert into.allowed is False
+
+
+def test_rejects_install_and_load_extension():
+    assert guard_sql("INSTALL httpfs", dialect="duckdb").allowed is False
+    assert guard_sql("LOAD httpfs", dialect="duckdb").allowed is False
+
+
+def test_filesystem_denylist_does_not_false_trip_on_benign_select():
+    # A column named like a function prefix must not be rejected.
+    assert guard_sql("SELECT read_count FROM t", dialect="duckdb").allowed is True
+    assert guard_sql("SELECT count(*) FROM orders WHERE ts > now()", dialect="duckdb").allowed is True
+
+
+# ── P0-arch: WITH-body write verb in a STRING LITERAL (TS-parity lexical fallback) ──
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_rejects_with_body_write_verb_in_string_literal(dialect):
+    """lib/sqlGuard.ts's WITH-body regex matches a write verb even inside a
+    string literal, so the Python guard's lexical fallback rejects the same
+    `WITH x AS (SELECT 'DELETE' AS a) SELECT ...` to stay AT LEAST as strict.
+    """
+    result = guard_sql("WITH x AS (SELECT 'DELETE' AS a) SELECT * FROM x", dialect=dialect)
+    assert result.allowed is False
+    assert result.statement_type == "WITH"

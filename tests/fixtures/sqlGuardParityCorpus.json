@@ -1,0 +1,37 @@
+{
+  "_comment": "Shared adversarial + benign SQL corpus run through BOTH lib/sqlGuard.ts (TS) and ceiba_nl2sql.sqltools.guard (Python). The parity contract (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §1.3): the Python guard must be AT LEAST as strict as the TS guard. For every case, `tsRejected` records what the TS guard does; the TS parity test asserts TS matches it, and the Python parity test asserts Python rejects everything TS rejects (and does not newly-reject a case both are expected to allow). Keep this file in sync when either guard changes.",
+  "cases": [
+    { "name": "plain select", "sql": "SELECT * FROM patients", "tsRejected": false },
+    { "name": "with cte select", "sql": "WITH r AS (SELECT id FROM visits WHERE ts > now()) SELECT * FROM r", "tsRejected": false },
+    { "name": "explain select", "sql": "EXPLAIN SELECT 1", "tsRejected": false },
+    { "name": "show tables", "sql": "SHOW TABLES", "tsRejected": false },
+    { "name": "describe", "sql": "DESCRIBE patients", "tsRejected": false },
+    { "name": "select with count and time bound", "sql": "SELECT count(*) FROM orders WHERE ts > now() LIMIT 100", "tsRejected": false },
+    { "name": "column named like function prefix", "sql": "SELECT read_count FROM t", "tsRejected": false },
+
+    { "name": "delete", "sql": "DELETE FROM patients", "tsRejected": true },
+    { "name": "insert", "sql": "INSERT INTO t VALUES (1)", "tsRejected": true },
+    { "name": "update", "sql": "UPDATE t SET x = 1", "tsRejected": true },
+    { "name": "drop", "sql": "DROP TABLE t", "tsRejected": true },
+    { "name": "merge", "sql": "MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", "tsRejected": true },
+    { "name": "call", "sql": "CALL proc()", "tsRejected": true },
+    { "name": "comment prefix delete", "sql": "/* x */ DELETE FROM t", "tsRejected": true },
+    { "name": "line comment prefix delete", "sql": "-- x\nDELETE FROM t", "tsRejected": true },
+    { "name": "multi statement", "sql": "SELECT 1; DROP TABLE t", "tsRejected": true },
+    { "name": "with body delete", "sql": "WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x", "tsRejected": true },
+    { "name": "with body write verb in string literal", "sql": "WITH x AS (SELECT 'DELETE' AS a) SELECT * FROM x", "tsRejected": true },
+    { "name": "read_csv local file", "sql": "SELECT * FROM read_csv('/proc/self/environ')", "tsRejected": true },
+    { "name": "read_parquet remote url", "sql": "SELECT * FROM read_parquet('http://attacker.example/x')", "tsRejected": true },
+    { "name": "read_text", "sql": "SELECT read_text('/etc/passwd')", "tsRejected": true },
+    { "name": "read_blob", "sql": "SELECT read_blob('/etc/passwd')", "tsRejected": true },
+    { "name": "read_json", "sql": "SELECT * FROM read_json('/etc/x.json')", "tsRejected": true },
+    { "name": "glob", "sql": "SELECT * FROM glob('/etc/*')", "tsRejected": true },
+    { "name": "copy to", "sql": "COPY (SELECT 1) TO '/tmp/x.csv'", "tsRejected": true },
+    { "name": "select into", "sql": "SELECT 1 AS a INTO newtable FROM t", "tsRejected": true },
+    { "name": "install extension", "sql": "INSTALL httpfs", "tsRejected": true },
+    { "name": "load extension", "sql": "LOAD httpfs", "tsRejected": true },
+    { "name": "pragma", "sql": "PRAGMA database_list", "tsRejected": true },
+    { "name": "attach", "sql": "ATTACH 'x.db' AS d", "tsRejected": true },
+    { "name": "set", "sql": "SET enable_external_access=true", "tsRejected": true }
+  ]
+}

@@ -66,3 +66,23 @@ async def test_patient_derived_egress_class_allowed_at_the_choke_point_when_gate
     llm = StubLlmClient(["ok"])
     result = await call_llm(llm, "some patient-row-derived prompt", "patient-derived")
     assert result.text == "ok"
+
+
+@pytest.mark.parametrize("lenient_value", ["True", "TRUE", "1", "yes", " true"])
+async def test_gate_ignores_lenient_baa_values_and_settings_has_no_baa_field(
+    monkeypatch: pytest.MonkeyPatch, lenient_value: str
+):
+    """The BAA gate reads OPENAI_BAA_SIGNED with an EXACT, case-sensitive
+    `== "true"` — a lenient value ("True"/"1"/"yes"/" true") must NOT open it,
+    and there must be NO `openai_baa_signed` Settings field that could tempt a
+    lenient bool re-parse (P3 dead-field removal). Guards against someone
+    "cleaning up" the strict gate into a permissive one.
+    """
+    from ceiba_nl2sql.compliance.egress import is_egress_allowed
+    from ceiba_nl2sql_service.settings import Settings
+
+    monkeypatch.setenv("OPENAI_BAA_SIGNED", lenient_value)
+    assert is_egress_allowed() is False, f"{lenient_value!r} must NOT open the gate"
+    assert not hasattr(Settings(), "openai_baa_signed"), (
+        "Settings must not model OPENAI_BAA_SIGNED — the gate reads os.environ with a strict == 'true'."
+    )

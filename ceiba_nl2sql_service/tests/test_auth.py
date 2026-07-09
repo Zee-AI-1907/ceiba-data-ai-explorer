@@ -49,3 +49,20 @@ async def test_unconfigured_token_fails_closed(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.delenv("NL2SQL_SERVICE_TOKEN", raising=False)
     response = await client.post("/nl2sql/explain", json={"sql": "SELECT 1"}, headers=auth_headers)
     assert response.status_code == 401
+
+
+async def test_401_emits_standard_error_envelope_with_kind_auth(client):
+    """The 401 body MUST be the standard `{ "error": { "kind": "auth", ... } }`
+    envelope the TS client (lib/nl2sqlServiceClient.ts) parses — NOT FastAPI's
+    default `{ "detail": ... }`. Contract test for the P2 fix.
+    """
+    response = await client.post(
+        "/nl2sql/explain", json={"sql": "SELECT 1"}, headers={"Authorization": "Bearer wrong-token"}
+    )
+    assert response.status_code == 401
+    body = response.json()
+    assert "error" in body, f"expected an error envelope, got {body!r}"
+    assert body["error"]["kind"] == "auth"
+    assert isinstance(body["error"]["message"], str) and body["error"]["message"]
+    # Must NOT be the raw FastAPI detail shape.
+    assert "detail" not in body or "error" in body

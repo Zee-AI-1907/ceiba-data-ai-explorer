@@ -75,11 +75,23 @@ class DuckDbEngine:
         self._local_path = local_path
         self._attached_aliases: set[str] = set()
         self._conn: duckdb.DuckDBPyConnection = duckdb.connect(local_path)
+        # Extensions MUST be INSTALL/LOAD'd here, while external access is still
+        # enabled — once `enable_external_access=false` is set (see _harden),
+        # DuckDB refuses to load ANY external extension ("Loading external
+        # extensions is disabled through configuration"). ATTACH of a
+        # file/postgres source likewise requires external access, so both the
+        # extension load AND every attach() happen BEFORE the runtime is sealed.
         self._conn.execute("INSTALL postgres")
         self._conn.execute("LOAD postgres")
         self._conn.execute("INSTALL vss")
         self._conn.execute("LOAD vss")
         self._lock = threading.Lock()
+        # Whether the read-path lockdown has been applied. External access
+        # (arbitrary filesystem/HTTP table functions such as read_csv/
+        # read_parquet('http://...')) stays enabled through construction +
+        # attach, then is disabled+locked lazily the first time user SQL is run
+        # (execute/explain). See _harden().
+        self._hardened = False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -118,9 +130,43 @@ class DuckDbEngine:
         self._conn.close()
         self._attached_aliases.clear()
 
+    # ── external-access lockdown (defense in depth, security boundary) ────────
+
+    def _harden(self) -> None:
+        """Seal the DuckDB runtime against external filesystem/network access
+        so that a "read-only SELECT" cannot exfiltrate secrets or SSRF via a
+        table function like `read_csv('/proc/self/environ')` or
+        `read_parquet('http://attacker/...')`.
+
+        `enable_external_access=false` blocks ALL filesystem/HTTP table
+        functions (read_csv/read_parquet/read_json/read_text/read_blob/glob/
+        COPY ... TO a path, etc.) AND further ATTACHes; `lock_configuration=
+        true` makes that irreversible for the life of the connection, so a
+        later `SET enable_external_access=true` smuggled into a query cannot
+        re-open the door. Both are one-way and idempotent-guarded by
+        `self._hardened` because DuckDB errors on re-setting a locked option
+        even to the same value.
+
+        MUST run AFTER all extensions are loaded and all sources are ATTACHed
+        (both need external access), which is why it is applied lazily on the
+        first read rather than in the constructor. Reads from already-attached
+        READ_ONLY catalogs continue to work after the lockdown.
+        """
+        if self._hardened:
+            return
+        self._conn.execute("SET enable_external_access=false")
+        self._conn.execute("SET lock_configuration=true")
+        self._hardened = True
+
     # ── runtime (read path) ───────────────────────────────────────────────────
 
     def execute(self, sql: str, opts: ExecuteOptions) -> EngineResult:
+        # NOTE: `opts.catalog`/`opts.schema` are intentionally NOT applied as a
+        # `USE` here — mirrors lib/engine/DuckDbEngine.ts `execute()`, which
+        # also ignores them. `execute()` requires FULLY-QUALIFIED SQL
+        # (`catalog.schema.table`); only `explain()` applies `USE` (for the
+        # generation-time dry-run, where an unqualified probe is convenient).
+        # The two are deliberately asymmetric and kept at TS parity.
         max_rows = opts.max_rows if opts.max_rows and opts.max_rows > 0 else 1000
         deadline_ms = opts.deadline_ms if opts.deadline_ms and opts.deadline_ms > 0 else 55_000
 
@@ -129,6 +175,10 @@ class DuckDbEngine:
         timer.start()
         try:
             with self._lock:
+                # Seal external filesystem/network access before running ANY
+                # user SQL (defense in depth against read_csv/read_parquet
+                # exfiltration/SSRF); idempotent after the first call.
+                self._harden()
                 # Ask for one more row than the cap so a single extra row
                 # proves more data existed beyond max_rows, mirroring the TS
                 # engine's `runAndReadUntil(sql, maxRows + 1)`.
@@ -163,6 +213,7 @@ class DuckDbEngine:
     def explain(self, sql: str, *, catalog: str | None = None, schema: str | None = None) -> PlanOrError:
         try:
             with self._lock:
+                self._harden()
                 if catalog:
                     use_clause = _quote_ident(catalog)
                     if schema:

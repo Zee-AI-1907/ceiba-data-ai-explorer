@@ -222,3 +222,34 @@ describe('stripCommentsAndSplit — tokenizer directly', () => {
     expect(stripped).not.toContain('trailing')
   })
 })
+
+describe('guardSql — P1 filesystem/network table functions are REJECTED', () => {
+  it('rejects read_csv of a local file inside a SELECT (secret exfiltration)', () => {
+    const r = guardSql("SELECT * FROM read_csv('/proc/self/environ')")
+    expect(r.allowed).toBe(false)
+    expect(r.reason).toMatch(/filesystem\/network access/i)
+  })
+
+  it('rejects read_parquet of a remote URL inside a SELECT (SSRF)', () => {
+    const r = guardSql("SELECT * FROM read_parquet('http://attacker.example/x')")
+    expect(r.allowed).toBe(false)
+    expect(r.reason).toMatch(/filesystem\/network access/i)
+  })
+
+  it('rejects read_text / read_blob / read_json / glob', () => {
+    expect(guardSql("SELECT read_text('/etc/passwd')").allowed).toBe(false)
+    expect(guardSql("SELECT read_blob('/etc/passwd')").allowed).toBe(false)
+    expect(guardSql("SELECT * FROM read_json('/etc/x.json')").allowed).toBe(false)
+    expect(guardSql("SELECT * FROM glob('/etc/*')").allowed).toBe(false)
+  })
+
+  it('rejects COPY … TO (export) and SELECT … INTO (materialize)', () => {
+    expect(guardSql("COPY (SELECT 1) TO '/tmp/x.csv'").allowed).toBe(false)
+    expect(guardSql('SELECT 1 AS a INTO newtable FROM t').allowed).toBe(false)
+  })
+
+  it('does NOT false-trip on a column named like a function or a benign SELECT', () => {
+    expect(guardSql('SELECT read_count FROM t').allowed).toBe(true)
+    expect(guardSql('SELECT count(*) FROM orders WHERE ts > now()').allowed).toBe(true)
+  })
+})

@@ -39,7 +39,18 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Awaitable, Callable, TypeVar
+
+_T = TypeVar("_T")
+
+# An "offloader": runs a blocking callable and awaits its result. The default
+# (`_direct_offload`) just calls it inline (used by prep + the hermetic tests,
+# which have no event loop to protect). The FastAPI service injects one backed
+# by Starlette's `run_in_threadpool`, so the pipeline's BLOCKING segments
+# (retriever.retrieve — embed + BM25; engine.explain — DuckDB) do not stall the
+# event loop and serialize every concurrent request (PYTHON_NL2SQL_SERVICE_PLAN
+# §2.2 event-loop-blocking fix).
+Offload = Callable[..., Awaitable]
 
 from ceiba_nl2sql.engine.base import EngineCapabilities, ExecuteOptions, PlanError, PlanOk, QueryEngine, SqlDialect
 from ceiba_nl2sql.generation.llm import DEFAULT_LLM_MODEL, LlmClient, TokenUsage, call_llm
@@ -248,6 +259,14 @@ def _retrieval_summary(context: SchemaContext) -> RetrievalSummary:
     )
 
 
+async def _direct_offload(func: Callable[..., _T], *args, **kwargs) -> _T:
+    """Default offloader: call the blocking function inline. Used by prep and
+    the hermetic tests (no event loop to protect). The FastAPI service injects
+    a threadpool-backed offloader instead.
+    """
+    return func(*args, **kwargs)
+
+
 async def generate_sql(
     *,
     question: str,
@@ -257,6 +276,7 @@ async def generate_sql(
     dialect: SqlDialect | None = None,
     options: GenerateOptions | None = None,
     cached: bool = False,
+    offload: Offload = _direct_offload,
 ) -> SqlGenerateResponse:
     """The SPEC §5.1 pipeline as an injectable, testable function. Retrieves
     schema context, prompts the (injected) LLM, guards + cardinality-checks +
@@ -304,7 +324,8 @@ async def generate_sql(
         recall_columns=options.recall_columns,
         exemplar_k=options.exemplar_k,
     )
-    context = retriever.retrieve(question, retrieve_options)
+    # BLOCKING (embed + BM25): offload so it does not stall the event loop.
+    context = await offload(retriever.retrieve, question, retrieve_options)
 
     # [B]+[C] assemble prompt + first LLM call. Egress class is
     # schema-metadata: the prompt is BAA-safe by construction (no
@@ -334,7 +355,9 @@ async def generate_sql(
     rounds = 0
     last_error: str | None = None
 
-    ok, accepted_sql, failure = _validate_candidate(
+    # BLOCKING (engine.explain — DuckDB): offload the whole validate step.
+    ok, accepted_sql, failure = await offload(
+        _validate_candidate,
         candidate_sql,
         context,
         engine,
@@ -369,7 +392,8 @@ async def generate_sql(
         if extracted_description:
             description = extracted_description
 
-        ok, accepted_sql, failure = _validate_candidate(
+        ok, accepted_sql, failure = await offload(
+            _validate_candidate,
             candidate_sql,
             context,
             engine,

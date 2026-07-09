@@ -20,6 +20,7 @@ import uuid as _uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from ceiba_nl2sql.bundle.loader import BundleLoadError
@@ -127,6 +128,7 @@ def _usage_model(usage) -> UsageModel | None:
         llmCalls=usage.llm_calls,
         estimatedCostUsd=usage.estimated_cost_usd,
         latencyMs=usage.latency_ms,
+        priced=usage.priced,
     )
 
 
@@ -186,6 +188,11 @@ async def nl2sql_generate(payload: GenerateRequest, request: Request, state: App
             dialect=payload.dialect,
             options=generate_options,
             cached=False,
+            # Offload the pipeline's BLOCKING segments (retriever.retrieve —
+            # embed + BM25; engine.explain — DuckDB) to the threadpool so the
+            # event loop is not stalled and concurrent requests are not
+            # serialized. The genuinely-async LLM calls stay on the loop.
+            offload=run_in_threadpool,
         )
     except EgressBlockedError as exc:
         return envelope_response("scope", str(exc))
@@ -245,7 +252,13 @@ async def nl2sql_explain(payload: ExplainRequest, state: AppState = Depends(get_
     if not guard_verdict.allowed:
         return ExplainResponse(ok=False, error=guard_verdict.reason or "SQL rejected by the read-only guard.")
 
-    result = state.engine.explain(payload.sql)
+    # DuckDB's engine methods are BLOCKING (synchronous C calls). Running them
+    # directly on the event loop would serialize every request behind one query;
+    # offload to Starlette's threadpool. The engine keeps its own lock around
+    # attach/execute for DuckDB connection safety (a single shared connection
+    # still caps real concurrency — a connection pool is a future improvement,
+    # deliberately NOT built here; §2.1).
+    result = await run_in_threadpool(state.engine.explain, payload.sql)
     if result.ok:
         return ExplainResponse(ok=True, plan=result.plan)  # type: ignore[union-attr]
     return ExplainResponse(ok=False, error=result.error)  # type: ignore[union-attr]
@@ -265,14 +278,24 @@ async def nl2sql_execute(payload: ExecuteRequest, state: AppState = Depends(get_
     # this endpoint unguarded.
     guard_verdict = guard_sql(payload.sql, dialect=state.engine.dialect())
     if not guard_verdict.allowed:
-        return envelope_response("guard", guard_verdict.reason or "SQL rejected by the read-only guard.", status_code=422)
+        # `guard` maps to 422 in the taxonomy (a rejected request, not an
+        # upstream failure) — no status override needed; the mapping is
+        # authoritative and documented in errors.py.
+        return envelope_response("guard", guard_verdict.reason or "SQL rejected by the read-only guard.")
 
     max_rows = min(payload.maxRows or DEFAULT_MAX_ROWS, MAX_QUERY_ROWS)
     deadline_ms = payload.deadlineMs or DEFAULT_DEADLINE_MS
 
     try:
-        result = state.engine.execute(
-            payload.sql, ExecuteOptions(catalog=payload.database, schema=payload.schema_, max_rows=max_rows, deadline_ms=deadline_ms)
+        # Offload the BLOCKING DuckDB execute to the threadpool so a single
+        # long query does not stall the event loop for all other requests.
+        # The engine's internal lock still serializes DuckDB connection access;
+        # a connection pool (to raise real concurrency past one) is a future
+        # improvement, intentionally not built here.
+        result = await run_in_threadpool(
+            state.engine.execute,
+            payload.sql,
+            ExecuteOptions(catalog=payload.database, schema=payload.schema_, max_rows=max_rows, deadline_ms=deadline_ms),
         )
     except EngineDeadlineExceededError as exc:
         return envelope_response("engine", "The query exceeded its execution time budget.", status_code=502)

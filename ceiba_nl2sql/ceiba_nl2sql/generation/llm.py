@@ -45,6 +45,16 @@ logger = logging.getLogger("ceiba_nl2sql.generation.llm")
 # with settings.openai_model / NL2SQL_LLM_MODEL's default.
 DEFAULT_LLM_MODEL = "gpt-4o-mini"
 
+# Sampling parameters for the driving LLM. Kept in sync with the TS in-process
+# client (app/api/sql-generate/route.ts) so generation behaves identically on
+# both runtimes across the migration window. `temperature=0` = deterministic
+# SQL generation (we want the same SQL for the same schema+question, not
+# creative variation); `max_tokens=600` bounds a single SQL+description
+# completion (a generated statement + short description never approaches 600
+# tokens, so this caps a runaway generation without truncating real output).
+LLM_TEMPERATURE = 0.0
+LLM_MAX_TOKENS = 600
+
 
 @dataclass(frozen=True)
 class TokenUsage:
@@ -210,7 +220,8 @@ class OpenAiLlmClient:
             response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0,
+                temperature=LLM_TEMPERATURE,
+                max_tokens=LLM_MAX_TOKENS,
             )
         except Exception as exc:  # noqa: BLE001 - deliberately broad: any SDK error is scrubbed before surfacing
             logger.error("OpenAI completion failed: %s", exc)

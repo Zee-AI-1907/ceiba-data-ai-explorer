@@ -9,6 +9,7 @@ import { errorResponse, safeError, ErrorCodes } from '@/lib/errors'
 import { guardSql } from '@/lib/sqlGuard'
 import { getQueryEngine, KNOWN_ATTACH_ALIASES, MOCK_ALIAS } from '@/lib/engine/provisioning'
 import { executeSqlViaService } from '@/lib/nl2sqlServiceClient'
+import { queryRuntime, warnIfRuntimesDiverge } from '@/lib/nl2sqlRuntime'
 import fs from 'fs'
 import path from 'path'
 
@@ -126,23 +127,17 @@ function writeAnomalyLog(line: string): void {
 // ── runtime flag: TS (default) vs the Python NL→SQL service ───────────────────
 
 /**
- * NL2SQL_QUERY_RUNTIME selects WHICH runtime EXECUTES the guard-passed SQL
- * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 4):
- *   'ts'      (default) — the in-process getQueryEngine().execute path, unchanged.
- *   'python'           — POST to the Python FastAPI service /nl2sql/execute.
- *
- * DEFAULT is 'ts', so nothing changes unless an operator opts in. Rollback is a
- * single env flip back to 'ts' — no redeploy (plan §5 "Rollback"). ALL the TS
- * hardening (auth → rate-limit → body-size → validate → catalog/schema allowlist
- * → guardSql RE-GUARD) runs IDENTICALLY on both paths; only the execute step
- * differs. The guardSql re-guard is the execution boundary and always runs in TS
- * before any dispatch (§1.3).
+ * The query/execution runtime flag is resolved by lib/nl2sqlRuntime.ts:
+ *   effective = NL2SQL_QUERY_RUNTIME ?? NL2SQL_RUNTIME (umbrella) ?? 'ts'
+ * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 4, §7.3). DEFAULT is 'ts', so
+ * nothing changes unless an operator opts in; rollback is a single env flip.
+ * ALL the TS hardening (auth → rate-limit → body-size → validate →
+ * catalog/schema allowlist → guardSql RE-GUARD) runs IDENTICALLY on both paths;
+ * only the execute step differs. The guardSql re-guard is the execution
+ * boundary and always runs in TS before any dispatch (§1.3).
+ * `warnIfRuntimesDiverge` emits a one-time boot warning if generate and query
+ * runtimes disagree (mismatched flags reopen the dialect-mismatch window).
  */
-type QueryRuntime = 'ts' | 'python'
-
-function queryRuntime(): QueryRuntime {
-  return process.env.NL2SQL_QUERY_RUNTIME === 'python' ? 'python' : 'ts'
-}
 
 /**
  * TEST-ONLY fetch seam for the Python-runtime path. When set, the service client
@@ -170,6 +165,10 @@ interface QueryExecutionResult {
 }
 
 export async function POST(req: NextRequest) {
+  // ── 0. Runtime-divergence guard (§7.3): warn ONCE if generate/query runtimes
+  //    disagree (a misconfiguration that reopens the dialect-mismatch window). ──
+  warnIfRuntimesDiverge()
+
   // ── 1. AuthN + AuthZ ──
   const { session, error: authError } = await requireAuthWithPermission(req, 'query:run')
   if (authError) return authError

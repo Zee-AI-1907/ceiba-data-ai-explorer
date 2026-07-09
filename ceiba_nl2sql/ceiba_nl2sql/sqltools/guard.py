@@ -47,6 +47,7 @@ document plan §1.3, §3.2).
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 import sqlglot
@@ -125,6 +126,53 @@ _KNOWN_WRITE_COMMAND_KEYWORDS = frozenset(
         "REFRESH",
     }
 )
+
+# ── filesystem / network table-function denylist (P1 SECURITY) ────────────────
+#
+# Even a syntactically read-only SELECT can exfiltrate secrets or SSRF an
+# internal endpoint via a DuckDB filesystem/network TABLE FUNCTION:
+#   SELECT * FROM read_csv('/proc/self/environ')       -> leaks OPENAI_API_KEY,
+#   SELECT * FROM read_parquet('http://attacker/…')       NL2SQL_SERVICE_TOKEN,
+#   SELECT read_text('/etc/passwd')                        DSNs, or SSRFs.
+# The engine now disables external access at runtime (duckdb_engine.py
+# `_harden`), but this guard rejects these BEFORE they ever reach an engine, at
+# generation time, so the self-repair loop never even proposes such SQL. The
+# names are matched case-insensitively against every function node in the AST
+# (typed ReadCSV/ReadParquet plus generic Anonymous funcs) AND via a lexical
+# fallback (belt-and-suspenders, in case a future/dialect grammar hides the
+# call from the AST walk).
+_FILESYSTEM_NETWORK_FUNCTIONS = frozenset(
+    {
+        "READ_CSV",
+        "READ_CSV_AUTO",
+        "READ_PARQUET",
+        "PARQUET_SCAN",
+        "READ_JSON",
+        "READ_JSON_AUTO",
+        "READ_NDJSON",
+        "READ_NDJSON_AUTO",
+        "READ_JSON_OBJECTS",
+        "READ_TEXT",
+        "READ_BLOB",
+        "GLOB",
+        "READ_CSV_MULTI",
+        "SNIFF_CSV",
+        "DELTA_SCAN",
+        "ICEBERG_SCAN",
+        "READ_XLSX",
+    }
+)
+
+# Statement types that touch the filesystem/network or install code even though
+# they are not writes to a table: COPY ... TO a path (export), EXPORT DATABASE,
+# INSTALL/LOAD an extension (e.g. httpfs, which re-opens HTTP), and a
+# `SELECT ... INTO newtable` materialization. Reported with these keywords.
+_FILESYSTEM_ROOT_TYPE_TO_KEYWORD: dict[type, str] = {
+    exp.Copy: "COPY",
+    exp.Export: "EXPORT",
+    exp.Install: "INSTALL",
+    exp.Pragma: "PRAGMA",
+}
 
 # Root node types that are unambiguously write/DDL/transaction-control even
 # when sqlglot gives them a proper typed node (not a generic Command) —
@@ -217,6 +265,142 @@ def _contains_write_or_ddl(node: exp.Expression) -> str | None:
     return None
 
 
+def _function_name(node: exp.Func) -> str:
+    """Best-effort canonical UPPER-CASE name of a function node. `Anonymous`
+    (an unrecognized function) carries its name in `.name`; typed funcs
+    (ReadCSV, ReadParquet, …) expose it via `sql_name()`.
+    """
+    if isinstance(node, exp.Anonymous):
+        return str(node.name or "").upper()
+    try:
+        return str(node.sql_name() or "").upper()
+    except Exception:  # noqa: BLE001 - defensive: never let name probing crash the guard
+        return type(node).__name__.upper()
+
+
+# Lexical fallback: a filesystem/network function name used as a call
+# (`name(` — possibly with whitespace) anywhere in comment-free SQL. Belt-and-
+# suspenders behind the AST walk so a construct the parser hides from the walk
+# (or a future grammar change) is still caught. Word-boundary + `(` avoids
+# tripping on a column literally named `read_csv`.
+_FILESYSTEM_FUNCTION_LEXICAL = re.compile(
+    r"\b(" + "|".join(sorted(re.escape(name) for name in _FILESYSTEM_NETWORK_FUNCTIONS)) + r")\s*\(",
+    re.IGNORECASE,
+)
+# Statement-level filesystem/extension verbs for the lexical fallback (leading
+# keyword or COPY ... TO / EXPORT DATABASE / INSTALL / LOAD an extension).
+_FILESYSTEM_STATEMENT_LEXICAL = re.compile(
+    r"\b(EXPORT\s+DATABASE|INSTALL|LOAD|COPY)\b",
+    re.IGNORECASE,
+)
+
+
+def _find_filesystem_access(root: exp.Expression, raw_sql: str) -> str | None:
+    """Return a human-safe keyword if `root` (or the raw SQL, lexical fallback)
+    performs filesystem/network access via a table function, COPY ... TO,
+    EXPORT DATABASE, INSTALL/LOAD, PRAGMA, or a SELECT ... INTO materialization.
+    Returns None otherwise. Rejects these even inside an otherwise-read-only
+    SELECT (P1 SECURITY: read_csv/read_parquet exfiltration/SSRF).
+    """
+    # 1. Statement-root types that are filesystem/extension ops.
+    for root_type, keyword in _FILESYSTEM_ROOT_TYPE_TO_KEYWORD.items():
+        if isinstance(root, root_type):
+            # COPY ... FROM (kind=True) is an INGEST which the read-only DB role
+            # blocks anyway; COPY ... TO (kind=False) is the exfiltration path.
+            # Reject either — a read-only query never needs COPY at all.
+            return keyword
+
+    # 2. `SELECT ... INTO newtable` (Select.into) materializes to a new table.
+    for select_node in root.find_all(exp.Select):
+        if select_node.args.get("into") is not None:
+            return "SELECT INTO"
+
+    # 3. A `Command`/`LOAD`-style passthrough whose leading keyword installs or
+    #    loads an extension (re-opening HTTP/filesystem via httpfs, etc.).
+    for command in root.find_all(exp.Command):
+        token = str(command.this or "").upper()
+        if token in {"LOAD", "INSTALL", "EXPORT"}:
+            return token
+
+    # 4. Any filesystem/network table FUNCTION anywhere in the tree.
+    for func in root.find_all(exp.Func):
+        if _function_name(func) in _FILESYSTEM_NETWORK_FUNCTIONS:
+            return _function_name(func)
+
+    # 5. Lexical fallback over comment-free SQL (the AST above is authoritative;
+    #    this only fires if the parser hid the call from the walk).
+    stripped = _strip_sql_comments(raw_sql)
+    match = _FILESYSTEM_FUNCTION_LEXICAL.search(stripped)
+    if match:
+        return match.group(1).upper()
+    return None
+
+
+# ── comment stripping for the lexical fallbacks ──────────────────────────────
+#
+# The lexical fallbacks (filesystem-function scan + write-verb scan) run over
+# comment-free SQL so a verb hidden in a `-- comment` or `/* */` block is not
+# treated as present. String literals are preserved (a write verb inside a
+# string literal is inert as far as execution goes; the AST walk is what
+# decides real statement structure — the lexical scan is only a fail-CLOSED
+# backstop, and matching a literal at worst over-rejects, which is safe here).
+_LINE_COMMENT = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _strip_sql_comments(sql: str) -> str:
+    return _BLOCK_COMMENT.sub(" ", _LINE_COMMENT.sub(" ", sql))
+
+
+def _leading_keyword(sql: str) -> str:
+    """Upper-cased leading significant keyword of comment-free SQL, skipping
+    any leading `(`. Mirrors lib/sqlGuard.ts `leadingKeyword` — used to
+    classify a statement by its leading verb when sqlglot's AST root type is
+    ambiguous (notably `WITH ... SELECT`).
+    """
+    stripped = _strip_sql_comments(sql).lstrip()
+    while stripped.startswith("("):
+        stripped = stripped[1:].lstrip()
+    match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", stripped)
+    return match.group(0).upper() if match else ""
+
+
+# Lexical write/DDL-verb fallback (P0-arch): a standalone write verb anywhere in
+# comment-free SQL. Mirrors the TS guard's `writeVerbInBody` regex so a CTE
+# body like `WITH x AS (SELECT 'DELETE' AS a) ...` is treated the same on both
+# runtimes (the TS regex matches the literal DELETE and rejects; this makes
+# Python at least as strict). Belt-and-suspenders behind the AST walk.
+_WRITE_VERB_LEXICAL = re.compile(
+    r"\b("
+    + "|".join(
+        [
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "MERGE",
+            "CREATE",
+            "ALTER",
+            "DROP",
+            "TRUNCATE",
+            "CALL",
+            "GRANT",
+            "REVOKE",
+        ]
+    )
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _lexical_write_verb(sql: str) -> str | None:
+    """Fail-closed lexical scan for a write/DDL verb over comment-free SQL,
+    matching lib/sqlGuard.ts's WITH-body regex so the Python guard is at least
+    as strict as the TS one (P0-arch parity). Returns the matched verb or None.
+    """
+    match = _WRITE_VERB_LEXICAL.search(_strip_sql_comments(sql))
+    return match.group(1).upper() if match else None
+
+
 def guard_sql(
     sql: str,
     *,
@@ -276,6 +460,16 @@ def guard_sql(
     root = real_statements[0]
     statement_type = _root_type_name_for_reporting(root)
 
+    # sqlglot sometimes types `WITH cte AS (...) SELECT ...` as a plain Select
+    # (the CTE binds below the reported root), so the AST-derived
+    # `statement_type` can read "SELECT" for a statement whose LEADING keyword
+    # is WITH. lib/sqlGuard.ts classifies by leading keyword and applies its
+    # write-verb body scan for WITH, so normalize to "WITH" here whenever the
+    # raw statement leads with WITH — this keeps the Python guard AT LEAST as
+    # strict as the TS one for the `WITH ... SELECT 'DELETE' ...` case (P0-arch).
+    if statement_type == "SELECT" and _leading_keyword(sql) == "WITH":
+        statement_type = "WITH"
+
     if not statement_type:
         return GuardResult(allowed=False, reason="Could not identify the SQL statement type.")
 
@@ -300,11 +494,20 @@ def guard_sql(
     if isinstance(root, exp.Command):
         pass
     elif statement_type == "WITH":
-        if not root.args.get("with"):
+        # The statement must ultimately drive a SELECT (a WITH whose body is a
+        # write is a write). sqlglot may bind the CTE below the reported root,
+        # so accept either a top-level `with` arg OR a Select node present
+        # anywhere in the tree (mirrors the TS guard's `\bSELECT\b` check).
+        resolves_to_select = bool(root.args.get("with")) or any(root.find_all(exp.Select))
+        if not resolves_to_select:
             return GuardResult(
                 allowed=False, statement_type="WITH", reason="A WITH clause must resolve to a SELECT query."
             )
-        write_verb = _contains_write_or_ddl(root)
+        # AST walk PLUS a lexical fallback: the TS guard's WITH-body regex
+        # matches a write verb even inside a string literal (e.g. `WITH x AS
+        # (SELECT 'DELETE' AS a) SELECT ...`), so the Python guard applies the
+        # same fail-closed lexical scan to stay AT LEAST as strict (P0-arch).
+        write_verb = _contains_write_or_ddl(root) or _lexical_write_verb(sql)
         if write_verb:
             return GuardResult(
                 allowed=False,
@@ -323,6 +526,22 @@ def guard_sql(
                 statement_type=statement_type,
                 reason=f"{write_verb} is not permitted. Only read-only queries are allowed.",
             )
+
+    # ── P1 SECURITY: reject filesystem/network table functions + COPY/EXPORT/
+    #    INSTALL/LOAD/PRAGMA/SELECT INTO, even inside a read-only SELECT. This
+    #    runs for EVERY allowed statement type (including a bare SELECT, WITH,
+    #    and the Command passthroughs) — a read_csv('/etc/…') hidden in a SELECT
+    #    is exactly the bypass this closes.
+    filesystem_verb = _find_filesystem_access(root, sql)
+    if filesystem_verb:
+        return GuardResult(
+            allowed=False,
+            statement_type=statement_type,
+            reason=(
+                f"{filesystem_verb} is not permitted: filesystem/network access "
+                "(reading local files or remote URLs) is blocked even inside a read-only query."
+            ),
+        )
 
     check = table_allowlist or _default_table_allowlist
     allowed, allow_reason = check(root.sql(dialect=resolved_dialect), catalog, schema)

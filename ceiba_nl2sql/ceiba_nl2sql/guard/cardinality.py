@@ -24,13 +24,25 @@ guard that "P5 may harden with a real SQL AST if false negatives are
 observed" — this module IS that hardening. Table references are read from
 the FROM/JOIN nodes of the parsed AST (not a `\\btableName\\b` regex, which
 can false-positive on a comment/string or false-negative on an aliased
-subquery), and predicate detection walks the WHERE tree for a comparison
-node whose left/right side resolves to the required time column, instead of
-a "column name followed within ~80 chars by an operator" text-window regex.
+subquery), and predicate detection walks the WHOLE statement AST (not only
+the WHERE clause — a bound in a JOIN ... ON / QUALIFY / CTE body counts too)
+for a comparison node whose left/right side resolves to the required time
+column, instead of a "column name followed within ~80 chars by an operator"
+text-window regex.
+
+── Fail-closed lexical fallbacks (kept AT LEAST as strict as the TS guard) ───
+Two belt-and-suspenders lexical checks sit behind the AST walk so this guard
+is never MORE permissive than lib/rag/cardinalityGuard.ts: (1) if the AST
+surfaces zero large tables, a word-boundary scan of the raw SQL for a known
+large-table name still triggers the bounding policy (catches an alias/CTE
+name the exp.Table walk missed); and (2) only a NUMERIC `LIMIT n` counts as a
+real bound — a `LIMIT $1` placeholder is treated as absent, matching the TS
+`LIMIT\\s+\\d+` regex.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -84,19 +96,49 @@ def _referenced_table_names(root: exp.Expression) -> set[str]:
     return names
 
 
+def _is_numeric_limit(limit_node: exp.Expression | None) -> bool:
+    """True iff the LIMIT's operand is a numeric literal (`LIMIT 100`), matching
+    the TS guard's `LIMIT\\s+\\d+` regex. A non-numeric LIMIT (`LIMIT $1`, a
+    placeholder/parameter) is NOT counted as a real bound — the TS guard would
+    treat it as absent and auto-repair, so the Python guard must do the same to
+    stay AT LEAST as strict (P0-arch).
+    """
+    if limit_node is None:
+        return False
+    expression = limit_node.expression if isinstance(limit_node, exp.Limit) else None
+    if expression is None:
+        return False
+    return isinstance(expression, exp.Literal) and expression.is_number
+
+
+def _lexical_references_table(sql: str, table_name: str) -> bool:
+    """Word-boundary, case-insensitive match of a bare table name in the raw
+    SQL — mirrors lib/rag/cardinalityGuard.ts `identifierPattern` /
+    `referencesTable`. Used only as a fail-closed fallback behind the AST walk
+    (see cardinality_guard) so a large table the AST missed is still bounded.
+    """
+    pattern = re.compile(rf"\b{re.escape(table_name)}\b", re.IGNORECASE)
+    return bool(pattern.search(sql))
+
+
 def _has_limit_clause(root: exp.Expression) -> bool:
     # A `WITH ... SELECT` still exposes its own LIMIT via `.args.get("limit")`
-    # on the outer Select node; walk defensively for any Limit node too.
-    if isinstance(root, exp.Select) and root.args.get("limit"):
+    # on the outer Select node; walk defensively for any Limit node too. Only a
+    # NUMERIC limit counts (see _is_numeric_limit) — a `LIMIT $1` placeholder is
+    # treated as no limit, matching the TS `LIMIT\d+` regex.
+    if isinstance(root, exp.Select) and _is_numeric_limit(root.args.get("limit")):
         return True
-    return any(root.find_all(exp.Limit))
+    return any(_is_numeric_limit(node) for node in root.find_all(exp.Limit))
 
 
 def _has_time_bound_predicate(root: exp.Expression, time_column: str) -> bool:
-    """Walks every comparison/BETWEEN node in the WHERE tree (and anywhere
-    else in the statement) looking for one whose operand resolves to
+    """Walks every comparison/BETWEEN node ANYWHERE in the statement's AST
+    (not only the WHERE clause — a bound expressed in a JOIN ... ON, a QUALIFY,
+    or a CTE body counts too) looking for one whose operand resolves to
     `time_column` (bare or qualified, case-insensitive) — the AST equivalent
-    of the TS regex `(?:\\w+\\.)?"?col"?\\s*(?:::type)?\\s*(op)`.
+    of the TS regex `(?:\\w+\\.)?"?col"?\\s*(?:::type)?\\s*(op)`. Scanning the
+    whole tree is intentional: it counts a legitimate bound wherever it
+    appears, so a bounded query is not falsely rejected.
     """
     target = time_column.lower()
     for node in root.walk():
@@ -155,6 +197,23 @@ def cardinality_guard(
 
     referenced_names = _referenced_table_names(root)
     referenced_large_tables = [t for t in large_tables if t.table_name.lower() in referenced_names]
+
+    # Belt-and-suspenders LEXICAL fallback (P0-arch parity): the AST reads table
+    # names only from exp.Table FROM/JOIN nodes, so it can MISS a large-table
+    # name that appears via an alias/CTE-name/string-literal path the AST does
+    # not surface as a Table. The TS guard matches large-table names with a
+    # word-boundary regex over stripped SQL, so if the AST found ZERO large
+    # tables but the raw SQL word-boundary-matches a known large-table name,
+    # treat it as referenced too — this keeps the Python guard AT LEAST as
+    # strict as the TS one (enforcing time-bound + LIMIT rather than passing).
+    if not referenced_large_tables:
+        already = {t.table_name.lower() for t in referenced_large_tables}
+        for spec in large_tables:
+            if spec.table_name.lower() in already:
+                continue
+            if _lexical_references_table(sql, spec.table_name):
+                referenced_large_tables.append(spec)
+                already.add(spec.table_name.lower())
 
     if not referenced_large_tables:
         return CardinalityVerdict(ok=True, action="pass")

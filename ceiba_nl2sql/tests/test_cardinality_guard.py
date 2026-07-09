@@ -137,3 +137,39 @@ def test_cardinality_guard_from_context_end_to_end():
     verdict = cardinality_guard_from_context(sql, tables)
     assert verdict.ok is False
     assert verdict.action == "reject"
+
+
+# ── P0-arch parity fixes ──────────────────────────────────────────────────────
+
+
+def test_non_numeric_limit_is_treated_as_no_limit():
+    """A `LIMIT $1` placeholder is NOT a real bound — the TS guard's
+    `LIMIT\\s+\\d+` regex would miss it and auto-repair, so the Python guard
+    must repair (append a numeric LIMIT) too, not pass.
+    """
+    sql = """SELECT * FROM "MeasurementsMock" WHERE "RecordedAt" >= now() - INTERVAL '3 hours' LIMIT $1"""
+    verdict = cardinality_guard(
+        sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN, default_limit=500
+    )
+    assert verdict.action == "repair"
+    assert "LIMIT 500" in (verdict.repaired_sql or "")
+
+
+def test_lexical_fallback_catches_large_table_the_ast_missed():
+    """If the AST surfaces zero large tables but the raw SQL word-boundary
+    matches a known large-table name, the guard still enforces the bounding
+    policy (fail-closed lexical fallback matching the TS word-boundary regex).
+    """
+    import sqlglot
+
+    from ceiba_nl2sql.guard.cardinality import _referenced_table_names
+
+    # `FROM other_tbl AS MeasurementsMock` — the large-table name appears only
+    # as an ALIAS, so the AST's exp.Table FROM walk surfaces only `other_tbl`
+    # (a genuine AST miss). The lexical word-boundary fallback matches the alias
+    # and enforces the bounding policy (reject: no time bound present).
+    sql = "SELECT * FROM other_tbl AS MeasurementsMock LIMIT 10"
+    assert "measurementsmock" not in _referenced_table_names(sqlglot.parse_one(sql, read="duckdb"))
+    verdict = cardinality_guard(sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN)
+    assert verdict.ok is False
+    assert verdict.action == "reject"

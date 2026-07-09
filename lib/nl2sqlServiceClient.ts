@@ -47,6 +47,13 @@ export interface Nl2sqlUsage {
   llmCalls: number
   estimatedCostUsd: number
   latencyMs: number
+  /**
+   * True iff a real price for `model` was found in the pricing table. When
+   * false, `estimatedCostUsd` is 0.0 because the model's price is UNKNOWN — NOT
+   * because the query genuinely cost ~nothing. Optional for backward-compat
+   * with an older service that predates the field (defaults to unknown).
+   */
+  priced?: boolean
 }
 
 /** The /nl2sql/generate success body (mirrors SqlGenerateResponse + usage). */

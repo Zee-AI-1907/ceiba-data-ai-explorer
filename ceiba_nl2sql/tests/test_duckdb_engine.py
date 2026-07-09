@@ -155,3 +155,41 @@ def test_deadline_exceeded_raises(seed_db_path: str):
             pass
     finally:
         engine.dispose()
+
+
+def test_execute_blocks_filesystem_table_functions(seed_db_path: str):
+    """P1 SECURITY: even a syntactically read-only SELECT must not read
+    arbitrary local files (secret exfiltration) or remote URLs (SSRF) via a
+    DuckDB filesystem/network table function. The engine disables external
+    access (+ locks the config) on the first execute(); a normal read against
+    an attached READ_ONLY catalog still works afterward.
+    """
+    engine = DuckDbEngine()
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        # Normal read still works AFTER the lockdown is applied.
+        ok = engine.execute('SELECT COUNT(*) AS n FROM mock.public."T"', ExecuteOptions(max_rows=10, deadline_ms=5000))
+        assert ok.rows[0]["n"] == 3
+        # read_csv of a local file is now blocked by DuckDB's own config.
+        with pytest.raises(Exception) as excinfo:
+            engine.execute("SELECT * FROM read_csv('/etc/hostname')", ExecuteOptions(max_rows=10, deadline_ms=5000))
+        message = str(excinfo.value).lower()
+        assert "external access" in message or "disabled by configuration" in message or "permission" in message
+    finally:
+        engine.dispose()
+
+
+def test_external_access_cannot_be_re_enabled_after_harden(seed_db_path: str):
+    """`lock_configuration=true` makes the external-access lockdown
+    irreversible — a `SET enable_external_access=true` smuggled into a later
+    query cannot re-open the door.
+    """
+    engine = DuckDbEngine()
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        engine.execute('SELECT 1 AS n', ExecuteOptions(max_rows=1, deadline_ms=5000))  # triggers _harden
+        with pytest.raises(Exception) as excinfo:
+            engine.execute("SET enable_external_access=true", ExecuteOptions(max_rows=1, deadline_ms=5000))
+        assert "locked" in str(excinfo.value).lower() or "cannot change" in str(excinfo.value).lower()
+    finally:
+        engine.dispose()

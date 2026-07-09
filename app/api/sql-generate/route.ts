@@ -20,6 +20,7 @@ import {
   Nl2sqlServiceError,
   type Nl2sqlGenerateResult,
 } from '@/lib/nl2sqlServiceClient'
+import { generateRuntime, warnIfRuntimesDiverge } from '@/lib/nl2sqlRuntime'
 
 /**
  * POST /api/sql-generate — NL→SQL generation (NL2SQL_SPEC.md §5, §5.6; §P5).
@@ -90,21 +91,15 @@ export function __setGenerationDepsForTest(deps: GenerationDeps | null): void {
 // ── runtime flag: TS (default) vs the Python NL→SQL service ───────────────────
 
 /**
- * NL2SQL_GENERATE_RUNTIME selects WHICH runtime serves generation
- * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 3):
- *   'ts'      (default) — the in-process lib/rag `generateSql` path, unchanged.
- *   'python'           — POST to the Python FastAPI service /nl2sql/generate.
- *
- * DEFAULT is 'ts', so nothing changes unless an operator opts in. Rollback is a
- * single env flip back to 'ts' — no redeploy (plan §5 "Rollback"). All the TS
- * hardening (auth → rate-limit → body-size → validate → org-scoped cache) runs
- * IDENTICALLY on both paths; only the generation step differs.
+ * The generation runtime flag is resolved by lib/nl2sqlRuntime.ts:
+ *   effective = NL2SQL_GENERATE_RUNTIME ?? NL2SQL_RUNTIME (umbrella) ?? 'ts'
+ * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 3, §7.3). DEFAULT is 'ts', so
+ * nothing changes unless an operator opts in; rollback is a single env flip.
+ * All the TS hardening (auth → rate-limit → body-size → validate → org-scoped
+ * cache) runs IDENTICALLY on both paths; only the generation step differs.
+ * `warnIfRuntimesDiverge` emits a one-time boot warning if generate and query
+ * runtimes disagree (mismatched flags reopen the dialect-mismatch window).
  */
-type GenerateRuntime = 'ts' | 'python'
-
-function generateRuntime(): GenerateRuntime {
-  return process.env.NL2SQL_GENERATE_RUNTIME === 'python' ? 'python' : 'ts'
-}
 
 /**
  * TEST-ONLY fetch seam for the Python-runtime path. When set, the service
@@ -158,7 +153,10 @@ function createOpenAiLlmClient(apiKey: string): LlmClient {
           model: 'gpt-4o-mini',
           messages: [{ role: 'user', content: prompt }],
           max_tokens: 600,
-          temperature: 0.1,
+          // temperature 0 (deterministic) — kept in sync with the Python
+          // OpenAiLlmClient (ceiba_nl2sql/generation/llm.py LLM_TEMPERATURE) so
+          // generation behaves identically on both runtimes.
+          temperature: 0,
         }),
       })
       if (!response.ok) {
@@ -210,6 +208,10 @@ async function getGenerationDeps(): Promise<GenerationDeps> {
 }
 
 export async function POST(req: NextRequest) {
+  // 0. Runtime-divergence guard (§7.3): warn ONCE if generate/query runtimes
+  //    disagree (a misconfiguration that reopens the dialect-mismatch window).
+  warnIfRuntimesDiverge()
+
   // 1. auth (+permission) — UNCHANGED hardened wrapper.
   const { session, error } = await requireAuthWithPermission(req, 'query:run')
   if (error) return error

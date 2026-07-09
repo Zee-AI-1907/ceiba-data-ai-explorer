@@ -18,16 +18,24 @@ from __future__ import annotations
 
 import hmac
 
-from fastapi import Header, HTTPException
+from fastapi import Header
 
+from ceiba_nl2sql_service.errors import ServiceError
 from ceiba_nl2sql_service.settings import Settings, get_settings
 
 
 def require_internal_token(authorization: str | None = Header(default=None)) -> None:
-    """FastAPI dependency: raises 401 if the Authorization header does not
+    """FastAPI dependency: rejects (401) if the Authorization header does not
     carry the exact configured `NL2SQL_SERVICE_TOKEN` as a Bearer token.
     Constant-time compare (hmac.compare_digest) so a timing side-channel
     cannot leak the token byte-by-byte.
+
+    Raises `ServiceError(kind="auth")` — NOT a bare `HTTPException` — so the
+    registered ServiceError handler emits the standard
+    `{ "error": { "kind": "auth", "message": ... } }` envelope the TS client
+    (lib/nl2sqlServiceClient.ts) parses and maps to lib/errors.ts's
+    UNAUTHENTICATED. A bare HTTPException would emit `{ "detail": ... }`, which
+    the client does not recognize as the envelope (§2.4).
     """
     settings: Settings = get_settings()
     expected = settings.nl2sql_service_token
@@ -36,11 +44,11 @@ def require_internal_token(authorization: str | None = Header(default=None)) -> 
         # Fail closed: an unconfigured token means this service must never
         # accept ANY request claiming to be the trusted TS caller — a
         # misconfiguration must not silently degrade into "open to anyone".
-        raise HTTPException(status_code=401, detail="Service authentication is not configured.")
+        raise ServiceError("auth", "Service authentication is not configured.")
 
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header.")
+        raise ServiceError("auth", "Missing or malformed Authorization header.")
 
     provided = authorization[len("Bearer ") :]
     if not hmac.compare_digest(provided, expected):
-        raise HTTPException(status_code=401, detail="Invalid service token.")
+        raise ServiceError("auth", "Invalid service token.")

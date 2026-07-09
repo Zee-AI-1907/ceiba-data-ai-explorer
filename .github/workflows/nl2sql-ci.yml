@@ -119,3 +119,35 @@ jobs:
         env:
           STAGING_DSN: ''
         run: python -m ceiba_nl2sql_eval.cli
+
+  service-contract:
+    name: service-contract (TS client ⇄ service Pydantic models + error envelope)
+    runs-on: ubuntu-latest
+    # Boots the FastAPI service HERMETICALLY against the committed fixture bundle
+    # (the service suite's conftest injects an AppState with the deterministic
+    # test embedder + a seed DuckDB — no network, no OpenAI, no model download)
+    # and asserts the wire contract the TS client (lib/nl2sqlServiceClient.ts)
+    # depends on: the Pydantic response models serialize to EXACTLY the shapes
+    # its type guards parse, the error envelope is `{error:{kind,message,...}}`,
+    # and the auth 401 uses that envelope with kind:"auth"
+    # (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §2.2, §2.4, §4).
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install shared ceiba_nl2sql library
+        working-directory: ceiba_nl2sql
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Install ceiba_nl2sql_service + test deps
+        working-directory: ceiba_nl2sql_service
+        run: pip install -e ".[test]"
+      - name: Run the service contract + full service suite (boots the app on the fixture bundle)
+        working-directory: ceiba_nl2sql_service
+        # STAGING_DSN unset (defense in depth); the service tests are hermetic
+        # (ASGI transport + injected AppState), no live DB or OpenAI reachable.
+        env:
+          STAGING_DSN: ''
+        run: pytest -q

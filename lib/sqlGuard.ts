@@ -107,6 +107,41 @@ const KNOWN_WRITE_TYPES = new Set<string>([
 ])
 
 /**
+ * Filesystem/network TABLE FUNCTIONS (P1 SECURITY). Even a syntactically
+ * read-only SELECT can exfiltrate secrets or SSRF an internal endpoint via a
+ * DuckDB filesystem/network table function:
+ *   SELECT * FROM read_csv('/proc/self/environ')   -> leaks OPENAI_API_KEY,
+ *   SELECT * FROM read_parquet('http://attacker/…')    NL2SQL_SERVICE_TOKEN,
+ *   SELECT read_text('/etc/passwd')                    DSNs, or SSRFs.
+ * The engine now disables external access at runtime (lib/engine/DuckDbEngine.ts
+ * `harden()`), and this guard rejects the call lexically as defense in depth —
+ * kept in sync with the Python guard's `_FILESYSTEM_NETWORK_FUNCTIONS` list
+ * (ceiba_nl2sql/sqltools/guard.py). Matched as `name(` over comment-stripped
+ * SQL so a column literally named `read_csv` does not false-trip.
+ */
+const FILESYSTEM_NETWORK_FUNCTIONS = [
+  'read_csv', 'read_csv_auto', 'read_parquet', 'parquet_scan',
+  'read_json', 'read_json_auto', 'read_ndjson', 'read_ndjson_auto', 'read_json_objects',
+  'read_text', 'read_blob', 'glob', 'read_csv_multi', 'sniff_csv',
+  'delta_scan', 'iceberg_scan', 'read_xlsx',
+]
+const FILESYSTEM_FUNCTION_PATTERN = new RegExp(
+  `\\b(${FILESYSTEM_NETWORK_FUNCTIONS.join('|')})\\s*\\(`,
+  'i'
+)
+/**
+ * Statement-level filesystem verbs that can appear INSIDE an otherwise
+ * SELECT-led statement (so the leading-keyword allowlist alone would miss
+ * them): `COPY ... TO` a path (export) and `SELECT ... INTO newtable`
+ * (materialization). INSTALL / LOAD / EXPORT are caught by the leading-keyword
+ * allowlist (they cannot lead a valid SELECT) so they are NOT scanned here,
+ * which keeps this pattern free of false positives on benign SELECTs. `INTO`
+ * is DuckDB's SELECT-INTO; a read-only SELECT never contains a top-level INTO
+ * (INSERT INTO is already rejected by the leading-keyword check).
+ */
+const FILESYSTEM_STATEMENT_PATTERN = /\bCOPY\b[\s\S]*\bTO\b|\bSELECT\b[\s\S]*?\bINTO\b/i
+
+/**
  * A table-allowlist hook (H25 seam). Given the raw (comment-stripped) SQL and the
  * target catalog/schema, decide whether the referenced tables are permitted.
  * Return `{ allowed: false, reason }` to reject. The default is permissive.
@@ -376,6 +411,26 @@ export function guardSql(sql: string, options: GuardSqlOptions = {}): SqlGuardRe
         statementType: 'WITH',
         reason: 'A WITH clause may not contain a write or DDL statement.',
       }
+    }
+  }
+
+  // ── P1 SECURITY: reject filesystem/network table functions + COPY ... TO /
+  //    SELECT ... INTO, even inside a read-only SELECT. A read_csv('/etc/…')
+  //    hidden in a SELECT is exactly the exfiltration/SSRF bypass this closes.
+  //    Kept in sync with the Python guard's `_find_filesystem_access`.
+  if (FILESYSTEM_FUNCTION_PATTERN.test(statement)) {
+    const fnMatch = FILESYSTEM_FUNCTION_PATTERN.exec(statement)
+    return {
+      allowed: false,
+      statementType: keyword,
+      reason: `${(fnMatch?.[1] ?? 'A filesystem function').toUpperCase()} is not permitted: filesystem/network access (reading local files or remote URLs) is blocked even inside a read-only query.`,
+    }
+  }
+  if (FILESYSTEM_STATEMENT_PATTERN.test(statement)) {
+    return {
+      allowed: false,
+      statementType: keyword,
+      reason: 'COPY … TO / SELECT … INTO is not permitted: writing to or materializing outside a read-only query is blocked.',
     }
   }
 

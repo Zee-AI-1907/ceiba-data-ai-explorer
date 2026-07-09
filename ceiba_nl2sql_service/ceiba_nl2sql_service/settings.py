@@ -7,7 +7,10 @@ Env vars this service formalizes (per plan §6):
   NL2SQL_ENGINE              — 'duckdb' (default) | 'trino' (stub, deferred).
   MOCK_DSN / STAGING_DSN     — read-only Postgres DSNs the engine ATTACHes.
   OPENAI_API_KEY             — the real OpenAI client's credential.
-  OPENAI_BAA_SIGNED          — the egress gate (default false / closed).
+  OPENAI_BAA_SIGNED          — the egress gate (default false / closed). Read
+                               directly from os.environ by
+                               ceiba_nl2sql.compliance.egress (EXACT == "true"),
+                               NOT modeled as a Settings field (see below).
   NL2SQL_SERVICE_TOKEN       — the internal service bearer token (§2.1).
   NL2SQL_SERVICE_PORT        — the port uvicorn binds (default 8088).
   NL2SQL_EMBEDDING_MODEL_ID  — override for tests (test-deterministic-hash-v1).
@@ -30,7 +33,13 @@ class Settings(BaseSettings):
 
     # ── LLM + egress gate ────────────────────────────────────────────────────
     openai_api_key: str | None = None
-    openai_baa_signed: bool = False
+    # NOTE: there is deliberately NO `openai_baa_signed` field here. The BAA /
+    # egress gate is authoritative in ceiba_nl2sql.compliance.egress, which
+    # reads `os.environ["OPENAI_BAA_SIGNED"]` with an EXACT, case-sensitive
+    # `== "true"` comparison (fail-closed, TS/Python-identical). A pydantic
+    # `bool` field here would parse "True"/"1"/"yes" as truthy — LENIENT, and
+    # divergent from the TS side — so it is intentionally omitted to keep anyone
+    # from wiring the gate to a lenient bool. Do NOT add it back.
     # The driving model. Primary env is NL2SQL_LLM_MODEL (plan §6); OPENAI_MODEL
     # is kept as a legacy alias so an existing config keeps working. Default is
     # the current default driving model (kept in sync with llm.DEFAULT_LLM_MODEL).

@@ -67,6 +67,14 @@ export class DuckDbEngine implements QueryEngine {
   private readonly extensionsLoaded: Promise<void>
   /** DuckDB's own in-process path (":memory:" default); a real file for tests that need persistence. */
   private readonly localPath: string
+  /**
+   * Whether the read-path external-access lockdown has been applied. External
+   * access (arbitrary filesystem/HTTP table functions such as read_csv /
+   * read_parquet('http://...')) stays enabled through construction + attach,
+   * then is disabled+locked lazily the first time user SQL is run (execute /
+   * explain). See `harden()`. Mirrors the Python engine's `_hardened` flag.
+   */
+  private hardened = false
 
   constructor(options: { localPath?: string } = {}) {
     this.localPath = options.localPath ?? ':memory:'
@@ -79,10 +87,41 @@ export class DuckDbEngine implements QueryEngine {
     // Load the extensions this engine depends on. INSTALL is a no-op if already
     // installed/cached; LOAD is required every connection. Both extensions are
     // required by the P2 DoD ("duckdb + vss + postgres extensions load").
+    // Extensions MUST be loaded here, while external access is still enabled —
+    // once `enable_external_access=false` is set (see harden()), DuckDB refuses
+    // to load ANY external extension, and ATTACH of a file/postgres source is
+    // likewise blocked. So extension load + every attach() happen BEFORE the
+    // runtime is sealed.
     await this.connection.run('INSTALL postgres')
     await this.connection.run('LOAD postgres')
     await this.connection.run('INSTALL vss')
     await this.connection.run('LOAD vss')
+  }
+
+  /**
+   * Seal the DuckDB runtime against external filesystem/network access so a
+   * "read-only SELECT" cannot exfiltrate secrets or SSRF via a table function
+   * like `read_csv('/proc/self/environ')` or `read_parquet('http://…')`.
+   *
+   * `enable_external_access=false` blocks all filesystem/HTTP table functions
+   * (read_csv/read_parquet/read_json/read_text/read_blob/glob/COPY … TO a path)
+   * AND further ATTACHes; `lock_configuration=true` makes it irreversible for
+   * the life of the connection, so a `SET enable_external_access=true` smuggled
+   * into a query cannot re-open the door. Both are one-way and guarded by
+   * `this.hardened` because DuckDB errors on re-setting a locked option even to
+   * the same value.
+   *
+   * MUST run AFTER all extensions are loaded and all sources are ATTACHed
+   * (both need external access), which is why it is applied lazily on the first
+   * read rather than in init(). Reads from already-attached READ_ONLY catalogs
+   * continue to work after the lockdown. Mirrors the Python engine's `_harden`.
+   */
+  private async harden(): Promise<void> {
+    if (this.hardened) return
+    const conn = await this.getConnection()
+    await conn.run('SET enable_external_access=false')
+    await conn.run('SET lock_configuration=true')
+    this.hardened = true
   }
 
   private async getConnection(): Promise<DuckDBConnection> {
@@ -155,6 +194,13 @@ export class DuckDbEngine implements QueryEngine {
 
   async execute(sql: string, opts: ExecuteOptions): Promise<EngineResult> {
     const conn = await this.getConnection()
+    // Seal external filesystem/network access before running ANY user SQL
+    // (defense in depth against read_csv/read_parquet exfiltration/SSRF);
+    // idempotent after the first call. NOTE: `opts.catalog`/`opts.schema` are
+    // intentionally NOT applied as a `USE` here — execute() requires
+    // fully-qualified SQL; only explain() applies USE (kept at parity with the
+    // Python engine).
+    await this.harden()
     const maxRows = Number.isFinite(opts.maxRows) && opts.maxRows > 0 ? Math.floor(opts.maxRows) : 1000
     const deadlineMs = Number.isFinite(opts.deadlineMs) && opts.deadlineMs > 0 ? Math.floor(opts.deadlineMs) : 55_000
 
@@ -197,6 +243,7 @@ export class DuckDbEngine implements QueryEngine {
 
   async explain(sql: string, opts: Pick<ExecuteOptions, 'catalog' | 'schema'>): Promise<PlanOrError> {
     const conn = await this.getConnection()
+    await this.harden()
     try {
       if (opts.catalog) await conn.run(`USE ${quoteIdent(opts.catalog)}${opts.schema ? `.${quoteIdent(opts.schema)}` : ''}`)
       const reader = await conn.runAndReadAll(`EXPLAIN ${sql}`)
