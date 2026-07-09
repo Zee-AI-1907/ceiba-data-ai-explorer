@@ -1,0 +1,248 @@
+{
+  "tables": [
+    {
+      "columns": [
+        {
+          "columnId": "mock.public.PatientMock.patientRef",
+          "generator": "surrogate-pk",
+          "params": {
+            "start": 1
+          }
+        },
+        {
+          "columnId": "mock.public.PatientMock.patientCode",
+          "generator": "synthetic-identifier",
+          "params": {
+            "padWidth": 6,
+            "prefix": "SYN"
+          }
+        },
+        {
+          "columnId": "mock.public.PatientMock.hospitalId",
+          "generator": "surrogate-fk",
+          "params": {
+            "references": "mock.public.HospitalRef.HospitalId"
+          }
+        },
+        {
+          "columnId": "mock.public.PatientMock.wardId",
+          "generator": "surrogate-fk",
+          "params": {
+            "references": "mock.public.WardRef.WardId"
+          }
+        },
+        {
+          "columnId": "mock.public.PatientMock.ageBand",
+          "generator": "synthetic-identifier",
+          "params": {
+            "padWidth": 6,
+            "prefix": "SYN"
+          }
+        }
+      ],
+      "syntheticRowTarget": 445,
+      "tableId": "mock.public.PatientMock"
+    },
+    {
+      "columns": [
+        {
+          "columnId": "mock.public.MeasurementsMock.Id",
+          "generator": "surrogate-pk",
+          "params": {
+            "start": 1
+          }
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.DeviceId",
+          "generator": "numeric",
+          "params": {
+            "max": 1040.0,
+            "mean": 1020.385,
+            "min": 1001.0
+          }
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+          "generator": "surrogate-fk",
+          "params": {
+            "references": "mock.public.MeasurementTypeRef.MeasurementTypeId"
+          }
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.Value",
+          "generator": "numeric",
+          "params": {
+            "max": 158.0,
+            "mean": 70.02,
+            "min": 16.0
+          }
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.RecordedAt",
+          "generator": "timestamp",
+          "params": {
+            "distribution": "uniform",
+            "end": "now",
+            "recentWindow": "PT3H",
+            "start": "-30d"
+          }
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.patientRef",
+          "generator": "surrogate-fk",
+          "params": {
+            "references": "mock.public.PatientMock.patientRef"
+          }
+        }
+      ],
+      "syntheticRowTarget": 741,
+      "tableId": "mock.public.MeasurementsMock"
+    },
+    {
+      "columns": [
+        {
+          "columnId": "mock.public.VisitMock.visitRef",
+          "generator": "surrogate-pk",
+          "params": {
+            "start": 1
+          }
+        },
+        {
+          "columnId": "mock.public.VisitMock.patientRef",
+          "generator": "surrogate-fk",
+          "params": {
+            "references": "mock.public.PatientMock.patientRef"
+          }
+        },
+        {
+          "columnId": "mock.public.VisitMock.wardId",
+          "generator": "surrogate-fk",
+          "params": {
+            "references": "mock.public.WardRef.WardId"
+          }
+        },
+        {
+          "columnId": "mock.public.VisitMock.admittedAt",
+          "generator": "timestamp",
+          "params": {
+            "distribution": "uniform",
+            "end": "now",
+            "recentWindow": "P1D",
+            "recentWindowAnchor": "previous-day",
+            "start": "-30d"
+          }
+        },
+        {
+          "columnId": "mock.public.VisitMock.dischargedAt",
+          "generator": "timestamp",
+          "params": {
+            "distribution": "uniform",
+            "end": "now",
+            "recentWindow": "P7D",
+            "start": "-30d"
+          }
+        }
+      ],
+      "syntheticRowTarget": 445,
+      "tableId": "mock.public.VisitMock"
+    },
+    {
+      "columns": [
+        {
+          "columnId": "mock.public.WardRef.WardId",
+          "generator": "surrogate-pk",
+          "params": {
+            "start": 1
+          }
+        },
+        {
+          "columnId": "mock.public.WardRef.name",
+          "generator": "synthetic-identifier",
+          "params": {
+            "padWidth": 6,
+            "prefix": "SYN"
+          }
+        },
+        {
+          "columnId": "mock.public.WardRef.hospitalId",
+          "generator": "surrogate-fk",
+          "params": {
+            "references": "mock.public.HospitalRef.HospitalId"
+          }
+        }
+      ],
+      "syntheticRowTarget": 5,
+      "tableId": "mock.public.WardRef"
+    },
+    {
+      "columns": [
+        {
+          "columnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+          "generator": "surrogate-pk",
+          "params": {
+            "start": 1
+          }
+        },
+        {
+          "columnId": "mock.public.MeasurementTypeRef.name",
+          "generator": "synthetic-identifier",
+          "params": {
+            "padWidth": 6,
+            "prefix": "SYN"
+          }
+        },
+        {
+          "columnId": "mock.public.MeasurementTypeRef.unit",
+          "generator": "categorical",
+          "params": {
+            "labels": [
+              "bpm",
+              "%",
+              "breaths/min",
+              "degC",
+              "mmHg"
+            ],
+            "weights": [
+              0.2,
+              0.2,
+              0.2,
+              0.2,
+              0.2
+            ]
+          }
+        }
+      ],
+      "syntheticRowTarget": 5,
+      "tableId": "mock.public.MeasurementTypeRef"
+    },
+    {
+      "columns": [
+        {
+          "columnId": "mock.public.HospitalRef.HospitalId",
+          "generator": "surrogate-pk",
+          "params": {
+            "start": 1
+          }
+        },
+        {
+          "columnId": "mock.public.HospitalRef.name",
+          "generator": "synthetic-identifier",
+          "params": {
+            "padWidth": 6,
+            "prefix": "SYN"
+          }
+        },
+        {
+          "columnId": "mock.public.HospitalRef.region",
+          "generator": "synthetic-identifier",
+          "params": {
+            "padWidth": 6,
+            "prefix": "SYN"
+          }
+        }
+      ],
+      "syntheticRowTarget": 5,
+      "tableId": "mock.public.HospitalRef"
+    }
+  ]
+}

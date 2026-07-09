@@ -31,19 +31,14 @@
  *     nearest-neighbor results in tests). It refuses to run against a bundle
  *     whose `manifest.embeddingModel.id` is the REAL production id, so a test
  *     can never silently produce garbage similarity against production vectors.
- *   - TODO(production wiring): a real local bge-small-en-v1.5 query embedder.
- *     The two viable options, neither implemented here:
- *       (a) a JS/ONNX port of bge-small (e.g. `@xenova/transformers` or
- *           `onnxruntime-node` + the same weights fastembed uses) run
- *           in-process — no subprocess, no network;
- *       (b) a thin local subprocess call into the ALREADY-PINNED Python
- *           `fastembed` install under `prep/.venv` (spawn, write query to
- *           stdin, read a JSON vector from stdout) — reuses the exact model
- *           the bundle was built with, no separate JS model download.
- *     Both are local-only (no external API) and satisfy SPEC §0 decision #2;
- *     the choice is deferred to whichever phase first needs production
- *     query embedding (P5 generation route), since P4's Retriever is
- *     fully exercised in CI via the injectable stub.
+ *   - `createUnimplementedProductionEmbedder()` — a throwing stub, now
+ *     SUPERSEDED by `lib/rag/queryEmbedder.ts`'s `createLocalQueryEmbedder()`
+ *     (option (a): a real local ONNX bge-small-en-v1.5 port via
+ *     `@huggingface/transformers`, verified same-space with the prep
+ *     toolchain's fastembed vectors — see that module's docstring for the
+ *     parity measurement). Kept here, still throwing, ONLY until the last
+ *     caller is repointed at `createLocalQueryEmbedder()` — remove it once
+ *     nothing imports it.
  */
 
 import { DuckDBInstance } from '@duckdb/node-api'
@@ -204,18 +199,19 @@ export function createDeterministicTestEmbedder(dimension = 384): EmbedQuery {
 }
 
 /**
- * TODO(production wiring, P5): a real local bge-small-en-v1.5 EmbedQuery.
- * Intentionally NOT implemented in P4 — see module docstring options (a)/(b).
- * This throwing stub documents the seam so a caller that forgets to inject a
- * real embedder in a non-test environment fails loudly and immediately,
- * rather than silently falling back to test vectors.
+ * SUPERSEDED — see module docstring. `lib/rag/queryEmbedder.ts`'s
+ * `createLocalQueryEmbedder()` is the real production `EmbedQuery` (a local
+ * ONNX bge-small-en-v1.5 port via `@huggingface/transformers`); use that
+ * instead. This throwing stub is kept ONLY so any caller that has not yet been
+ * repointed fails loudly and immediately, rather than silently falling back to
+ * test vectors. Remove once nothing imports it.
  */
 export function createUnimplementedProductionEmbedder(): EmbedQuery {
   return async (): Promise<Float32Array> => {
     throw new Error(
-      'vssClient.ts: no production local bge-small-en-v1.5 query embedder is wired up yet. ' +
-        'Inject a real EmbedQuery (local ONNX/JS port, or a local fastembed subprocess call — ' +
-        'see vssClient.ts module docstring options (a)/(b)). Never call an external embedding API.'
+      'vssClient.ts: createUnimplementedProductionEmbedder() is a removed-pending stub. ' +
+        'Use createLocalQueryEmbedder() from lib/rag/queryEmbedder.ts instead — a real, ' +
+        'local, in-process bge-small-en-v1.5 EmbedQuery (no external embedding API).'
     )
   }
 }

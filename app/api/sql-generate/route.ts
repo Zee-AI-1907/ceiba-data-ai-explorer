@@ -5,9 +5,9 @@ import { rateLimit } from '@/lib/rateLimiter'
 import { enforceBodySize, parseBody, SqlGenerateBodySchema } from '@/lib/validation'
 import { ErrorCodes, errorResponse, safeError } from '@/lib/errors'
 import type { QueryEngine, SqlDialect } from '@/lib/engine/QueryEngine'
-import { DuckDbEngine } from '@/lib/engine/DuckDbEngine'
+import { getQueryEngine } from '@/lib/engine/provisioning'
 import { HybridRetriever } from '@/lib/rag/Retriever'
-import { createUnimplementedProductionEmbedder } from '@/lib/rag/vssClient'
+import { createLocalQueryEmbedder } from '@/lib/rag/queryEmbedder'
 import {
   generateSql,
   GenerationError,
@@ -127,12 +127,17 @@ async function getGenerationDeps(): Promise<GenerationDeps> {
       throw new Error('OPENAI_API_KEY is not set; the driving LLM is not configured.')
     }
 
-    const engine = new DuckDbEngine()
+    // Use the SHARED runtime engine (lib/engine/provisioning.ts). This is the SAME
+    // engine instance /api/query executes against, so the dialect this route
+    // EXPLAIN-validates candidate SQL against is IDENTICAL to the dialect execution
+    // runs it on (the P1 dialect-mismatch fix — one engine, one dialect, one attach
+    // topology). Trino stays swappable behind this seam via NL2SQL_ENGINE.
+    const engine = await getQueryEngine()
     // Production query embedding is not wired up yet (vssClient.ts documents the
     // local-only options (a)/(b)); this throwing embedder fails loudly rather
     // than silently returning garbage vectors. A real local embedder replaces it.
     const retriever = new HybridRetriever({
-      embedQuery: createUnimplementedProductionEmbedder(),
+      embedQuery: createLocalQueryEmbedder(),
       dialect: engine.dialect(),
     })
     await retriever.load(bundleDir)

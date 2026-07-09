@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { executeTrinoQuery, type DbTarget } from '@/lib/trinoClient'
 import { logWithSession, logAuditEvent, getRecentAuditEvents } from '@/lib/auditLog'
 import { detectAnomalies } from '@/lib/anomalyDetector'
 import { requireAuthWithPermission } from '@/lib/apiAuth'
@@ -7,14 +6,40 @@ import { enforceBodySize, parseBody, clampLimit, QueryBodySchema } from '@/lib/v
 import { rateLimit } from '@/lib/rateLimiter'
 import { errorResponse, safeError, ErrorCodes } from '@/lib/errors'
 import { guardSql } from '@/lib/sqlGuard'
+import { getQueryEngine, KNOWN_ATTACH_ALIASES, MOCK_ALIAS } from '@/lib/engine/provisioning'
 import fs from 'fs'
 import path from 'path'
 
 /**
- * H23: cap this route's execution wall-clock. The Trino client enforces its own
- * ~55s statement deadline; this keeps the serverless invocation from being pinned
- * beyond that. Kept slightly above the client deadline so the client's clean 502
- * wins over a hard platform kill.
+ * POST /api/query — execute a guard-passed, read-only SELECT (NL2SQL_SPEC.md §5.6).
+ *
+ * ── P1 DIALECT-MISMATCH FIX ───────────────────────────────────────────────────
+ * This route now EXECUTES through the SAME shared QueryEngine that /api/sql-generate
+ * EXPLAIN-validates against (lib/engine/provisioning.ts::getQueryEngine). Previously
+ * generation validated candidate SQL as the `duckdb` dialect while this route ran it
+ * through `executeTrinoQuery` (`trino` dialect) — a silent conformance gap (interval
+ * syntax, quoting, function names differ between dialects). Both paths now provision
+ * from one topology → one dialect. DuckDB attaches the configured read-only Postgres
+ * sources (MOCK_DSN / STAGING_DSN) and performs cross-source joins in-process; Trino
+ * stays pluggable behind the QueryEngine interface via `NL2SQL_ENGINE` without a route
+ * rewrite.
+ *
+ * ── WS-F HARDENING (unchanged, same order) ────────────────────────────────────
+ *   1. requireAuthWithPermission('query:run')   — AuthN + RBAC
+ *   2. rateLimit                                 — per-user throttle (N3)
+ *   3. enforceBodySize                           — 413 before body read (§6a)
+ *   4. parseBody(QueryBodySchema)                — 400 on malformed/invalid (N5)
+ *   5. guardSql (read-only, comment-safe, B1)    — 422 on any non-read statement
+ *   6. clampLimit + catalog/schema allowlist     — H22 (row cap + identifier injection)
+ *   7. engine.execute (maxRows + deadlineMs)     — bounded read
+ *   8. safeError(…, 502)                          — H20 (never leak raw engine errors)
+ */
+
+/**
+ * H23: cap this route's execution wall-clock. The engine enforces its own statement
+ * deadline (deadlineMs, below); this keeps the serverless invocation from being pinned
+ * beyond that. Kept slightly above the engine deadline so the engine's clean 502 wins
+ * over a hard platform kill.
  */
 export const maxDuration = 60
 
@@ -24,45 +49,49 @@ const ANOMALY_LOG = path.join(process.cwd(), 'logs', 'anomalies.log')
 const MAX_QUERY_ROWS = 5000
 /** Default row limit when the caller does not specify one. */
 const DEFAULT_QUERY_ROWS = 1000
+/**
+ * Wall-clock budget passed to engine.execute (H23). Mirrors the ~55s statement
+ * deadline the DuckDB/Trino engines already enforce; kept below `maxDuration`.
+ */
+const QUERY_DEADLINE_MS = 55_000
 
 /**
- * Allowed catalogs/schemas (H22). Caller-supplied `database`/`schema` are set as
- * X-Trino-* headers by the client, so they MUST be validated against an allowlist
- * here to prevent header injection / arbitrary schema targeting. `database` maps
- * to a Trino catalog; unknown values fall back to the safe default rather than
- * being forwarded verbatim.
+ * Allowed attach aliases (H22). Under the DuckDB-attach model, a "catalog" is an
+ * attached source ALIAS (e.g. 'mock', 'staging'), not a Trino catalog. Caller-supplied
+ * `database` MUST be validated against this allowlist so no arbitrary identifier
+ * reaches the engine (the header/identifier-injection protection the Trino route had
+ * for its catalog allowlist, preserved). Unknown values fall back to the safe default.
  */
-const ALLOWED_CATALOGS: readonly DbTarget[] = ['telehealth', 'eclinics'] as const
-const DEFAULT_CATALOG: DbTarget = 'telehealth'
+const ALLOWED_ALIASES: readonly string[] = KNOWN_ATTACH_ALIASES
+/** Safe default source alias when the caller omits / sends an unknown `database`. */
+const DEFAULT_ALIAS = MOCK_ALIAS
 
 /**
- * Schema allowlist per catalog. Schemas are identifiers forwarded as the
- * X-Trino-Schema header; an unvalidated value is a header-injection / arbitrary-
- * schema vector (H22). Restrict to a known set. Kept permissive-but-safe: only
- * identifier-shaped values that appear in the allowlist are accepted.
+ * Schema allowlist per attached source. `schema` is a Postgres schema identifier
+ * threaded to the engine (`USE alias.schema` for EXPLAIN, and referenced in SQL); an
+ * unvalidated value is an identifier-injection vector (H22). Restrict to the known
+ * clinical/mock schema set. Kept permissive-but-safe: only identifier-shaped values
+ * present in the allowlist are accepted.
  */
-const ALLOWED_SCHEMAS: Record<DbTarget, readonly string[]> = {
-  telehealth: ['public', 'Shared'],
-  eclinics: ['public', 'Shared'],
+const ALLOWED_SCHEMAS: Record<string, readonly string[]> = {
+  [MOCK_ALIAS]: ['public', 'Shared'],
+  staging: ['public', 'Shared'],
 }
-const DEFAULT_SCHEMA = 'Shared'
+const DEFAULT_SCHEMA = 'public'
 
 /** A defensively strict identifier pattern — no whitespace, quotes, or control chars. */
 const SAFE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
 
-function resolveCatalog(database?: string): DbTarget {
-  if (database && (ALLOWED_CATALOGS as readonly string[]).includes(database)) {
-    return database as DbTarget
+function resolveAlias(database?: string): string {
+  if (database && ALLOWED_ALIASES.includes(database)) {
+    return database
   }
-  return DEFAULT_CATALOG
+  return DEFAULT_ALIAS
 }
 
-function resolveSchema(catalog: DbTarget, schema?: string): string {
-  if (
-    schema &&
-    SAFE_IDENTIFIER.test(schema) &&
-    ALLOWED_SCHEMAS[catalog].includes(schema)
-  ) {
+function resolveSchema(alias: string, schema?: string): string {
+  const allowed = ALLOWED_SCHEMAS[alias] ?? ALLOWED_SCHEMAS[DEFAULT_ALIAS]!
+  if (schema && SAFE_IDENTIFIER.test(schema) && allowed.includes(schema)) {
     return schema
   }
   return DEFAULT_SCHEMA
@@ -77,7 +106,7 @@ function writeAnomalyLog(line: string): void {
 }
 
 export async function POST(req: NextRequest) {
-  // ── 1. AuthN + AuthZ (fixes the Low RBAC gap: query was requireAuth-only) ──
+  // ── 1. AuthN + AuthZ ──
   const { session, error: authError } = await requireAuthWithPermission(req, 'query:run')
   if (authError) return authError
 
@@ -94,10 +123,12 @@ export async function POST(req: NextRequest) {
   if (parseError) return parseError
   const { sql, database, schema, limit } = data
 
-  // ── 5. SQL safety classifier (B1) — reject anything not a single read query ──
-  const catalog = resolveCatalog(database)
-  const targetSchema = resolveSchema(catalog, schema)
-  const guard = guardSql(sql, { catalog, schema: targetSchema })
+  // ── 5. Resolve catalog/schema onto attached source + PG schema (H22 injection) ──
+  const alias = resolveAlias(database)
+  const targetSchema = resolveSchema(alias, schema)
+
+  // ── 6. SQL safety classifier (B1) — reject anything not a single read query ──
+  const guard = guardSql(sql, { catalog: alias, schema: targetSchema })
   if (!guard.allowed) {
     // Well-formed but semantically rejected → 422 SCOPE (per errors.ts convention).
     await logWithSession(req, {
@@ -109,12 +140,22 @@ export async function POST(req: NextRequest) {
     return errorResponse(422, ErrorCodes.SCOPE, guard.reason ?? 'Query rejected: read-only queries only.')
   }
 
-  // ── 6. Clamp limit (H22 — hard max) + validate catalog/schema (H22 header injection) ──
+  // ── 7. Clamp limit (H22 — hard max) ──
   const rowLimit = clampLimit(limit, { max: MAX_QUERY_ROWS, fallback: DEFAULT_QUERY_ROWS })
 
   try {
-    // ── 7. Execute against Trino (bounded rows, timeout, deadline — H23) ──
-    const result = await executeTrinoQuery(sql, catalog, targetSchema, rowLimit)
+    // ── 8. Execute via the SHARED engine (same dialect generation validated) ──
+    // engine.execute enforces maxRows (row cap + `truncated`) and deadlineMs
+    // (interrupt at the wall-clock budget); the DuckDbEngine additionally guarantees
+    // every attached source is READ_ONLY (hard-error on non-READ_ONLY attach +
+    // re-check of duckdb_databases().readonly).
+    const engine = await getQueryEngine()
+    const result = await engine.execute(sql, {
+      catalog: alias,
+      schema: targetSchema,
+      maxRows: rowLimit,
+      deadlineMs: QUERY_DEADLINE_MS,
+    })
 
     const columns = result.columns.map((c) => ({ key: c.name, label: c.name, type: c.type }))
 
@@ -157,9 +198,10 @@ export async function POST(req: NextRequest) {
       columns,
       rows: result.rows,
       rowCount: result.rowCount,
+      truncated: result.truncated,
     })
   } catch (e) {
-    // H20: never leak raw Trino errors. Log full detail under a correlation id,
+    // H20: never leak raw engine errors. Log full detail under the audit chain,
     // return a generic 502 envelope.
     await logWithSession(req, {
       action: 'QUERY_FAILED',

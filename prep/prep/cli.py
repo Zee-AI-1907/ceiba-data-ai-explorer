@@ -8,15 +8,20 @@
 `build` runs stages [1]->[7] (SPEC §2.4): [1] CONNECT, [2] INTROSPECT, [3]
 PROFILE, [4] CLASSIFY (P3a, unchanged); [5] ENRICH, [6] EMBED+INDEX, and the
 FULL [7] EMIT — manifest.json/BUILD_REPORT.json/joingraph.json/glossary.json/
-exemplars.json/vectors.duckdb + `latest` symlink — are P3b
-(`_run_build_pipeline_p3b`, wired in below `cmd_build`). `--no-embed` skips
+exemplars.json/synthetic.json/vectors.duckdb + `latest` symlink — are P3b
+(`_run_build_pipeline_p3b`, wired in below `cmd_build`). `synthetic.json`
+(SPEC §1.8) is built by `prep.synthetic.build_synthetic_json` from the
+already-emitted catalog/keys/profiles/phi and written via `emit.emit_synthetic`
+— generator DESCRIPTORS only, never a raw value; PHI columns get a
+fake-shaped generator, FK columns get a `surrogate-fk` generator referencing
+the parent's key space (§1.8, §2.5 `check_synthetic_json`). `--no-embed` skips
 stage [6] (the bundle still emits, minus vectors.duckdb). Embedding is LOCAL
 ONLY (`fastembed`/`BAAI/bge-small-en-v1.5`, SPEC §2.5 invariant 4);
 `--test-fallback-embedder` is the ONLY way to opt into the deterministic
 hash-based test embedder (`prep.embed.local_embedder.DeterministicHashEmbedder`)
 — never the default, exists solely for hermetic/offline test runs. `build`
 exits non-zero if the PHI gate fails, INCLUDING a scan of the embedded
-vectors.duckdb documents — this is the CI gate (SPEC §2.5).
+vectors.duckdb documents AND synthetic.json — this is the CI gate (SPEC §2.5).
 """
 
 from __future__ import annotations
@@ -458,6 +463,7 @@ def _run_build_pipeline_p3b(
         build_manifest,
         compute_schema_fingerprint,
         emit_full_bundle_files,
+        emit_synthetic,
         finalize_bundle_directory,
         new_bundle_version,
         update_latest_symlink,
@@ -468,6 +474,7 @@ def _run_build_pipeline_p3b(
     from prep.enrich.joingraph import build_join_graph
     from prep.enrich.vectors_phi_scan import run_gate_including_vectors
     from prep.exemplars import build_exemplars_json
+    from prep.synthetic import build_synthetic_json
 
     stages: list[BuildStage] = []
     stages.append(
@@ -499,6 +506,16 @@ def _run_build_pipeline_p3b(
     glossary = build_glossary_from_seed_file(catalog, glossary_seed_path)
     include_staging_exemplars = any(s.source_id == "staging" for s in sources)
     exemplars = build_exemplars_json(include_staging=include_staging_exemplars)
+
+    # Stage [3] PROFILE's synthetic-descriptor extension (SPEC §2.4 stage[3]
+    # "-> profiles.json, synthetic.json descriptors", §1.8): built here, after
+    # ENRICH, purely because `catalog["tables"]` only carries a real
+    # `approxRowCount` once `apply_importance_and_large_flag` has populated it
+    # above — `build_synthetic_json` itself is a pure function of the four
+    # already-PHI-safe artifacts (catalog/keys/profiles/phi) and touches no
+    # database connection or raw row (see prep/synthetic.py docstring).
+    synthetic = build_synthetic_json(catalog=catalog, keys=keys, profiles=profiles, phi=phi)
+
     stages.append(
         BuildStage(
             stage="enrich",
@@ -507,6 +524,7 @@ def _run_build_pipeline_p3b(
             extra={
                 "inferredJoinEdges": sum(1 for e in joingraph["edges"] if e["origin"] == "inferred"),
                 "glossaryTerms": len(glossary["synonyms"]),
+                "syntheticTables": len(synthetic["tables"]),
             },
         )
     )
@@ -622,6 +640,9 @@ def _run_build_pipeline_p3b(
     full_file_hashes = dict(partial_result.file_hashes)
     full_file_hashes.update(emit_full_bundle_files(provisional_dir, joingraph=joingraph, glossary=glossary, exemplars=exemplars))
 
+    _synthetic_path, synthetic_hash = emit_synthetic(provisional_dir, synthetic)
+    full_file_hashes["synthetic.json"] = synthetic_hash
+
     duckdb_path = provisional_dir / "vectors.duckdb"
     if embedded_documents:
         write_vector_index(duckdb_path, embedded_documents, dimension=embedding_dimension)
@@ -678,6 +699,7 @@ def _run_build_pipeline_p3b(
             duckdb_path=duckdb_path,
             vectors_documents=vectors_documents_for_gate,
             suppressed_sample_values=[],
+            synthetic_json=synthetic,
             glossary_json=glossary,
             exemplars_json=exemplars,
         )
@@ -690,6 +712,7 @@ def _run_build_pipeline_p3b(
             config=config,
             phi_json=phi,
             profiles_json=profiles,
+            synthetic_json=synthetic,
             glossary_json=glossary,
             exemplars_json=exemplars,
         )
@@ -807,6 +830,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     phi_json = _load("phi.json")
     profiles_json = _load("profiles.json")
+    synthetic_json = _load("synthetic.json")
     glossary_json = _load("glossary.json")
     exemplars_json = _load("exemplars.json")
 
@@ -822,6 +846,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             duckdb_path=duckdb_path,
             vectors_documents=[],  # structural doc-list check already covered at build time; verify re-checks text substrings
             suppressed_sample_values=[],
+            synthetic_json=synthetic_json,
             glossary_json=glossary_json,
             exemplars_json=exemplars_json,
         )

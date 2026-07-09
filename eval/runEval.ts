@@ -98,7 +98,12 @@ export interface RunEvalResult {
 
 /**
  * resolveEngine — builds the QueryEngine for the requested mode.
- *   - synthetic: `buildSyntheticTopology()` (hermetic DuckDB, alias `mock`).
+ *   - synthetic: `buildSyntheticTopology()` (hermetic DuckDB, alias `mock`),
+ *     reading `catalog.json`/`keys.json`/`synthetic.json` from the SAME
+ *     `options.bundleDir` the retriever loads (SPEC §1.8) — so an eval run
+ *     pointed at a non-default bundle (e.g. a full-scale ~1,200-table
+ *     bundle) gets a synthetic topology descriptor-driven FROM THAT bundle,
+ *     not from the committed mock fixture.
  *   - gated-staging: requires BOTH `options.allowGatedStaging === true` AND
  *     `process.env.STAGING_DSN` set; attaches staging READ_ONLY via DuckDB.
  *     Falls back to synthetic (with a console warning) if either condition
@@ -130,7 +135,7 @@ async function resolveEngine(
     }
   }
 
-  const synthetic = await buildSyntheticTopology()
+  const synthetic = await buildSyntheticTopology({ bundleDir: options.bundleDir ?? DEFAULT_FIXTURE_BUNDLE_DIR })
   return { engine: synthetic.engine, mode: 'synthetic', synthetic }
 }
 

@@ -5,6 +5,19 @@
 hermetic/CI-safe (NL2SQL_PLAN.md §0 ground rule #4) — no mock Postgres, no
 Python venv, no model download required at test time.
 
+`eval/synthetic/loadSynthetic.ts` (SPEC §6.3(a), §1.8) ALSO reads this same
+bundle directory at eval time — specifically `catalog.json`, `keys.json`, and
+`synthetic.json` — to synthesize the hermetic DuckDB execution topology
+descriptor-driven, rather than from hand-written TypeScript. This bundle's
+`synthetic.json` (generator descriptors, never raw values — SPEC §1.8) is
+therefore load-bearing for `eval/__tests__/eval.test.ts`, not just for the
+`lib/rag` tests.
+
+Full file set: `manifest.json`, `catalog.json`, `keys.json`, `joingraph.json`,
+`profiles.json`, `phi.json`, `synthetic.json`, `glossary.json`,
+`exemplars.json`, `vectors.duckdb`, `BUILD_REPORT.json` — the complete SPEC
+§1.1 bundle layout.
+
 ## Provenance
 
 Built once via the prep toolchain against the OrbStack mock Postgres

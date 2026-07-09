@@ -1,11 +1,11 @@
 {
   "builder": {
-    "gitSha": "3f6c267",
+    "gitSha": "fa644a9",
     "name": "ceiba-nl2sql-prep",
     "version": "0.1.0"
   },
   "bundleFormatVersion": "1.0.0",
-  "bundleVersion": "v20260709T061308Z_c314b8",
+  "bundleVersion": "v20260709T071442Z_768dc7",
   "counts": {
     "columns": 25,
     "exemplars": 2,
@@ -16,7 +16,7 @@
     "tables": 6,
     "vectors": 41
   },
-  "createdAt": "2026-07-09T06:13:09Z",
+  "createdAt": "2026-07-09T07:14:43Z",
   "embeddingModel": {
     "dimension": 384,
     "id": "test-deterministic-hash-v1",
@@ -32,10 +32,11 @@
     "keys.json": "fa0f95517939bf6d8e2ce756eaabdb559ef6eaacd346ba58bf1789db1859b3db",
     "phi.json": "536be701c2140a3201fa2d5bf6369ba675fc5242cf823f04ae650a0373a8fafd",
     "profiles.json": "8e6bb4220897abc2b2288fbcc323f3e56f3244bc08f84ea4a54f614d1d1f0420",
+    "synthetic.json": "2b77db3f6a3a3b6a39c5a43bac812ff8bf85df87a042dd042f2060ef1cfb2d64",
     "vectors.duckdb": "cb5669d99fa28e5389a1d962f49e51f108a244fbf8e0cd42d70e5f72a7ead30a"
   },
   "phiGate": {
-    "checkedFiles": 5,
+    "checkedFiles": 6,
     "gateVersion": "1.0.0",
     "passed": true,
     "violations": []
@@ -45,7 +46,7 @@
       "database": "mock",
       "engine": "postgres",
       "engineVersion": "unknown",
-      "introspectedAt": "2026-07-09T06:13:09Z",
+      "introspectedAt": "2026-07-09T07:14:43Z",
       "readOnly": true,
       "schemaFingerprint": "sha256:c6d6543163a30783d8cffa7aab51c0847bcaf8def3faced3d78028bea28a18fe",
       "sourceId": "mock"

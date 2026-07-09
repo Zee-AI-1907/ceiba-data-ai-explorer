@@ -1,25 +1,26 @@
 {
-  "bundleVersion": "v20260709T061308Z_c314b8",
+  "bundleVersion": "v20260709T071442Z_768dc7",
   "phiGate": {
-    "checkedFiles": 5,
+    "checkedFiles": 6,
     "passed": true,
     "violations": []
   },
   "stages": [
     {
       "columns": 25,
-      "durationMs": 254,
+      "durationMs": 240,
       "ok": true,
       "sources": 1,
       "stage": "connect_introspect_profile_classify",
       "tables": 6
     },
     {
-      "durationMs": 8,
+      "durationMs": 9,
       "glossaryTerms": 13,
       "inferredJoinEdges": 0,
       "ok": true,
-      "stage": "enrich"
+      "stage": "enrich",
+      "syntheticTables": 6
     },
     {
       "durationMs": 5,
@@ -29,13 +30,13 @@
       "vectors": 41
     },
     {
-      "durationMs": 906,
+      "durationMs": 935,
       "hnsw": true,
       "ok": true,
       "stage": "index"
     },
     {
-      "durationMs": 976,
+      "durationMs": 1001,
       "ok": true,
       "stage": "emit"
     }

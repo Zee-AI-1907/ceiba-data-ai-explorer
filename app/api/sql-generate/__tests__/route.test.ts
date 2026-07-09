@@ -20,6 +20,7 @@ import type {
 import type { HybridRetriever, RetrieveOptions, SchemaContext } from '@/lib/rag/Retriever'
 import type { LlmClient } from '@/lib/rag/generate'
 import { signSession } from '@/lib/session'
+import { resolvedDialect } from '@/lib/engine/provisioning'
 import { sqlCache } from '@/lib/cache'
 import { resetRateLimit, rateLimitKey } from '@/lib/rateLimiter'
 import { POST, __setGenerationDepsForTest, type GenerationDeps } from '../route'
@@ -185,6 +186,15 @@ describe('POST /api/sql-generate — JSON contract (H10) + dialect (H11)', () =>
     expect(json.dialect).toBe('duckdb')
     expect(json.dialect).not.toBe('PostgreSQL')
     expect(json.dialect).not.toBe('postgres')
+  })
+
+  it('default response dialect equals the shared execution dialect (P1: no mismatch)', async () => {
+    // /api/query executes on getQueryEngine() (dialect = resolvedDialect()). With no
+    // override, /api/sql-generate labels the response with deps.engine.dialect(), and
+    // in production deps.engine IS getQueryEngine(). Both therefore agree on 'duckdb'.
+    const res = await POST(makeReq())
+    const json = await res.json()
+    expect(json.dialect).toBe(resolvedDialect())
   })
 
   it('honors a caller-supplied dialect override in the response', async () => {

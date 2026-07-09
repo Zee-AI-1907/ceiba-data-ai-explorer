@@ -8,6 +8,7 @@ import { ChartPreview, ChartConfig } from '@/components/DataExplorer/ChartPrevie
 import { SaveToDashboardModal } from '@/components/DataExplorer/SaveToDashboardModal'
 import { saveChart, persistChart, type SavedChart } from '@/lib/store'
 import { type NarrativeResult } from '@/components/DataExplorer/NarrativePanel'
+import { interpretSqlGenerateResponse } from '@/lib/sqlGenerateClient'
 import {
   Database,
   ChevronDown,
@@ -297,109 +298,58 @@ export default function DataExplorerPage() {
           timestamp: ts,
         }])
 
+        // The route (POST /api/sql-generate) always returns JSON now — either a
+        // 200 SqlGenerateResponse or a lib/errors.ts envelope
+        // { error: { code, message } } at 422 (scope/unrepairable) or another
+        // standard status. There is no text/event-stream body to read (H10).
+        setIsSqlStreaming(true)
         try {
           const response = await fetch('/api/sql-generate', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ userMessage: text }),
           })
+          const json = await response.json()
+          const interpretation = interpretSqlGenerateResponse(response.status, json)
 
-          // Handle non-stream responses (scope errors, server errors, etc.)
-          const contentType = response.headers.get('content-type') || ''
-          if (!contentType.includes('text/event-stream')) {
-            const json = await response.json()
-            if (json.scopeError) {
-              setMessages((prev) => prev.map((m) =>
-                m.id === thinkingId
-                  ? { ...m, content: '⚕️ I can only help with clinical and healthcare data. Try asking about patients, units, departments, or clinical metrics.' }
-                  : m
-              ))
-            } else {
-              throw new Error(json.error || 'Unexpected response')
-            }
-            setIsLoading(false)
-            return
-          }
-
-          // Update thinking message to show streaming state
-          setMessages((prev) => prev.map((m) =>
-            m.id === thinkingId ? { ...m, content: '⚕️ Writing query…' } : m
-          ))
-
-          // Consume the SSE stream
-          const reader = response.body!.getReader()
-          const decoder = new TextDecoder()
-          let accumulated = ''
-          let streamBuffer = ''
-
-          setIsSqlStreaming(true)
-
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-
-            streamBuffer += decoder.decode(value, { stream: true })
-            const lines = streamBuffer.split('\n')
-            streamBuffer = lines.pop() || ''
-
-            for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6)
-                if (data === '[DONE]') break
-                try {
-                  const parsed = JSON.parse(data)
-                  if (parsed.delta) {
-                    accumulated += parsed.delta
-                    // Live-update the SQL editor as tokens stream in
-                    const sqlMatch = accumulated.match(/"sql"\s*:\s*"((?:[^"\\]|\\.)*)/)
-                    if (sqlMatch) {
-                      setSql(sqlMatch[1].replace(/\\n/g, '\n').replace(/\\"/, '"').replace(/\\\\/g, '\\'))
-                    }
-                  }
-                } catch {
-                  // Ignore malformed chunks
-                }
-              }
-            }
-          }
-
-          setIsSqlStreaming(false)
-
-          // Parse final accumulated JSON
-          try {
-            const result = JSON.parse(accumulated)
-            if (result.scopeError) {
-              setMessages((prev) => prev.map((m) =>
-                m.id === thinkingId
-                  ? { ...m, content: '⚕️ I can only help with clinical and healthcare data. Try asking about patients, units, departments, or clinical metrics.' }
-                  : m
-              ))
-            } else if (result.sql) {
-              setSql(result.sql)
-              setMessages((prev) => prev.map((m) =>
-                m.id === thinkingId
-                  ? { ...m, content: `✓ Query ready! ${result.description || ''}\n\nHit **Run** to execute.` }
-                  : m
-              ))
-            } else {
-              throw new Error(result.error || 'No SQL returned')
-            }
-          } catch {
-            // JSON parse failed — keep whatever SQL was set during streaming
+          if (interpretation.kind === 'success') {
+            const { response: result } = interpretation
+            setSql(result.sql)
+            const cardinalityNote = result.retrieval.cardinalityWarnings.length > 0
+              ? '\n\n⚠️ ' + result.retrieval.cardinalityWarnings.join(' ')
+              : ''
+            const repairNote = result.repair
+              ? `\n\n_(self-repaired after ${result.repair.rounds} round${result.repair.rounds === 1 ? '' : 's'})_`
+              : ''
             setMessages((prev) => prev.map((m) =>
               m.id === thinkingId
-                ? { ...m, content: '✓ Query ready! Hit **Run** to execute.' }
+                ? {
+                    ...m,
+                    content: `✓ Query ready! ${result.description || ''}${cardinalityNote}${repairNote}\n\nHit **Run** to execute.`,
+                  }
+                : m
+            ))
+          } else if (interpretation.kind === 'scope') {
+            setMessages((prev) => prev.map((m) =>
+              m.id === thinkingId
+                ? { ...m, content: '⚕️ I can only help with clinical and healthcare data. Try asking about patients, units, departments, or clinical metrics.' }
+                : m
+            ))
+          } else {
+            setMessages((prev) => prev.map((m) =>
+              m.id === thinkingId
+                ? { ...m, content: `⚠️ SQL generation failed: ${interpretation.message}` }
                 : m
             ))
           }
         } catch (e) {
-          setIsSqlStreaming(false)
           setMessages((prev) => prev.map((m) =>
             m.id === thinkingId
-              ? { ...m, content: `⚠️ SQL generation failed: ${String(e)}` }
+              ? { ...m, content: `⚠️ SQL generation failed: ${e instanceof Error ? e.message : String(e)}` }
               : m
           ))
         } finally {
+          setIsSqlStreaming(false)
           setIsLoading(false)
         }
         return
