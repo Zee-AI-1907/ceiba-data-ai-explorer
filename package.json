@@ -19,6 +19,7 @@
     "qa:fix": "node scripts/qa-fix.mjs"
   },
   "dependencies": {
+    "@duckdb/node-api": "^1.5.4-r.1",
     "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
     "lucide-react": "^1.23.0",
