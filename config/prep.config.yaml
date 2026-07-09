@@ -17,6 +17,30 @@ sources:
     introspect:
       includeSchemas: ["Shared", "public", "ICU", "NICU", "VEM"]
       excludeSchemas: ["hangfire", "repack"]
+      # Table-level filter (SCOPING + PHI-SURFACE CONTROL), layered UNDER the
+      # schema filter above. Applied AFTER includeSchemas/excludeSchemas — a
+      # table must first survive the schema filter, then this one. Patterns
+      # are SCHEMA-QUALIFIED ("Schema.Table") and support fnmatch globs, e.g.
+      # "Shared.Monitor*" matches Shared.MonitorMeasurements AND
+      # Shared.Monitors but not Shared.Patients; "ICU.*" matches every table
+      # in the ICU schema. Precedence: EXCLUDE WINS over include (same rule
+      # as includeSchemas/excludeSchemas above). Leaving both empty (the
+      # default) is fully backward compatible — every table in the selected
+      # schemas is introspected, e.g. all ~942 Shared relations.
+      #
+      # EXAMPLE below narrows staging to a small, named set of Shared tables
+      # instead of the full ~942-table Shared schema — useful when a task
+      # only needs monitor-measurement data and there's no reason to
+      # introspect/profile/PHI-classify hundreds of unrelated tables (faster
+      # builds, smaller PHI surface). Uncomment to scope staging down:
+      #
+      # includeTables:
+      #   - "Shared.Patients"
+      #   - "Shared.MonitorMeasurements"
+      #   - "Shared.MonitorMeasurementTypes"
+      #   - "Shared.Acceptances"
+      #   - "Shared.Monitors"
+      # excludeTables: []
     profile:
       sampleRowsPerTable: 5000 # bounded scan; large tables get a time-windowed sample
       largeTableRowThreshold: 10000000

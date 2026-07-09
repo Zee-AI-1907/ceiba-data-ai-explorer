@@ -38,6 +38,13 @@ class EmbeddingConfig:
 class IntrospectConfig:
     include_schemas: list[str] = field(default_factory=list)
     exclude_schemas: list[str] = field(default_factory=list)
+    # Table-level filter, layered UNDER the schema filter above. Patterns are
+    # SCHEMA-QUALIFIED ("Shared.Patients") and support fnmatch globs
+    # ("Shared.Monitor*", "ICU.*") — see cli.py `filter_tables` for the
+    # matching + precedence rule (exclude wins; empty include = all tables in
+    # the already schema-filtered set, i.e. fully backward compatible).
+    include_tables: list[str] = field(default_factory=list)
+    exclude_tables: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -134,6 +141,8 @@ def _parse_introspect(raw: dict | None, ctx: str) -> IntrospectConfig:
     return IntrospectConfig(
         include_schemas=list(raw.get("includeSchemas", [])),
         exclude_schemas=list(raw.get("excludeSchemas", [])),
+        include_tables=list(raw.get("includeTables", [])),
+        exclude_tables=list(raw.get("excludeTables", [])),
     )
 
 

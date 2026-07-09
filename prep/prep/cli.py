@@ -27,6 +27,7 @@ vectors.duckdb documents AND synthetic.json — this is the CI gate (SPEC §2.5)
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import sys
 from datetime import datetime, timezone
@@ -57,17 +58,66 @@ def _quoted_ref_for(schema: str, name: str) -> str:
     return f'"{schema}"."{name}"'
 
 
+def _qualified_table_name(schema: str, name: str) -> str:
+    """The schema-qualified identifier used for table-level filter matching —
+    same "Schema.Table" convention as `profile_source`'s `qualified_name` and
+    `profile.timeWindowedSampleFor` entries (e.g. "Shared.MonitorMeasurements")
+    in prep.config.yaml, so an includeTables/excludeTables pattern lines up
+    with identifiers a user already sees elsewhere in this config.
+    """
+    return f"{schema}.{name}"
+
+
+def filter_tables(
+    qualified_names: list[str],
+    include_tables: list[str],
+    exclude_tables: list[str],
+) -> list[str]:
+    """Pure include/exclude glob filter over schema-qualified table names
+    (e.g. "Shared.Patients"), case-sensitive fnmatch against PascalCase
+    identifiers. Precedence mirrors the schema-level filter in
+    `introspect_source`: EXCLUDE WINS over include. A table is kept iff
+      (include_tables is empty OR it matches >=1 include pattern)
+      AND it does not match any exclude pattern.
+    An empty `include_tables` means "all tables" (of the already
+    schema-filtered set) — this is what makes an unset includeTables/
+    excludeTables in prep.config.yaml fully backward compatible with the
+    pre-table-filter behavior.
+    """
+    exclude_hit = {
+        name for name in qualified_names if any(fnmatch.fnmatchcase(name, pat) for pat in exclude_tables)
+    }
+    if include_tables:
+        include_hit = {
+            name for name in qualified_names if any(fnmatch.fnmatchcase(name, pat) for pat in include_tables)
+        }
+    else:
+        include_hit = set(qualified_names)
+    return [name for name in qualified_names if name in include_hit and name not in exclude_hit]
+
+
 def introspect_source(
     introspector: SqlAlchemyIntrospector,
     source_id: str,
     dsn: str,
     include_schemas: list[str],
     exclude_schemas: list[str],
+    include_tables: list[str] | None = None,
+    exclude_tables: list[str] | None = None,
 ) -> dict:
     """Stages [1] CONNECT + [2] INTROSPECT for one source. Returns an
     in-memory model with schemas/tables/columns/keys/indexes — the shape
     `build_catalog_and_keys` below serializes into catalog.json/keys.json.
+
+    `include_tables`/`exclude_tables` (SPEC extension: table-level scoping)
+    apply AFTER the schema filter above, per table, via `filter_tables` —
+    schema-qualified glob patterns like "Shared.Patients" or "Shared.Monitor*".
+    Both default to empty, which is a no-op (every table in the selected
+    schemas is kept, i.e. identical to pre-table-filter behavior).
     """
+    include_tables = include_tables or []
+    exclude_tables = exclude_tables or []
+
     introspector.connect_read_only(source_id, dsn)
 
     all_schemas = introspector.list_schemas(source_id)
@@ -80,6 +130,12 @@ def introspect_source(
     model: dict = {"source_id": source_id, "schemas": []}
     for schema in schemas:
         tables = introspector.list_tables(source_id, schema)
+        if include_tables or exclude_tables:
+            qualified_by_name = {_qualified_table_name(schema, t.name): t for t in tables}
+            kept_qualified = filter_tables(
+                list(qualified_by_name.keys()), include_tables, exclude_tables
+            )
+            tables = [qualified_by_name[name] for name in kept_qualified]
         table_entries = []
         for table in tables:
             columns, key_meta, indexes = introspector.describe_table(table)
@@ -306,6 +362,8 @@ def cmd_introspect(args: argparse.Namespace) -> int:
             dsn,
             src.introspect.include_schemas,
             src.introspect.exclude_schemas,
+            src.introspect.include_tables,
+            src.introspect.exclude_tables,
         )
         models.append(model)
         introspector.dispose(src.source_id)
@@ -373,6 +431,8 @@ def cmd_build(args: argparse.Namespace) -> int:
             dsn,
             src.introspect.include_schemas,
             src.introspect.exclude_schemas,
+            src.introspect.include_tables,
+            src.introspect.exclude_tables,
         )
         models.append(model)
 
