@@ -317,9 +317,23 @@ _ALLOWED_FUNCTION_PREFIXES = ("sample_aggregate",)
 # report attach read-only status, constraint/FK metadata, and index
 # expressions — never a patient-row cell value. `duckdb_tables()` was
 # already allowlisted; these are its siblings.
+#
+# `postgres_query(...)` (added docs/research/DUCKDB_PUSHDOWN.md §5.1 — the
+# single-source native-execution router in `ceiba_nl2sql.engine.duckdb_engine`)
+# is a DuckDB TABLE FUNCTION, not a hardcoded table scan: the runtime builds
+# `SELECT * FROM postgres_query('<alias>', '<remote sql>')` to ship the
+# already-guarded, untrusted user SQL to the remote Postgres verbatim. The
+# literal shaped like `SELECT ... FROM` here is the pass-through WRAPPER, not a
+# build-time query that pulls patient rows into an artifact — the PHI-egress
+# concern this check guards against (raw SELECTs in the prep toolchain). The
+# actual data query is the remote-SQL ARGUMENT, gated by guard_sql +
+# read-only attach at runtime, never a hardcoded cell fetch. So the
+# `postgres_query()` wrapper is exempt for the same reason as the other DuckDB
+# table-function/metadata spellings.
 _METADATA_ONLY_PATTERN = re.compile(
     r"information_schema|pg_catalog|pg_class|pg_namespace|duckdb_tables\(\)|"
     r"duckdb_databases\(\)|duckdb_constraints\(\)|duckdb_indexes\(\)|"
+    r"postgres_query\(|"
     r"table_constraints|key_column_usage",
     re.IGNORECASE,
 )
