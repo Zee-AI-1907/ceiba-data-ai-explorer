@@ -509,3 +509,94 @@ def test_assemble_prompt_hr_query_cardinality_warning_end_to_end():
     assert "CARDINALITY WARNINGS" in prompt
     assert "join to Monitors" in prompt
     assert "MeasuredDate" in prompt
+
+
+# ── P1 catalog harvest rendering ─────────────────────────────────────────────
+
+
+def _status_table() -> RenderedTable:
+    return RenderedTable(
+        table_id="mock.public.Orders",
+        quoted_ref='"public"."Orders"',
+        grain="one row per order",
+        columns=[
+            RenderedColumn(
+                name="Status",
+                quoted_name='"Status"',
+                data_type="TEXT",
+                unit=None,
+                is_time_column=False,
+                description="Lifecycle state",
+                allowed_values=("active", "closed", "archived"),
+            ),
+            RenderedColumn(
+                name="CanceledAt",
+                quoted_name='"CanceledAt"',
+                data_type="TIMESTAMP",
+                unit=None,
+                is_time_column=True,
+                null_fraction=0.97,
+            ),
+        ],
+        approx_row_count=1000,
+        is_large_time_series=False,
+        description="Customer orders, one per checkout",
+        time_range={
+            "column": "CreatedAt",
+            "minMonth": "2019-03",
+            "maxMonth": "2026-07",
+            "usesInfinitySentinels": True,
+        },
+    )
+
+
+def test_render_column_shows_declared_values_and_description():
+    prompt = assemble_prompt([_status_table()], [], "orders by status", CAPS, "duckdb")
+    assert "values: 'active' | 'closed' | 'archived'" in prompt
+    assert "-- Lifecycle state" in prompt
+
+
+def test_render_column_flags_mostly_null():
+    prompt = assemble_prompt([_status_table()], [], "orders by status", CAPS, "duckdb")
+    assert "~97% NULL" in prompt
+
+
+def test_render_table_shows_description_and_time_range():
+    prompt = assemble_prompt([_status_table()], [], "orders by status", CAPS, "duckdb")
+    assert "description: Customer orders, one per checkout" in prompt
+    assert 'data spans 2019-03 .. 2026-07 on "CreatedAt"' in prompt
+    assert "±infinity sentinels" in prompt
+
+
+def test_render_column_caps_value_enumeration():
+    table = RenderedTable(
+        table_id="mock.public.Codes",
+        quoted_ref='"public"."Codes"',
+        grain="one row per code",
+        columns=[
+            RenderedColumn(
+                name="Code",
+                quoted_name='"Code"',
+                data_type="TEXT",
+                unit=None,
+                is_time_column=False,
+                allowed_values=tuple(f"v{i}" for i in range(20)),
+            ),
+        ],
+        approx_row_count=20,
+        is_large_time_series=False,
+    )
+    prompt = assemble_prompt([table], [], "codes", CAPS, "duckdb")
+    assert "'v11'" in prompt  # 12th value rendered
+    assert "'v12'" not in prompt  # 13th capped
+    assert ", …" in prompt
+
+
+def test_harvest_fields_absent_renders_identically_to_pre_harvest():
+    # A pre-harvest bundle (all new fields None) must render byte-identically
+    # to the old format — no stray separators or empty sections.
+    prompt = assemble_prompt([_measurements_table()], [], "heart rate", CAPS, "duckdb")
+    assert "description:" not in prompt
+    assert "time range:" not in prompt
+    assert "values:" not in prompt
+    assert "NULL" not in prompt.split("CARDINALITY")[0].split("columns:")[1].split("---")[0]

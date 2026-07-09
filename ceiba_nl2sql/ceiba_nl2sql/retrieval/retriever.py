@@ -99,6 +99,12 @@ class RenderedColumn:
     # guard's selective-equality-or-IN-predicate check (ceiba_nl2sql.guard.cardinality).
     is_indexed: bool = False
     is_foreign_key_or_primary_key: bool = False
+    # P1 catalog harvest: pg_description comment, DDL-declared enum/CHECK
+    # values (already PHI-gated at prep), and the pg_stats whole-table null
+    # fraction. All optional — absent on pre-harvest bundles.
+    description: str | None = None
+    allowed_values: tuple[str, ...] | None = None
+    null_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +141,10 @@ class RenderedTable:
     # Cardinality-guard remediation: set when this table has no own time
     # column but a declared FK reaches a parent table that does (see TimeVia).
     time_via: TimeVia | None = None
+    # P1 catalog harvest: pg_description table comment + the month-truncated
+    # data horizon of the table's best time column (catalog.json `timeRange`).
+    description: str | None = None
+    time_range: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -308,10 +318,20 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _render_table_for_estimate(table: RenderedTable) -> str:
+    # Kept in sync with prompt.py's _render_table/_render_column so the
+    # token-budget cut is estimated against roughly what actually renders —
+    # including the P1 harvest additions (descriptions, value enumerations,
+    # time range), which materially widen a rendered table.
     lines = [f"Table {table.quoted_ref} grain={table.grain} rows={table.approx_row_count}"]
+    if table.description:
+        lines.append(table.description)
+    if table.time_range:
+        lines.append(str(table.time_range))
     for c in table.columns:
         unit_part = f" unit={c.unit}" if c.unit else ""
-        lines.append(f"{c.quoted_name} {c.data_type}{unit_part}")
+        values_part = f" values={'|'.join(c.allowed_values)}" if c.allowed_values else ""
+        description_part = f" -- {c.description}" if c.description else ""
+        lines.append(f"{c.quoted_name} {c.data_type}{unit_part}{values_part}{description_part}")
     return "\n".join(lines)
 
 
@@ -772,6 +792,25 @@ class HybridRetriever:
                 for c in table.get("columns", [])
                 if not column_id_allowlist or c["columnId"] in column_id_allowlist or c.get("isPrimaryKey")
             ]
+        bundle, *_ = self._ensure_loaded()
+        profile = bundle.get_table_profile(table["tableId"])
+        # P1: observed sample values from the profile (topCategories) back-fill
+        # a column with no DDL-declared allowedValues. The prep PHI gate
+        # guarantees topCategories only ever exist on non-phi, low-cardinality
+        # columns, so rendering them is safe by construction.
+        top_categories_by_column: dict[str, tuple[str, ...]] = {}
+        for profile_col in (profile or {}).get("columns", []):
+            cats = profile_col.get("topCategories")
+            if cats:
+                bare = profile_col["columnId"].split(".")[-1]
+                top_categories_by_column[bare] = tuple(str(c["value"]) for c in cats)
+
+        def _column_values(c: dict) -> tuple[str, ...] | None:
+            declared = c.get("allowedValues")
+            if declared:
+                return tuple(str(v) for v in declared)
+            return top_categories_by_column.get(c["name"])
+
         columns = [
             RenderedColumn(
                 name=c["name"],
@@ -781,11 +820,12 @@ class HybridRetriever:
                 is_time_column=c.get("isTimeColumn", False),
                 is_indexed=c.get("isIndexed", False),
                 is_foreign_key_or_primary_key=bool(c.get("isPrimaryKey") or c["name"] in fk_column_names),
+                description=c.get("description"),
+                allowed_values=_column_values(c),
+                null_fraction=c.get("nullFraction"),
             )
             for c in raw_columns
         ]
-        bundle, *_ = self._ensure_loaded()
-        profile = bundle.get_table_profile(table["tableId"])
         time_via_raw = table.get("timeVia")
         time_via = (
             TimeVia(
@@ -807,6 +847,8 @@ class HybridRetriever:
             required_time_column=required_time_column,
             role=role,
             time_via=time_via,
+            description=table.get("description"),
+            time_range=table.get("timeRange"),
         )
 
     def _fk_from_columns_by_table(self, table_id: str) -> list[list[str]]:

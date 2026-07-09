@@ -81,13 +81,33 @@ def _quoted_ref_for(ref_by_table_id: dict[str, RenderedTable], table_id: str, fa
     return _source_qualified_ref(table) if table else fallback_ref
 
 
+# Cap on rendered value enumerations: a long declared list is real signal but
+# must not swamp the schema section.
+MAX_RENDERED_ALLOWED_VALUES = 12
+
+# Above this whole-table null fraction the model should know the column is
+# mostly empty (an aggregate over it is probably not what the user means).
+MOSTLY_NULL_THRESHOLD = 0.9
+
+
 def _render_column(col: RenderedColumn) -> str:
     parts = [f"{col.quoted_name} {col.data_type}"]
     if col.unit:
         parts.append(f"unit={col.unit}")
     if col.is_time_column:
         parts.append("TIME COLUMN")
-    return "    - " + ", ".join(parts)
+    if col.allowed_values:
+        # P1 harvest: declared enum/CHECK values (or PHI-safe observed sample
+        # values) — the model filters on real codes instead of guessing.
+        shown = list(col.allowed_values)[:MAX_RENDERED_ALLOWED_VALUES]
+        suffix = ", …" if len(col.allowed_values) > MAX_RENDERED_ALLOWED_VALUES else ""
+        parts.append("values: " + " | ".join(f"'{v}'" for v in shown) + suffix)
+    if col.null_fraction is not None and col.null_fraction >= MOSTLY_NULL_THRESHOLD:
+        parts.append(f"~{round(col.null_fraction * 100)}% NULL")
+    line = "    - " + ", ".join(parts)
+    if col.description:
+        line += f"  -- {col.description}"
+    return line
 
 
 def _render_table(table: RenderedTable) -> str:
@@ -103,10 +123,39 @@ def _render_table(table: RenderedTable) -> str:
         f"- Table {_source_qualified_ref(table)} (tableId: {table.table_id})",
         f"  grain: {table.grain}",
         f"  approxRowCount: {table.approx_row_count}" + (" (LARGE / TIME-SERIES)" if table.is_large_time_series else ""),
-        "  columns:",
-        *[_render_column(c) for c in table.columns],
     ]
+    if table.description:
+        lines.append(f"  description: {table.description}")
+    time_range_line = _render_time_range(table.time_range)
+    if time_range_line:
+        lines.append(time_range_line)
+    lines.append("  columns:")
+    lines.extend(_render_column(c) for c in table.columns)
     return "\n".join(lines)
+
+
+def _render_time_range(time_range: dict | None) -> str | None:
+    """P1 harvest: the table's REAL data horizon (month precision) so the
+    model anchors relative time windows to actual data instead of guessing,
+    plus the ±infinity open-range convention when the table uses it.
+    """
+    if not time_range:
+        return None
+    column = time_range.get("column")
+    min_month = time_range.get("minMonth")
+    max_month = time_range.get("maxMonth")
+    uses_infinity = time_range.get("usesInfinitySentinels")
+    parts: list[str] = []
+    if min_month or max_month:
+        parts.append(f"data spans {min_month or '?'} .. {max_month or '?'} on \"{column}\"")
+    if uses_infinity:
+        parts.append(
+            f'"{column}" uses ±infinity sentinels for open-ended ranges '
+            "(treat 'infinity' as still-open, not a real date)"
+        )
+    if not parts:
+        return None
+    return "  time range: " + "; ".join(parts)
 
 
 def _render_cardinality_warning(warning: CardinalityWarning) -> str:
