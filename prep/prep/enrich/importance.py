@@ -30,6 +30,29 @@ already computes this at introspect time (see cli.py `build_catalog_and_keys`
 catalog.json input so the P3b enrich stage can run standalone (e.g. from a
 loaded catalog.json, not just from the in-memory introspection model) and so
 a single function is the SPEC §7 authority for the flag.
+
+── `timeVia` (cardinality-guard remediation, HR multi-hop query) ────────────
+A large/time-series fact table does not always carry its OWN time column —
+e.g. `MonitorMeasurements` (344M rows) has no `isTimeColumn` column at all;
+its time dimension lives on the joined PARENT `Monitors.MeasuredDate`, one
+hop away via `MonitorMeasurements.DeviceId -> Monitors.Id`. Without a hint,
+neither the cardinality guard nor the generation prompt know this table CAN
+be bounded via its parent's time column, so a genuinely-bounded query (a
+time filter on `Monitors.MeasuredDate` reached by a correct join) gets
+rejected as an unbounded scan (false negative).
+
+`apply_time_via_hints` runs AFTER the join graph is built (it needs declared
+FK edges) and, for every `isLargeTimeSeries` table with no own time column,
+walks its declared FK edges (this table is the FK/"from" side) looking for a
+parent ("to" side) table that DOES have a time column. When found, it writes
+a `timeVia` hint onto the large table's catalog entry:
+`{"table": <parentTableId>, "column": <parentTimeColumnBareName>,
+"fromColumns": [...], "toColumns": [...]}` — the parent table id, its time
+column, and the exact join columns (FK-side -> PK-side), so a downstream
+consumer (the cardinality guard, the prompt's JOIN GRAPH renderer) never has
+to re-derive or guess the relationship. Only a DECLARED (schema-enforced) FK
+is trusted for this — an inferred/name-matched edge is not confident enough
+to silently redirect the bounding policy to a different table.
 """
 
 from __future__ import annotations
@@ -217,6 +240,92 @@ def apply_importance_and_large_flag(
     scores = compute_importance_scores(tables_copy, foreign_keys, weights=weights)
     for t in tables_copy:
         t["importanceScore"] = scores.get(t["tableId"], 0.0)
+
+    new_catalog = dict(catalog)
+    new_catalog["tables"] = tables_copy
+    return new_catalog
+
+
+def _own_time_column(table: dict) -> dict | None:
+    return next((c for c in table.get("columns", []) if c.get("isTimeColumn")), None)
+
+
+def _best_time_column_for_bounding(table: dict) -> dict | None:
+    """Picks the time column to record in a `timeVia` hint when a parent
+    table has more than one (e.g. Monitors has CreatedDate, MeasuredDate, AND
+    ValidationDate all flagged `isTimeColumn`). Prefers an INDEXED time
+    column — the one actually cheap to filter on and the one the real
+    schema names to convey "when this reading was taken" (`MeasuredDate`,
+    isIndexed=True) rather than a bookkeeping timestamp (`CreatedDate`,
+    isIndexed=False) — falling back to the first time column found when none
+    is indexed, matching `_own_time_column`'s existing (first-match)
+    behavior for the single-time-column case.
+    """
+    time_columns = [c for c in table.get("columns", []) if c.get("isTimeColumn")]
+    if not time_columns:
+        return None
+    return next((c for c in time_columns if c.get("isIndexed")), time_columns[0])
+
+
+def _declared_fk_edges_from(table_id: str, foreign_keys: list[dict]) -> list[dict]:
+    """Declared FK edges where `table_id` is the FK ("from") side. Accepts
+    either `keys.json` shape (`fromTable`/`fromColumns`/`toTable`/`toColumns`)
+    or `joingraph.json` edge shape (`from`/`fromColumns`/`to`/`toColumns`) so
+    this helper works whether the caller has keys.json's foreignKeys or an
+    already-built joingraph.json's declared edges on hand.
+    """
+    edges = []
+    for fk in foreign_keys:
+        from_table = fk.get("fromTable", fk.get("from"))
+        if from_table != table_id:
+            continue
+        edges.append(fk)
+    return edges
+
+
+def apply_time_via_hints(catalog: dict, foreign_keys: list[dict]) -> dict:
+    """Populate a `timeVia` hint on every `isLargeTimeSeries` table entry that
+    has NO own time column but has a declared FK edge to a parent table that
+    DOES have one (see module docstring). Returns a new catalog document
+    (never mutates the caller's `catalog` in place, matching
+    `apply_importance_and_large_flag`'s side-effect-free contract).
+
+    Must run AFTER `apply_importance_and_large_flag` (needs `isLargeTimeSeries`
+    already set) and after the join graph's declared edges are available —
+    callers typically pass `keys.json`'s `foreignKeys` (declared only; an
+    inferred/name-matched edge is not trusted for this redirect) or the
+    subset of `joingraph.json` edges whose `origin == "declared"`.
+    """
+    tables_by_id = {t["tableId"]: t for t in catalog.get("tables", [])}
+    tables_copy = [dict(t) for t in catalog.get("tables", [])]
+
+    for t in tables_copy:
+        if not t.get("isLargeTimeSeries"):
+            continue
+        if _own_time_column(t):
+            continue  # already has its own time column; no hint needed.
+
+        best_hint: dict | None = None
+        for fk in _declared_fk_edges_from(t["tableId"], foreign_keys):
+            to_table_id = fk.get("toTable", fk.get("to"))
+            parent = tables_by_id.get(to_table_id)
+            if not parent:
+                continue
+            parent_time_col = _best_time_column_for_bounding(parent)
+            if not parent_time_col:
+                continue
+            from_columns = list(fk.get("fromColumns", []))
+            to_columns = list(fk.get("toColumns", []))
+            best_hint = {
+                "table": to_table_id,
+                "column": parent_time_col["name"],
+                "fromColumns": from_columns,
+                "toColumns": to_columns,
+            }
+            break  # first declared parent with a time column wins (deterministic: FK order).
+
+        if best_hint is not None:
+            t["timeVia"] = best_hint
 
     new_catalog = dict(catalog)
     new_catalog["tables"] = tables_copy

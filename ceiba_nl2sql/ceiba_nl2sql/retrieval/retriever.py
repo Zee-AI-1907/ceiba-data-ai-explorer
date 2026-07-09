@@ -102,6 +102,24 @@ class RenderedColumn:
 
 
 @dataclass(frozen=True)
+class TimeVia:
+    """Cardinality-guard remediation: how a large table with NO own time
+    column can still be bounded — via a directly-joined PARENT table's time
+    column (e.g. MonitorMeasurements has none; Monitors.MeasuredDate, reached
+    via MonitorMeasurements.DeviceId -> Monitors.Id, is the bound). Populated
+    from catalog.json's `timeVia` hint (prep/prep/enrich/importance.py
+    `apply_time_via_hints`) when present; the guard also derives this
+    relationship independently from the SQL + join graph as a fallback, so a
+    bundle built before this hint existed is not silently unprotected.
+    """
+
+    table_id: str
+    column: str
+    from_columns: list[str]
+    to_columns: list[str]
+
+
+@dataclass(frozen=True)
 class RenderedTable:
     table_id: str
     quoted_ref: str
@@ -114,6 +132,9 @@ class RenderedTable:
     # their full (possibly recall-scoped) column list; "bridge" tables render
     # as PK/FK-only stubs — they exist to be joined THROUGH, not selected FROM.
     role: str = "primary"
+    # Cardinality-guard remediation: set when this table has no own time
+    # column but a declared FK reaches a parent table that does (see TimeVia).
+    time_via: TimeVia | None = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +219,85 @@ class RetrieveOptions:
     recall_tables: int | None = None
     recall_columns: int | None = None
     exemplar_k: int | None = None
+
+
+# Column-name substrings suggesting a genuine coded discriminator (mirrors
+# prep/prep/enrich/importance.py `_CODE_COLUMN_NAME_HINTS`) — preferred over
+# a plain entity-identifying FK column (e.g. DeviceId, PatientId) when
+# picking the example column for a cardinality-warning message: "filter on
+# MeasurementTypeId" is a more genuinely useful example of a selective filter
+# than "filter on DeviceId" (which narrows to one device, not one measurement
+# kind — a materially different, and usually not what's wanted, query shape).
+_DISCRIMINATOR_COLUMN_NAME_HINTS = ("type", "status", "code", "category", "kind")
+
+
+def _best_selective_column_for_warning(table: RenderedTable) -> str | None:
+    """Picks the example column named in a cardinality-warning message's
+    equality/IN escape-hatch mention. Prefers a coded-discriminator-shaped
+    FK/indexed column (see `_DISCRIMINATOR_COLUMN_NAME_HINTS`) over a plain
+    entity-identifying one, falling back to the first FK/indexed column found
+    when none matches (unchanged prior behavior for a table with only
+    entity-identifying FK columns, e.g. PatientId-only).
+    """
+    selective_columns = [c for c in table.columns if c.is_indexed or c.is_foreign_key_or_primary_key]
+    discriminator = next(
+        (c.name for c in selective_columns if any(hint in c.name.lower() for hint in _DISCRIMINATOR_COLUMN_NAME_HINTS)),
+        None,
+    )
+    if discriminator:
+        return discriminator
+    return selective_columns[0].name if selective_columns else None
+
+
+def build_cardinality_warning_message(table: RenderedTable) -> str:
+    """The verbatim warning text for a large/time-series table, surfaced in
+    the generation prompt's CARDINALITY WARNINGS section. Mirrors
+    lib/rag/promptAssembly.ts `buildCardinalityWarningMessage`, plus the
+    cardinality-guard remediation below (canonical home: both
+    `HybridRetriever._build_cardinality_warning` and
+    `ceiba_nl2sql.generation.prompt.derive_cardinality_warnings` delegate here
+    so the message logic exists in exactly one place).
+
+    Cardinality-guard remediation: a table with NO own time column (e.g.
+    MonitorMeasurements — 344M rows, time dimension lives on the joined
+    parent Monitors.MeasuredDate) previously got only the vague "a bounding
+    predicate that limits the scan" instruction, giving the model NO
+    actionable guidance on how to bound it — exactly the ambiguity that let
+    the model emit an unbounded (or wrongly-joined) query. When `time_via` is
+    set, the message now names the exact parent table/column/join to bound
+    through. When the table also has an FK/indexed column (surfaced via its
+    own rendered columns), the message additionally names the equality/IN
+    escape hatch (e.g. filtering `MeasurementTypeId`) as an alternative to a
+    time bound — matching what the cardinality guard actually accepts.
+    """
+    rows_desc = f"{table.approx_row_count:,}"
+    time_col = table.required_time_column
+    selective_column = _best_selective_column_for_warning(table)
+
+    if time_col:
+        time_bound_instruction = f"you MUST include a time-bound predicate on {time_col}"
+    elif table.time_via:
+        join_desc = ", ".join(f"{f}={t}" for f, t in zip(table.time_via.from_columns, table.time_via.to_columns))
+        parent_bare_name = table.time_via.table_id.split(".")[-1]
+        if selective_column:
+            time_bound_instruction = (
+                f"this table has no own time column, so you MUST either join to {parent_bare_name} "
+                f"(via {join_desc}) and bound on its {table.time_via.column} column, or filter on a "
+                f"selective column such as {selective_column}"
+            )
+        else:
+            time_bound_instruction = (
+                f"this table has no own time column, so you MUST join to {parent_bare_name} "
+                f"(via {join_desc}) and bound on its {table.time_via.column} column"
+            )
+    elif selective_column:
+        time_bound_instruction = (
+            f"you MUST include a bounding predicate that limits the scan (e.g. an equality/IN filter on {selective_column})"
+        )
+    else:
+        time_bound_instruction = "you MUST include a bounding predicate that limits the scan"
+
+    return f"{table.quoted_ref} has ~{rows_desc} rows; {time_bound_instruction} and a LIMIT; do not scan unbounded."
 
 
 def _estimate_tokens(text: str) -> int:
@@ -622,9 +722,22 @@ class HybridRetriever:
     def _render_table(
         self, table: dict, column_id_allowlist: set[str] | None, *, role: str = "primary"
     ) -> RenderedTable:
-        required_time_column = next(
-            (c["quotedName"] for c in table.get("columns", []) if c.get("isTimeColumn")), None
-        )
+        # Cardinality-guard remediation: a table can carry MORE THAN ONE
+        # isTimeColumn (e.g. staging.Shared.Monitors has CreatedDate,
+        # MeasuredDate, ValidationDate — all timestamp bookkeeping columns,
+        # but only MeasuredDate is the one meaning "when this reading was
+        # taken", and only it is indexed). Picking the first one found (the
+        # prior behavior) can silently name a non-indexed, semantically-wrong
+        # column as `required_time_column` — the guard would then reject a
+        # query that correctly bounds the RIGHT time column because it
+        # doesn't match the WRONG one this function picked. Prefer an
+        # INDEXED time column; fall back to the first when none is indexed
+        # (unchanged behavior for a single-time-column table, the common
+        # case). Mirrors prep/prep/enrich/importance.py
+        # `_best_time_column_for_bounding`'s identical preference.
+        time_columns = [c for c in table.get("columns", []) if c.get("isTimeColumn")]
+        best_time_column = next((c for c in time_columns if c.get("isIndexed")), time_columns[0] if time_columns else None)
+        required_time_column = best_time_column["quotedName"] if best_time_column else None
         fk_column_names = {
             col_name for cols in self._fk_from_columns_by_table(table["tableId"]) for col_name in cols
         }
@@ -656,6 +769,17 @@ class HybridRetriever:
         ]
         bundle, *_ = self._ensure_loaded()
         profile = bundle.get_table_profile(table["tableId"])
+        time_via_raw = table.get("timeVia")
+        time_via = (
+            TimeVia(
+                table_id=time_via_raw["table"],
+                column=time_via_raw["column"],
+                from_columns=list(time_via_raw.get("fromColumns", [])),
+                to_columns=list(time_via_raw.get("toColumns", [])),
+            )
+            if time_via_raw
+            else None
+        )
         return RenderedTable(
             table_id=table["tableId"],
             quoted_ref=table["quotedRef"],
@@ -665,6 +789,7 @@ class HybridRetriever:
             is_large_time_series=table.get("isLargeTimeSeries", False),
             required_time_column=required_time_column,
             role=role,
+            time_via=time_via,
         )
 
     def _fk_from_columns_by_table(self, table_id: str) -> list[list[str]]:
@@ -677,18 +802,11 @@ class HybridRetriever:
 
     @staticmethod
     def _build_cardinality_warning(table: RenderedTable) -> CardinalityWarning:
-        rows_desc = f"{table.approx_row_count:,}"
-        time_col = table.required_time_column
-        time_bound_instruction = (
-            f"you MUST include a time-bound predicate on {time_col}"
-            if time_col
-            else "you MUST include a bounding predicate that limits the scan"
-        )
         return CardinalityWarning(
             table_id=table.table_id,
             approx_row_count=table.approx_row_count,
-            required_time_column=time_col,
-            message=f"{table.quoted_ref} has ~{rows_desc} rows; {time_bound_instruction} and a LIMIT; do not scan unbounded.",
+            required_time_column=table.required_time_column,
+            message=build_cardinality_warning_message(table),
         )
 
     def _build_join_hints(self, survivor_table_ids: list[str]) -> list[JoinHint]:

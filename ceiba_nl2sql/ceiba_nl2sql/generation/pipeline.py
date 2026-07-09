@@ -217,6 +217,31 @@ def _validate_candidate(
             "quoted_ref": t.quoted_ref,
             "is_large_time_series": t.is_large_time_series,
             "required_time_column": t.required_time_column,
+            # Fix C / cardinality-guard remediation: `columns` and `time_via`
+            # must be threaded through here so `build_cardinality_guard_options`
+            # can derive `selective_columns` (the FK-equality escape hatch)
+            # and `parent_time_bound` (the parent-join time-bound escape
+            # hatch) — without these, BOTH escape hatches are silently dead
+            # in production even though the guard's own unit tests exercise
+            # them directly with hand-built dicts.
+            "columns": [
+                {
+                    "name": c.name,
+                    "is_indexed": c.is_indexed,
+                    "is_foreign_key_or_primary_key": c.is_foreign_key_or_primary_key,
+                }
+                for c in t.columns
+            ],
+            "time_via": (
+                {
+                    "table_id": t.time_via.table_id,
+                    "column": t.time_via.column,
+                    "from_columns": t.time_via.from_columns,
+                    "to_columns": t.time_via.to_columns,
+                }
+                if t.time_via
+                else None
+            ),
         }
         for t in context.tables
     ]

@@ -26,6 +26,7 @@ from ceiba_nl2sql.retrieval.retriever import (
     RenderedColumn,
     RenderedTable,
     _estimate_tokens,
+    build_cardinality_warning_message,
 )
 
 USER_REQUEST_OPEN = "<user_request>"
@@ -110,20 +111,6 @@ def _render_cardinality_warning(warning: CardinalityWarning) -> str:
     return f"- {warning.message}"
 
 
-def build_cardinality_warning_message(table: RenderedTable) -> str:
-    """The verbatim warning text for a large/time-series table. Mirrors
-    lib/rag/promptAssembly.ts `buildCardinalityWarningMessage`.
-    """
-    rows_desc = f"{table.approx_row_count:,}"
-    time_col = table.required_time_column
-    time_bound_instruction = (
-        f"you MUST include a time-bound predicate on {time_col}"
-        if time_col
-        else "you MUST include a bounding predicate that limits the scan"
-    )
-    return f"{table.quoted_ref} has ~{rows_desc} rows; {time_bound_instruction} and a LIMIT; do not scan unbounded."
-
-
 def derive_cardinality_warnings(tables: list[RenderedTable]) -> list[CardinalityWarning]:
     """Derives cardinality_warnings from rendered tables if not already
     provided. Mirrors lib/rag/promptAssembly.ts `deriveCardinalityWarnings`.
@@ -163,21 +150,42 @@ def _render_join_edge_line(hint: JoinHint, ref_to_source_qualified: dict[str, st
 
 def _render_join_path_line(path: JoinPath, ref_by_table_id: dict[str, RenderedTable]) -> str:
     """Renders the arrow-chain path per JOINGRAPH_SURFACING.md §8.1:
-    `"A" →(col=col, N:1) "B" →(col=col, N:1) "C"` using each node's quotedRef
-    (falling back to its bare tableId for a node outside the rendered set,
-    e.g. a bridge table that did not make the final render).
+    `A →(A."fromCol"=B."toCol", N:1) B →...` using each node's
+    SOURCE-QUALIFIED ref (falling back to its bare tableId for a node outside
+    the rendered set, e.g. a bridge table that did not make the final render)
+    — matching the "Edges among selected tables" block's ref form exactly, so
+    the same table is never named two different ways in the same prompt.
+
+    Prompt-accuracy fix (two parts):
+    1. The join-column pair used to render bare (`→(DeviceId=Id, N:1)`) with
+       no indication of WHICH side each column belongs to — readable when
+       skimmed quickly as "these two columns are interchangeable" rather than
+       "the FK-side column belongs to the table on the LEFT of this arrow,
+       the PK-side column to the table on the RIGHT". A diagnosed staging
+       benchmark run showed the model join on the wrong column pair
+       (`mm."Id" = m."Id"` instead of the correct `mm."DeviceId" = m."Id"`)
+       despite this same join being named in the chain — now every hop
+       repeats the FULL `sourceRef."fromCol"=targetRef."toCol"` form.
+    2. The node labels themselves previously used the bare (schema-only)
+       `quotedRef` (e.g. `"public"."MeasurementsMock"`) while the edges block
+       immediately above uses the source-qualified ref (e.g.
+       `mock."public"."MeasurementsMock"`) — the SAME table named two
+       different ways a few lines apart invites the "are these the same
+       table?" question. Both now use `_source_qualified_ref`.
     """
 
     def _node_label(table_id: str) -> str:
         table = ref_by_table_id.get(table_id)
-        return table.quoted_ref if table else table_id
+        return _source_qualified_ref(table) if table else table_id
 
     segments = [_node_label(path.nodes[0])]
     for i, edge in enumerate(path.edges):
+        from_ref = _node_label(path.nodes[i])
+        to_ref = _node_label(path.nodes[i + 1])
         from_cols = ", ".join(edge.from_columns)
         to_cols = ", ".join(edge.to_columns)
         tag = _CARDINALITY_TAG.get(edge.join_cardinality, edge.join_cardinality)
-        segments.append(f"→({from_cols}={to_cols}, {tag}) {_node_label(path.nodes[i + 1])}")
+        segments.append(f'→({from_ref}."{from_cols}"={to_ref}."{to_cols}", {tag}) {_node_label(path.nodes[i + 1])}')
     return "  " + " ".join(segments)
 
 
@@ -323,6 +331,25 @@ def _render_semantic_hints(glossary_hits: list[GlossaryHit], rendered_tables: li
     return "\n".join(lines)
 
 
+def _dialect_note(dialect: SqlDialect) -> list[str]:
+    """One token-bounded steering line warning against dialect-mismatched
+    date/time syntax. Prompt-accuracy fix: a diagnosed staging benchmark run
+    showed a model emit the Postgres-ism `TIMESTAMP 'now'`, which DuckDB
+    rejects outright (DuckDB has no `'now'` string literal cast; `now()` is a
+    function call). Only rendered for `duckdb` — the one dialect this
+    pipeline actually targets today and the one the failure was observed
+    against; a future non-DuckDB target should get its own note here rather
+    than this one being stretched to cover it.
+    """
+    if dialect != "duckdb":
+        return []
+    return [
+        "DuckDB date/time: use now() or CURRENT_TIMESTAMP and INTERVAL '3' HOUR "
+        "(unit after the literal, no plural 's'); NEVER use TIMESTAMP 'now' — DuckDB "
+        "rejects that Postgres-ism.",
+    ]
+
+
 def assemble_prompt(
     tables: list[RenderedTable],
     cardinality_warnings: list[CardinalityWarning],
@@ -367,6 +394,7 @@ def assemble_prompt(
                 f"If no explicit row limit is requested, include LIMIT {default_limit}.",
                 # Fix A §4/§5: fan-out/wrong-grain preamble rule.
                 "When a join is 1:N or N:1 and you aggregate the 'one' side, use COUNT(DISTINCT ...) / guard against row fan-out.",
+                *_dialect_note(dialect),
                 "Respond with the SQL only.",
             ]
         )

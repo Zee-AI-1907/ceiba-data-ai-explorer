@@ -11,6 +11,7 @@ import pytest
 
 from ceiba_nl2sql.guard.cardinality import (
     LargeTableSpec,
+    ParentTimeBound,
     build_cardinality_guard_options,
     cardinality_guard,
     cardinality_guard_from_context,
@@ -346,3 +347,277 @@ def test_cardinality_guard_from_context_still_rejects_bare_scan_with_no_selectiv
     verdict = cardinality_guard_from_context(sql, tables)
     assert verdict.ok is False
     assert verdict.action == "reject"
+
+
+# ── Cardinality-guard remediation: HR multi-hop query false-negative ───────
+#
+# Root cause (verified against real staging data): MonitorMeasurements (344M
+# rows) has NO own time column — its time dimension lives on the joined
+# PARENT Monitors.MeasuredDate, one hop away via
+# MonitorMeasurements.DeviceId -> Monitors.Id. The guard must credit a
+# time-bound predicate on that PARENT's time column, reached via the exact
+# FK join, as bounding the large table (branch (c) of the policy) — the
+# minimal repro from the task:
+#   ... JOIN Monitors m ... JOIN MonitorMeasurements mm ON mm.DeviceId=m.Id
+#   WHERE m.MeasuredDate >= now()-INTERVAL '3' HOUR AND mm.MeasurementTypeId = 2
+
+MONITOR_MEASUREMENTS_TABLE = LargeTableSpec(
+    table_name="MonitorMeasurements",
+    quoted_ref='"Shared"."MonitorMeasurements"',
+    selective_columns=["DeviceId", "MeasurementTypeId", "Id"],
+    parent_time_bound=ParentTimeBound(
+        parent_table_name="Monitors",
+        parent_time_column="MeasuredDate",
+        from_columns=["DeviceId"],
+        to_columns=["Id"],
+    ),
+)
+MONITORS_TABLE = LargeTableSpec(
+    table_name="Monitors", quoted_ref='"Shared"."Monitors"', selective_columns=["Id"]
+)
+MONITORS_REQUIRED_TIME_COLUMN = {"Monitors": "MeasuredDate"}
+
+PRIMARY_REPRO_SQL = """SELECT p."Id" FROM "Patients" p
+JOIN "Acceptances" a ON a."PatientId" = p."Id"
+JOIN "Monitors" m ON m."AcceptanceId" = a."Id"
+JOIN "MonitorMeasurements" mm ON mm."DeviceId" = m."Id"
+WHERE m."MeasuredDate" >= now() - INTERVAL '3' HOUR AND mm."MeasurementTypeId" = 2
+LIMIT 1000
+"""
+
+
+def test_hr_multi_hop_repro_passes_via_parent_join_time_bound():
+    """(a) FK-equality alone bounds it is exercised separately below; this is
+    the exact reported false negative: a correct, bounded HR query rejected
+    because the guard demanded a time bound on MonitorMeasurements' own
+    (nonexistent) time column instead of crediting the parent-join bound.
+    """
+    verdict = cardinality_guard(
+        PRIMARY_REPRO_SQL,
+        large_tables=[MONITOR_MEASUREMENTS_TABLE, MONITORS_TABLE],
+        required_time_column_by_table=MONITORS_REQUIRED_TIME_COLUMN,
+        dialect="duckdb",
+    )
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_fk_equality_alone_bounds_monitor_measurements_with_no_time_bound_at_all():
+    """(a) FK-equality alone bounds it -> PASS, per the task's required test list."""
+    sql = 'SELECT mm."Value" FROM "MonitorMeasurements" mm WHERE mm."MeasurementTypeId" = 2 LIMIT 1000'
+    verdict = cardinality_guard(
+        sql, large_tables=[MONITOR_MEASUREMENTS_TABLE], required_time_column_by_table={}, dialect="duckdb"
+    )
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_parent_table_time_bound_via_join_bounds_the_large_table():
+    """(b) parent-table time bound via join bounds it -> PASS, per the task's
+    required test list. Isolated from the selective-columns escape hatch by
+    using a large table with NO selective_columns configured at all.
+    """
+    table = LargeTableSpec(
+        table_name="MonitorMeasurements",
+        quoted_ref='"Shared"."MonitorMeasurements"',
+        parent_time_bound=ParentTimeBound(
+            parent_table_name="Monitors",
+            parent_time_column="MeasuredDate",
+            from_columns=["DeviceId"],
+            to_columns=["Id"],
+        ),
+    )
+    sql = """SELECT p."Id" FROM "Patients" p
+    JOIN "Monitors" m ON m."PatientId" = p."Id"
+    JOIN "MonitorMeasurements" mm ON mm."DeviceId" = m."Id"
+    WHERE m."MeasuredDate" >= now() - INTERVAL '3' HOUR
+    LIMIT 1000
+    """
+    verdict = cardinality_guard(sql, large_tables=[table], required_time_column_by_table={}, dialect="duckdb")
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_truly_unbounded_still_rejects_with_parent_time_bound_configured():
+    """(c) truly unbounded still REJECTs -> per the task's required test list.
+    Configuring `parent_time_bound` must not turn into a blanket pass —
+    the parent must actually be JOINED and time-bounded in THIS query.
+    """
+    sql = 'SELECT COUNT(*) FROM "MonitorMeasurements" mm LIMIT 1000'
+    verdict = cardinality_guard(
+        sql, large_tables=[MONITOR_MEASUREMENTS_TABLE], required_time_column_by_table={}, dialect="duckdb"
+    )
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+
+
+def test_existing_own_time_column_case_still_passes_with_parent_time_bound_configured():
+    """(d) the existing own-time-column case still PASSes -> per the task's
+    required test list. A table with BOTH its own required_time_column AND a
+    (irrelevant here) parent_time_bound configured behaves exactly as before
+    when its own time bound is satisfied.
+    """
+    sql = """SELECT * FROM "MeasurementsMock" WHERE "RecordedAt" >= now() - INTERVAL '3 hours' LIMIT 1000"""
+    table = LargeTableSpec(
+        table_name="MeasurementsMock",
+        quoted_ref='"public"."MeasurementsMock"',
+        parent_time_bound=ParentTimeBound(
+            parent_table_name="SomeOtherParent",
+            parent_time_column="SomeTime",
+            from_columns=["X"],
+            to_columns=["Y"],
+        ),
+    )
+    verdict = cardinality_guard(sql, large_tables=[table], required_time_column_by_table=REQUIRED_TIME_COLUMN)
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_parent_join_bound_rejected_when_join_uses_wrong_columns():
+    """A time bound on the parent's time column does NOT bound the large
+    table when the SQL joins them on the WRONG columns (not the declared FK
+    pair) — crediting this would let an incidental/incorrect join through.
+    """
+    sql = """SELECT p."Id" FROM "Patients" p
+    JOIN "Acceptances" a ON a."PatientId" = p."Id"
+    JOIN "Monitors" m ON m."AcceptanceId" = a."Id"
+    JOIN "MonitorMeasurements" mm ON mm."Id" = m."Id"
+    WHERE m."MeasuredDate" >= now() - INTERVAL '3' HOUR
+    LIMIT 1000
+    """
+    verdict = cardinality_guard(
+        sql,
+        large_tables=[MONITOR_MEASUREMENTS_TABLE, MONITORS_TABLE],
+        required_time_column_by_table=MONITORS_REQUIRED_TIME_COLUMN,
+        dialect="duckdb",
+    )
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+
+
+def test_parent_join_bound_rejected_when_parent_table_not_referenced_at_all():
+    """A `parent_time_bound` configured for a parent the SQL never even joins
+    to must not spuriously bound the large table.
+    """
+    sql = 'SELECT * FROM "MonitorMeasurements" mm WHERE mm."Value" > 120 LIMIT 1000'
+    verdict = cardinality_guard(
+        sql, large_tables=[MONITOR_MEASUREMENTS_TABLE], required_time_column_by_table={}, dialect="duckdb"
+    )
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+
+
+def test_repair_hint_mentions_parent_join_time_bound_option_when_configured():
+    sql = 'SELECT * FROM "MonitorMeasurements" mm JOIN "Monitors" m ON mm."DeviceId" = m."Id" LIMIT 1000'
+    table = LargeTableSpec(
+        table_name="MonitorMeasurements",
+        quoted_ref='"Shared"."MonitorMeasurements"',
+        parent_time_bound=ParentTimeBound(
+            parent_table_name="Monitors",
+            parent_time_column="MeasuredDate",
+            from_columns=["DeviceId"],
+            to_columns=["Id"],
+        ),
+    )
+    verdict = cardinality_guard(sql, large_tables=[table], required_time_column_by_table={}, dialect="duckdb")
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+    assert "Monitors.MeasuredDate" in (verdict.repair_hint or "")
+
+
+def test_build_cardinality_guard_options_derives_parent_time_bound_from_time_via_hint():
+    tables = [
+        {
+            "table_id": "staging.Shared.MonitorMeasurements",
+            "quoted_ref": '"Shared"."MonitorMeasurements"',
+            "is_large_time_series": True,
+            "required_time_column": None,
+            "columns": [],
+            "time_via": {
+                "table": "staging.Shared.Monitors",
+                "column": "MeasuredDate",
+                "fromColumns": ["DeviceId"],
+                "toColumns": ["Id"],
+            },
+        },
+        {
+            "table_id": "staging.Shared.Monitors",
+            "quoted_ref": '"Shared"."Monitors"',
+            "is_large_time_series": True,
+            "required_time_column": '"MeasuredDate"',
+            "columns": [],
+        },
+    ]
+    large_tables, _ = build_cardinality_guard_options(tables)
+    mm = next(t for t in large_tables if t.table_name == "MonitorMeasurements")
+    assert mm.parent_time_bound == ParentTimeBound(
+        parent_table_name="Monitors", parent_time_column="MeasuredDate", from_columns=["DeviceId"], to_columns=["Id"]
+    )
+
+
+def test_build_cardinality_guard_options_time_via_falls_back_to_tableid_tail_when_parent_not_rendered():
+    tables = [
+        {
+            "table_id": "staging.Shared.MonitorMeasurements",
+            "quoted_ref": '"Shared"."MonitorMeasurements"',
+            "is_large_time_series": True,
+            "required_time_column": None,
+            "columns": [],
+            "time_via": {
+                "table": "staging.Shared.Monitors",
+                "column": "MeasuredDate",
+                "fromColumns": ["DeviceId"],
+                "toColumns": ["Id"],
+            },
+        },
+    ]
+    large_tables, _ = build_cardinality_guard_options(tables)
+    assert large_tables[0].parent_time_bound.parent_table_name == "Monitors"
+
+
+def test_build_cardinality_guard_options_no_parent_time_bound_when_time_via_absent():
+    tables = [
+        {
+            "table_id": "mock.public.MeasurementsMock",
+            "quoted_ref": '"public"."MeasurementsMock"',
+            "is_large_time_series": True,
+            "required_time_column": '"RecordedAt"',
+            "columns": [],
+        },
+    ]
+    large_tables, _ = build_cardinality_guard_options(tables)
+    assert large_tables[0].parent_time_bound is None
+
+
+# ── Pre-existing false-negative closed alongside this fix: a bare JOIN ... ON
+# equality on an FK/indexed column is NOT a selective filter ────────────────
+
+
+def test_bare_join_on_equality_alone_does_not_satisfy_selective_predicate_escape_hatch():
+    """A JOIN ... ON condition is the STRUCTURAL join predicate, not a
+    row-reducing filter — crediting it would let a full join-scan of the
+    large table through with NO actual filter anywhere in the query.
+    """
+    table = LargeTableSpec(
+        table_name="MonitorMeasurements", quoted_ref='"Shared"."MonitorMeasurements"', selective_columns=["DeviceId"]
+    )
+    sql = 'SELECT * FROM "Monitors" m JOIN "MonitorMeasurements" mm ON mm."DeviceId" = m."Id" LIMIT 1000'
+    verdict = cardinality_guard(sql, large_tables=[table], required_time_column_by_table={}, dialect="duckdb")
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+
+
+def test_where_clause_equality_on_same_column_as_join_on_still_satisfies_escape_hatch():
+    """The escape hatch still works when the SAME column is ALSO genuinely
+    filtered in a WHERE clause, not just used as the join key.
+    """
+    table = LargeTableSpec(
+        table_name="MonitorMeasurements", quoted_ref='"Shared"."MonitorMeasurements"', selective_columns=["DeviceId"]
+    )
+    sql = (
+        'SELECT * FROM "Monitors" m JOIN "MonitorMeasurements" mm ON mm."DeviceId" = m."Id" '
+        'WHERE mm."DeviceId" = 42 LIMIT 1000'
+    )
+    verdict = cardinality_guard(sql, large_tables=[table], required_time_column_by_table={}, dialect="duckdb")
+    assert verdict.ok is True
+    assert verdict.action == "pass"

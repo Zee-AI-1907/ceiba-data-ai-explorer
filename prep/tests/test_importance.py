@@ -19,6 +19,7 @@ from prep.enrich.importance import (
     DEFAULT_WEIGHTS,
     ImportanceWeights,
     apply_importance_and_large_flag,
+    apply_time_via_hints,
     compute_importance_scores,
 )
 
@@ -159,6 +160,142 @@ def test_apply_importance_does_not_mutate_input_catalog():
     for original in original_table_dicts:
         assert "importanceScore" not in original
         assert "isLargeTimeSeries" not in original
+
+
+# ── timeVia hint (cardinality-guard remediation) ───────────────────────────
+
+
+def _monitor_measurements_topology() -> tuple[dict, list[dict]]:
+    """A minimal analog of the real staging.Shared.MonitorMeasurements /
+    Monitors topology: MonitorMeasurements (large, NO own time column) has a
+    declared FK MonitorMeasurements.DeviceId -> Monitors.Id, and Monitors DOES
+    have an own time column (MeasuredDate).
+    """
+    catalog = {
+        "tables": [
+            {
+                "tableId": "staging.Shared.MonitorMeasurements",
+                "isLargeTimeSeries": True,
+                "columns": [
+                    {"name": "Id", "isTimeColumn": False, "isPrimaryKey": True},
+                    {"name": "DeviceId", "isTimeColumn": False},
+                    {"name": "MeasurementTypeId", "isTimeColumn": False},
+                    {"name": "Value", "isTimeColumn": False},
+                ],
+            },
+            {
+                "tableId": "staging.Shared.Monitors",
+                "isLargeTimeSeries": True,
+                "columns": [
+                    {"name": "Id", "isTimeColumn": False, "isPrimaryKey": True},
+                    {"name": "MeasuredDate", "isTimeColumn": True},
+                ],
+            },
+        ]
+    }
+    foreign_keys = [
+        {
+            "fromTable": "staging.Shared.MonitorMeasurements",
+            "fromColumns": ["DeviceId"],
+            "toTable": "staging.Shared.Monitors",
+            "toColumns": ["Id"],
+        }
+    ]
+    return catalog, foreign_keys
+
+
+def test_apply_time_via_hints_populates_parent_hint_for_table_with_no_own_time_column():
+    catalog, foreign_keys = _monitor_measurements_topology()
+    updated = apply_time_via_hints(catalog, foreign_keys)
+
+    mm = next(t for t in updated["tables"] if t["tableId"] == "staging.Shared.MonitorMeasurements")
+    assert mm["timeVia"] == {
+        "table": "staging.Shared.Monitors",
+        "column": "MeasuredDate",
+        "fromColumns": ["DeviceId"],
+        "toColumns": ["Id"],
+    }
+
+
+def test_apply_time_via_hints_does_not_populate_hint_for_table_with_own_time_column():
+    catalog, foreign_keys = _monitor_measurements_topology()
+    updated = apply_time_via_hints(catalog, foreign_keys)
+
+    monitors = next(t for t in updated["tables"] if t["tableId"] == "staging.Shared.Monitors")
+    assert "timeVia" not in monitors
+
+
+def test_apply_time_via_hints_skips_tables_not_flagged_large():
+    catalog, foreign_keys = _monitor_measurements_topology()
+    catalog["tables"][0]["isLargeTimeSeries"] = False
+    updated = apply_time_via_hints(catalog, foreign_keys)
+
+    mm = next(t for t in updated["tables"] if t["tableId"] == "staging.Shared.MonitorMeasurements")
+    assert "timeVia" not in mm
+
+
+def test_apply_time_via_hints_no_hint_when_no_declared_fk_reaches_a_timed_parent():
+    catalog = {
+        "tables": [
+            {
+                "tableId": "staging.Shared.Orphan",
+                "isLargeTimeSeries": True,
+                "columns": [{"name": "Id", "isTimeColumn": False, "isPrimaryKey": True}],
+            }
+        ]
+    }
+    updated = apply_time_via_hints(catalog, foreign_keys=[])
+    orphan = next(t for t in updated["tables"] if t["tableId"] == "staging.Shared.Orphan")
+    assert "timeVia" not in orphan
+
+
+def test_apply_time_via_hints_prefers_indexed_time_column_over_first_match():
+    """The real staging.Shared.Monitors table has THREE isTimeColumn columns
+    (CreatedDate, MeasuredDate, ValidationDate) — only MeasuredDate is
+    indexed and is the one that actually means "when this reading was
+    taken". The hint must pick it, not whichever column happens to be
+    declared first.
+    """
+    catalog = {
+        "tables": [
+            {
+                "tableId": "staging.Shared.MonitorMeasurements",
+                "isLargeTimeSeries": True,
+                "columns": [{"name": "Id", "isTimeColumn": False, "isPrimaryKey": True}, {"name": "DeviceId", "isTimeColumn": False}],
+            },
+            {
+                "tableId": "staging.Shared.Monitors",
+                "isLargeTimeSeries": True,
+                "columns": [
+                    {"name": "Id", "isTimeColumn": False, "isPrimaryKey": True},
+                    {"name": "CreatedDate", "isTimeColumn": True, "isIndexed": False},
+                    {"name": "MeasuredDate", "isTimeColumn": True, "isIndexed": True},
+                    {"name": "ValidationDate", "isTimeColumn": True, "isIndexed": False},
+                ],
+            },
+        ]
+    }
+    foreign_keys = [
+        {
+            "fromTable": "staging.Shared.MonitorMeasurements",
+            "fromColumns": ["DeviceId"],
+            "toTable": "staging.Shared.Monitors",
+            "toColumns": ["Id"],
+        }
+    ]
+    updated = apply_time_via_hints(catalog, foreign_keys)
+    mm = next(t for t in updated["tables"] if t["tableId"] == "staging.Shared.MonitorMeasurements")
+    assert mm["timeVia"]["column"] == "MeasuredDate"
+
+
+def test_apply_time_via_hints_does_not_mutate_input_catalog():
+    catalog, foreign_keys = _monitor_measurements_topology()
+    original_table_dicts = [dict(t) for t in catalog["tables"]]
+
+    apply_time_via_hints(catalog, foreign_keys)
+
+    for original in original_table_dicts:
+        assert "timeVia" not in original
 
 
 def test_apply_importance_writes_importance_score_into_every_table():

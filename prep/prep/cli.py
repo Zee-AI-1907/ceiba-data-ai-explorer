@@ -546,7 +546,7 @@ def _run_build_pipeline_p3b(
         resolve_auto_synonym_columns,
     )
     from prep.enrich.glossary import build_glossary_from_seed_file
-    from prep.enrich.importance import apply_importance_and_large_flag
+    from prep.enrich.importance import apply_importance_and_large_flag, apply_time_via_hints
     from prep.enrich.joingraph import build_join_graph
     from prep.enrich.vectors_phi_scan import run_gate_including_vectors
     from prep.exemplars import build_exemplars_json
@@ -572,6 +572,15 @@ def _run_build_pipeline_p3b(
         row_counts_by_table_id=row_counts,
         large_table_row_threshold=large_threshold,
     )
+    # Cardinality-guard remediation: a large/time-series table with no OWN
+    # time column (e.g. MonitorMeasurements, whose time dimension lives on
+    # the joined parent Monitors.MeasuredDate) gets a `timeVia` hint pointing
+    # at the parent table + column + join columns, derived from DECLARED FKs
+    # only (see enrich/importance.py `apply_time_via_hints` docstring). Must
+    # run after isLargeTimeSeries is set (above) and before catalog.json is
+    # written, so both the cardinality guard and the prompt's JOIN GRAPH
+    # renderer see the hint.
+    catalog = apply_time_via_hints(catalog, foreign_keys=keys["foreignKeys"])
     joingraph = build_join_graph(
         tables=catalog["tables"],
         primary_keys=keys["primaryKeys"],

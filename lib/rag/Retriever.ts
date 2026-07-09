@@ -41,6 +41,7 @@ import {
   type CatalogTable,
   type GlossaryMap,
   type JoinGraphEdge,
+  type TimeViaHint,
 } from './BundleLoader'
 import { Bm25Index, type Bm25Document } from './bm25'
 import { fuseTwo, type RankedItem } from './rankFusion'
@@ -83,6 +84,12 @@ export interface RenderedTable {
    * as PK/FK-only stubs — they exist to be joined THROUGH, not selected FROM.
    */
   role: 'primary' | 'bridge'
+  /**
+   * Cardinality-guard remediation: set when this table has no own time
+   * column but a declared FK reaches a parent table that does (see
+   * BundleLoader.ts `TimeViaHint`).
+   */
+  timeVia?: TimeViaHint
 }
 
 export interface JoinHint {
@@ -658,7 +665,18 @@ export class HybridRetriever implements Retriever {
   }
 
   private renderTable(table: CatalogTable, columnIdAllowlist?: Set<string>, role: 'primary' | 'bridge' = 'primary'): RenderedTable {
-    const requiredTimeColumn = table.columns.find((c) => c.isTimeColumn)?.quotedName
+    // Cardinality-guard remediation: a table can carry MORE THAN ONE
+    // isTimeColumn (e.g. staging.Shared.Monitors has CreatedDate,
+    // MeasuredDate, ValidationDate — only MeasuredDate is indexed and means
+    // "when this reading was taken"). Picking the first one found could
+    // silently name a non-indexed, semantically-wrong column as
+    // requiredTimeColumn. Prefer an INDEXED time column; fall back to the
+    // first when none is indexed (unchanged behavior for the common
+    // single-time-column case). Mirrors ceiba_nl2sql's retriever.py
+    // `_render_table` / prep's `_best_time_column_for_bounding`.
+    const timeColumns = table.columns.filter((c) => c.isTimeColumn)
+    const bestTimeColumn = timeColumns.find((c) => c.isIndexed) ?? timeColumns[0]
+    const requiredTimeColumn = bestTimeColumn?.quotedName
     const fkColumnNames = this.fkFromColumnsByTable(table.tableId)
     const sourceColumns =
       role === 'bridge'
@@ -683,6 +701,7 @@ export class HybridRetriever implements Retriever {
       isLargeTimeSeries: table.isLargeTimeSeries,
       requiredTimeColumn,
       role,
+      timeVia: table.timeVia,
     }
   }
 

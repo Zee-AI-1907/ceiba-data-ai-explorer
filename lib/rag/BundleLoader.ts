@@ -117,6 +117,25 @@ export interface CatalogIndex {
   method: string
 }
 
+/**
+ * Cardinality-guard remediation: how a large table with NO own time column
+ * (e.g. MonitorMeasurements — its time dimension lives on the joined parent
+ * Monitors.MeasuredDate) can still be bounded, via a directly-joined PARENT
+ * table's time column reached by an exact FK join. Populated by
+ * prep/prep/enrich/importance.py `apply_time_via_hints`; absent when the
+ * table has its own time column or no declared FK reaches a timed parent.
+ */
+export interface TimeViaHint {
+  /** Parent table's tableId, e.g. "staging.Shared.Monitors". */
+  table: string
+  /** Parent's bare time column name, e.g. "MeasuredDate". */
+  column: string
+  /** FK-side (this table's) join columns, e.g. ["DeviceId"]. */
+  fromColumns: string[]
+  /** PK-side (parent's) join columns, e.g. ["Id"]. */
+  toColumns: string[]
+}
+
 export interface CatalogTable {
   tableId: string
   sourceId: string
@@ -130,6 +149,8 @@ export interface CatalogTable {
   importanceScore: number
   columns: CatalogColumn[]
   indexes: CatalogIndex[]
+  /** See `TimeViaHint`. Undefined on an old bundle built before this hint existed. */
+  timeVia?: TimeViaHint
 }
 
 export interface CatalogJson {

@@ -23,6 +23,8 @@ from ceiba_nl2sql.retrieval.retriever import (
     JoinPath,
     RenderedColumn,
     RenderedTable,
+    TimeVia,
+    build_cardinality_warning_message,
 )
 
 CAPS = EngineCapabilities(
@@ -264,3 +266,113 @@ def test_assemble_repair_prompt_inherits_join_graph_and_semantic_hints():
 def test_preamble_includes_distinct_fanout_rule():
     prompt = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb")
     assert "COUNT(DISTINCT" in prompt
+
+
+# ── cardinality-guard remediation: multi-hop chain clarity + dialect note ──
+
+
+def test_render_join_graph_multi_hop_chain_states_exact_table_qualified_join_columns():
+    """Prompt-accuracy fix: the arrow-chain format used to render bare
+    `→(DeviceId=Id, N:1)` with no indication of which side each column
+    belongs to. A diagnosed staging benchmark showed the model join on the
+    wrong column pair (mm."Id" = m."Id" instead of mm."DeviceId" = m."Id")
+    despite this same join being named in the chain — the fully-qualified
+    `sourceRef."fromCol"=targetRef."toCol"` form must appear so there is no
+    shorthand left to misread.
+    """
+    path = JoinPath(
+        nodes=["mock.public.MeasurementsMock", "staging.Shared.Monitors", "mock.public.PatientMock"],
+        edges=[
+            JoinHint(
+                from_ref='"public"."MeasurementsMock"',
+                from_columns=["DeviceId"],
+                to_ref='"Shared"."Monitors"',
+                to_columns=["Id"],
+                join_cardinality="many-to-one",
+                cross_source=False,
+            ),
+            JoinHint(
+                from_ref='"Shared"."Monitors"',
+                from_columns=["AcceptanceId"],
+                to_ref='"public"."PatientMock"',
+                to_columns=["patientRef"],
+                join_cardinality="many-to-one",
+                cross_source=False,
+            ),
+        ],
+        hop_count=2,
+    )
+    tables = [_measurements_table(), _patients_table(), _monitors_bridge_table()]
+    rendered = _render_join_graph([], [path], tables)
+    assert 'mock."public"."MeasurementsMock"."DeviceId"=staging."Shared"."Monitors"."Id"' in rendered
+    assert 'staging."Shared"."Monitors"."AcceptanceId"=mock."public"."PatientMock"."patientRef"' in rendered
+
+
+def test_assemble_prompt_duckdb_dialect_note_warns_against_timestamp_now_literal():
+    """Prompt-accuracy fix: a diagnosed staging run showed a model emit the
+    Postgres-ism `TIMESTAMP 'now'`, which DuckDB rejects outright.
+    """
+    prompt = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb")
+    assert "TIMESTAMP 'now'" in prompt
+    assert "now()" in prompt
+
+
+def test_assemble_prompt_no_dialect_note_for_non_duckdb_target():
+    prompt = assemble_prompt([_measurements_table()], [], "q", CAPS, "postgres")
+    assert "TIMESTAMP 'now'" not in prompt
+
+
+# ── cardinality-guard remediation: warning message names the parent-join /
+# selective-column bounding options for a table with no own time column ────
+
+
+def _monitor_measurements_no_own_time_column_table() -> RenderedTable:
+    return RenderedTable(
+        table_id="staging.Shared.MonitorMeasurements",
+        quoted_ref='"Shared"."MonitorMeasurements"',
+        grain="one row per MonitorMeasurements reading, keyed by DeviceId",
+        columns=[
+            RenderedColumn(name="DeviceId", quoted_name='"DeviceId"', data_type="INTEGER", unit=None, is_time_column=False, is_indexed=True),
+            RenderedColumn(name="MeasurementTypeId", quoted_name='"MeasurementTypeId"', data_type="INTEGER", unit=None, is_time_column=False, is_indexed=True),
+            RenderedColumn(name="Id", quoted_name='"Id"', data_type="BIGINT", unit=None, is_time_column=False, is_indexed=True, is_foreign_key_or_primary_key=True),
+        ],
+        approx_row_count=344_225_600,
+        is_large_time_series=True,
+        required_time_column=None,
+        time_via=TimeVia(table_id="staging.Shared.Monitors", column="MeasuredDate", from_columns=["DeviceId"], to_columns=["Id"]),
+    )
+
+
+def test_cardinality_warning_names_parent_join_time_bound_when_time_via_set():
+    message = build_cardinality_warning_message(_monitor_measurements_no_own_time_column_table())
+    assert "join to Monitors" in message
+    assert "DeviceId=Id" in message
+    assert "MeasuredDate" in message
+
+
+def test_cardinality_warning_prefers_discriminator_shaped_column_over_entity_id_column():
+    """MonitorMeasurements has both DeviceId (entity-identifying) and
+    MeasurementTypeId (a coded discriminator) as indexed FK columns; the
+    warning's example column should name the discriminator, since filtering
+    "on a single DeviceId" is a materially different (and less obviously
+    useful) example than filtering by measurement type.
+    """
+    message = build_cardinality_warning_message(_monitor_measurements_no_own_time_column_table())
+    assert "MeasurementTypeId" in message
+    assert "selective column such as MeasurementTypeId" in message
+
+
+def test_cardinality_warning_own_time_column_case_unchanged():
+    message = build_cardinality_warning_message(_measurements_table())
+    assert 'you MUST include a time-bound predicate on "RecordedAt"' in message
+
+
+def test_assemble_prompt_hr_query_cardinality_warning_end_to_end():
+    """End-to-end: assembling the full prompt for a table with time_via set
+    surfaces the parent-join guidance in the CARDINALITY WARNINGS section."""
+    prompt = assemble_prompt(
+        [_monitor_measurements_no_own_time_column_table()], [], "patients with HR above 120 in last 3 hours", CAPS, "duckdb"
+    )
+    assert "CARDINALITY WARNINGS" in prompt
+    assert "join to Monitors" in prompt
+    assert "MeasuredDate" in prompt
