@@ -6,11 +6,8 @@ import { requireAuthWithPermission } from '@/lib/apiAuth'
 import { enforceBodySize, parseBody, clampLimit, QueryBodySchema } from '@/lib/validation'
 import { rateLimit } from '@/lib/rateLimiter'
 import { errorResponse, safeError, ErrorCodes } from '@/lib/errors'
-import { guardSql } from '@/lib/sqlGuard'
-import { getQueryEngine } from '@/lib/engine/provisioning'
 import { KNOWN_ATTACH_ALIASES, MOCK_ALIAS } from '@/lib/attachAliases'
-import { executeSqlViaService } from '@/lib/nl2sqlServiceClient'
-import { queryRuntime, warnIfRuntimesDiverge } from '@/lib/nl2sqlRuntime'
+import { executeSqlViaService, Nl2sqlServiceError } from '@/lib/nl2sqlServiceClient'
 import fs from 'fs'
 import path from 'path'
 
@@ -38,23 +35,16 @@ import path from 'path'
  *   7. engine.execute (maxRows + deadlineMs)     — bounded read
  *   8. safeError(…, 502)                          — H20 (never leak raw engine errors)
  *
- * ── PHASE 4: EXECUTION-RUNTIME CUTOVER FLAG (NL2SQL_QUERY_RUNTIME) ─────────────
- * docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 4, §2.2/§2.3. A single flag selects
- * WHERE the SQL executes:
- *   'python' (default, 2026-07 cutover) — POST the (already-guarded) SQL to the
- *                        Python FastAPI service; the ONLY path with single-source
- *                        native routing (docs/research/DUCKDB_PUSHDOWN.md §5.1).
- *   'ts'     (rollback) — the in-process getQueryEngine().execute path, unchanged.
- *                        service POST /nl2sql/execute.
- * CRITICAL: on BOTH paths steps 1–6 run IDENTICALLY in TS — in particular the
- * guardSql RE-GUARD (step 5) is the execution security boundary (§1.3) and runs
- * BEFORE any dispatch to the service. A write/DDL statement is rejected with 422
- * SCOPE and NEVER reaches the service. Only step 7 (the DuckDB call itself)
- * differs; step 8's audit + anomaly + H20 scrub are identical. Rollback is a
- * single env flip back to 'ts' — no redeploy (plan §5 "Rollback"). Dialect stays
- * aligned generate↔execute: with the Python runtime BOTH /nl2sql/generate and
- * /nl2sql/execute hit the SAME memoized engine (provisioning.py), so the P1 fix
- * holds structurally across the process boundary.
+ * ── EXECUTION: ALWAYS the Python NL→SQL service ───────────────────────────────
+ * docs/TS_RUNTIME_RETIREMENT_PLAN.md. The in-process TS DuckDbEngine and the TS
+ * guardSql re-guard have been RETIRED. This route is a thin proxy: it runs the
+ * coordination/compliance chain (auth → RBAC → org scoping → rate-limit → body
+ * caps → catalog/schema allowlist) and then POSTs the SQL to the service's
+ * /nl2sql/execute. The read-only SECURITY BOUNDARY is the service's own guard_sql
+ * (ceiba_nl2sql_service/app.py:279), which runs immediately before the DuckDB
+ * call; a rejected write/DDL returns kind:"guard", mapped here to 422 SCOPE. The
+ * DB read-only role remains the primary control. There is NO in-process fallback:
+ * an unreachable service is a hard outage (accepted trade — no env-flip rollback).
  */
 
 /**
@@ -169,10 +159,6 @@ interface QueryExecutionResult {
 }
 
 export async function POST(req: NextRequest) {
-  // ── 0. Runtime-divergence guard (§7.3): warn ONCE if generate/query runtimes
-  //    disagree (a misconfiguration that reopens the dialect-mismatch window). ──
-  warnIfRuntimesDiverge()
-
   // ── 1. AuthN + AuthZ ──
   const { session, error: authError } = await requireAuthWithPermission(req, 'query:run')
   if (authError) return authError
@@ -194,43 +180,29 @@ export async function POST(req: NextRequest) {
   const alias = resolveAlias(database)
   const targetSchema = resolveSchema(alias, schema)
 
-  // ── 6. SQL safety classifier (B1) — reject anything not a single read query ──
-  const guard = guardSql(sql, { catalog: alias, schema: targetSchema })
-  if (!guard.allowed) {
-    // Well-formed but semantically rejected → 422 SCOPE (per errors.ts convention).
-    await logWithSession(req, {
-      action: 'QUERY_FAILED',
-      resourceType: 'query',
-      detail: `SQL rejected by guard (${guard.statementType ?? 'unknown'}): ${sql.slice(0, 200)}`,
-      severity: 'WARNING',
-    })
-    return errorResponse(422, ErrorCodes.SCOPE, guard.reason ?? 'Query rejected: read-only queries only.')
-  }
-
-  // ── 7. Clamp limit (H22 — hard max) ──
+  // ── 6. Clamp limit (H22 — hard max) ──
   const rowLimit = clampLimit(limit, { max: MAX_QUERY_ROWS, fallback: DEFAULT_QUERY_ROWS })
 
-  // Correlation id: forwarded to the service (python path) so one NL→SQL request
-  // traces Next → FastAPI → DuckDB (§7.7). Reuse an inbound id if the caller set
-  // one. Computed here (before the try) so it is stable across both paths.
+  // Correlation id: forwarded to the service so one NL→SQL request traces
+  // Next → FastAPI → DuckDB (§7.7). Reuse an inbound id if the caller set one.
   const correlationId = req.headers.get('x-correlation-id') ?? randomUUID()
 
   try {
-    // ── 8. Execute — TS in-process engine (default) OR the Python service ──
-    // The guardSql RE-GUARD (step 6) has ALREADY run in TS above — a write/DDL
-    // statement was rejected with 422 BEFORE reaching here, so it never touches
-    // EITHER runtime. This step only moves the executor; the boundary stays TS.
-    const result =
-      queryRuntime() === 'python'
-        ? await executeViaPythonService({
-            sql,
-            alias,
-            targetSchema,
-            rowLimit,
-            session,
-            correlationId,
-          })
-        : await executeViaTsEngine({ sql, alias, targetSchema, rowLimit })
+    // ── 7. Execute via the Python service (the ONLY runtime; TS engine retired).
+    // The read-only SECURITY BOUNDARY is now the service's own guard_sql, which
+    // runs immediately before the DuckDB call (ceiba_nl2sql_service/app.py:279) —
+    // a write/DDL statement is rejected there with kind:"guard", mapped below to
+    // 422 SCOPE (preserving this route's client contract). The DB read-only role
+    // remains the primary control; the catalog/schema allowlist (step 5) stays
+    // TS-side as an identifier-injection coordination control.
+    const result = await executeViaPythonService({
+      sql,
+      alias,
+      targetSchema,
+      rowLimit,
+      session,
+      correlationId,
+    })
 
     const columns = result.columns.map((c) => ({ key: c.name, label: c.name, type: c.type }))
 
@@ -276,6 +248,19 @@ export async function POST(req: NextRequest) {
       truncated: result.truncated,
     })
   } catch (e) {
+    // The read-only guard now lives in the service: a rejected write/DDL comes
+    // back as Nl2sqlServiceError kind:"guard". Map it to 422 SCOPE (the contract
+    // the in-process TS guard used to produce directly) and still write the
+    // QUERY_FAILED audit line so guard rejections stay in the hash chain (§7.5).
+    if (e instanceof Nl2sqlServiceError && e.kind === 'guard') {
+      await logWithSession(req, {
+        action: 'QUERY_FAILED',
+        resourceType: 'query',
+        detail: `SQL rejected by service guard: ${sql.slice(0, 200)}`,
+        severity: 'WARNING',
+      })
+      return errorResponse(422, ErrorCodes.SCOPE, e.message || 'Query rejected: read-only queries only.')
+    }
     // H20: never leak raw engine errors. Log full detail under the audit chain,
     // return a generic 502 envelope.
     await logWithSession(req, {
@@ -288,50 +273,19 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ── execution runtimes (both behind the SAME TS boundary) ─────────────────────
+// ── execution via the Python NL→SQL service (the only runtime) ────────────────
 
 /**
- * executeViaTsEngine — the default in-process path. Executes via the SHARED
- * QueryEngine (lib/engine/provisioning.ts) that /api/sql-generate EXPLAIN-validates
- * against, so the dialect executed is IDENTICAL to the dialect generation validated
- * (the P1 fix). engine.execute enforces maxRows (row cap + `truncated`) and
- * deadlineMs; the DuckDbEngine additionally guarantees every attached source is
- * READ_ONLY (hard-error on non-READ_ONLY attach + re-check of
- * duckdb_databases().readonly).
- */
-async function executeViaTsEngine(args: {
-  sql: string
-  alias: string
-  targetSchema: string
-  rowLimit: number
-}): Promise<QueryExecutionResult> {
-  const engine = await getQueryEngine()
-  const result = await engine.execute(args.sql, {
-    catalog: args.alias,
-    schema: args.targetSchema,
-    maxRows: args.rowLimit,
-    deadlineMs: QUERY_DEADLINE_MS,
-  })
-  return {
-    columns: result.columns.map((c) => ({ name: c.name, type: c.type })),
-    rows: result.rows,
-    rowCount: result.rowCount,
-    truncated: result.truncated,
-  }
-}
-
-/**
- * executeViaPythonService — the flag-on path (NL2SQL_QUERY_RUNTIME=python). POSTs
- * the ALREADY-GUARDED sql (guardSql ran in TS above — the boundary) to
- * /nl2sql/execute, forwarding the internal Bearer token + correlation id. The
- * TS-clamped rowLimit becomes `maxRows`, the TS wall-clock budget becomes
- * `deadlineMs`, and the already-validated alias/schema are forwarded (the service
- * re-guards + re-caps as defense in depth, §1.3). Dialect alignment is structural:
- * the service's /nl2sql/execute and /nl2sql/generate share one memoized engine.
+ * executeViaPythonService — POSTs the sql to /nl2sql/execute, forwarding the
+ * internal Bearer token + correlation id. The TS-clamped rowLimit becomes
+ * `maxRows`, the TS wall-clock budget becomes `deadlineMs`, and the
+ * allowlist-validated alias/schema are forwarded. The service runs its OWN
+ * guard_sql (the read-only security boundary) immediately before DuckDB and
+ * re-caps rows as defense in depth.
  *
  * Any Nl2sqlServiceError (guard/engine/internal/auth/unavailable/timeout) or
- * transport failure propagates to the route's catch → safeError(502); no raw
- * upstream body reaches the client (H20).
+ * transport failure propagates to the route's catch: kind:"guard" → 422 SCOPE,
+ * everything else → safeError(502); no raw upstream body reaches the client (H20).
  */
 async function executeViaPythonService(args: {
   sql: string

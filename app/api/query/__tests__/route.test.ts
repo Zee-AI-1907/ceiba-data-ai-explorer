@@ -1,48 +1,33 @@
 /**
- * route.test.ts — POST /api/query engine migration (NL2SQL_SPEC.md §5.6; P1 fix).
+ * route.test.ts — POST /api/query as a thin always-python proxy
+ * (docs/TS_RUNTIME_RETIREMENT_PLAN.md §6). The in-process TS DuckDbEngine and the
+ * TS guardSql re-guard have been RETIRED; this route now does auth + RBAC + org
+ * scoping + rate-limit + body caps + the catalog/schema allowlist, then POSTs to
+ * the Python service's /nl2sql/execute and runs the audit/anomaly post-pipeline.
  *
- * Proves the P1 dialect-mismatch fix and that all WS-F hardening survived the
- * migration from `executeTrinoQuery` to the shared DuckDbEngine:
+ * The read-only SECURITY BOUNDARY is now the service's own guard_sql (verified in
+ * ceiba_nl2sql_service/tests/test_execute.py + ceiba_nl2sql/tests/test_sqlguard.py).
+ * A rejected write/DDL comes back as an error envelope kind:"guard", which this
+ * route maps to 422 SCOPE (preserving the historical client contract).
  *
- *   • /api/query EXECUTES a read-only SELECT via DuckDbEngine and returns rows
- *     (hermetic: a DuckDB-native file source attached READ_ONLY — no live PG needed).
- *   • a write / DDL statement is rejected (guardSql 422 + the attach is read-only,
- *     so even a bypass could not write).
- *   • the generation route's dialect === the execution route's dialect (both
- *     'duckdb') — the mismatch is eliminated at the source (shared provisioning).
- *   • existing hardening is intact: 401 (unauth), 400 (bad body), 413 (oversize),
- *     429 (rate limit), and the catalog/schema allowlist rejects arbitrary values.
- *
- * Fully hermetic + CI-safe: the shared engine is injected via
- * `__setQueryEngineForTest` with a DuckDB **file** source (no :55432 staging, no
- * network). It does NOT depend on the :55433 mock Postgres.
+ * Fully hermetic: the service call is mocked via the __setServiceFetchForTest seam
+ * (no live FastAPI, no DuckDB, no network).
  */
 
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { NextRequest } from 'next/server'
-import { DuckDBInstance } from '@duckdb/node-api'
-import { DuckDbEngine } from '@/lib/engine/DuckDbEngine'
-import type { AttachSpec } from '@/lib/engine/QueryEngine'
-import { __setQueryEngineForTest, resolvedDialect } from '@/lib/engine/provisioning'
 import { signSession } from '@/lib/session'
 import { resetRateLimit, rateLimitKey } from '@/lib/rateLimiter'
 import { getRecentAuditEvents } from '@/lib/auditLog'
 import { __setUserResolverForTest, type User } from '@/lib/authStore'
 import { POST, __setServiceFetchForTest } from '../route'
 
-// Orgs these tests forge sessions into. requireAuthWithPermission now re-resolves
-// the effective role from the live store (multi-org plan §2.3, revocation-safe),
-// so a forged synthetic principal must be resolvable with a membership in each
-// forged org. Install a test-only resolver that returns such a synthetic user;
-// the role is 'clinician' everywhere (matching every forged session in this file).
+// Orgs these tests forge sessions into. requireAuthWithPermission re-resolves the
+// effective role from the live store (multi-org plan §2.3, revocation-safe), so a
+// forged principal must be resolvable with a membership in each forged org.
 const FORGED_ORGS = ['orgA', 'orgX', 'orgAudit', 'orgFail']
 
-beforeAll(() => {
-  // requireAuthWithPermission -> verifySession needs a signing secret.
-  process.env.SESSION_SECRET = process.env.SESSION_SECRET ?? 'test-session-secret-0123456789'
+function allOrgsResolver() {
   __setUserResolverForTest((id: string): User => ({
     id,
     email: `${id}@test.local`,
@@ -52,50 +37,15 @@ beforeAll(() => {
     name: id,
     createdAt: new Date(0).toISOString(),
   }))
+}
+
+beforeAll(() => {
+  process.env.SESSION_SECRET = process.env.SESSION_SECRET ?? 'test-session-secret-0123456789'
+  allOrgsResolver()
 })
 
 afterAll(() => {
   __setUserResolverForTest(null)
-})
-
-// ── hermetic DuckDB-native source (no PG, no network) ─────────────────────────
-
-let workDir: string
-let engine: DuckDbEngine
-
-beforeAll(async () => {
-  workDir = path.join(tmpdir(), `nl2sql-query-route-${process.pid}-${Date.now()}`)
-  mkdirSync(workDir, { recursive: true })
-  const dbPath = path.join(workDir, 'hermetic.duckdb')
-
-  // Seed a tiny DuckDB file whose `public` schema holds a couple of rows. Attaching
-  // it under alias `mock` mirrors the runtime topology (alias `mock` = MOCK_DSN),
-  // but as a DuckDB-native file it needs no Postgres — fully hermetic.
-  const seedInstance = await DuckDBInstance.create(dbPath)
-  const seedConn = await seedInstance.connect()
-  await seedConn.run('CREATE SCHEMA IF NOT EXISTS public')
-  await seedConn.run(`
-    CREATE TABLE public."VisitMock" (
-      "visitRef" INTEGER PRIMARY KEY,
-      "patientRef" INTEGER,
-      "admittedAt" TIMESTAMPTZ
-    )`)
-  await seedConn.run(`INSERT INTO public."VisitMock" VALUES
-    (1, 100, now() - INTERVAL '12 hours'),
-    (2, 101, now() - INTERVAL '6 hours')`)
-  seedConn.closeSync()
-  seedInstance.closeSync()
-
-  engine = new DuckDbEngine()
-  const specs: AttachSpec[] = [{ sourceId: 'mock', engine: 'duckdb', dsn: dbPath, readOnly: true, alias: 'mock' }]
-  await engine.attach(specs)
-  __setQueryEngineForTest(engine)
-})
-
-afterAll(async () => {
-  __setQueryEngineForTest(null)
-  await engine.dispose()
-  if (existsSync(workDir)) rmSync(workDir, { recursive: true, force: true })
 })
 
 // ── request builder ───────────────────────────────────────────────────────────
@@ -133,270 +83,68 @@ function makeReq(opts: MakeReqOptions = {}): NextRequest {
   }) as unknown as NextRequest
 }
 
+/** A service /nl2sql/execute success body (ExecuteResponse). */
+const SERVICE_SUCCESS = {
+  columns: [
+    { name: 'visitRef', type: 'INTEGER' },
+    { name: 'patientRef', type: 'INTEGER' },
+  ],
+  rows: [
+    { visitRef: 1, patientRef: 100 },
+    { visitRef: 2, patientRef: 101 },
+  ],
+  rowCount: 2,
+  truncated: false,
+}
+
+/** Build a mocked fetch returning a chosen status + JSON body, capturing the call. */
+function mockServiceFetch(status: number, body: unknown) {
+  const calls: Array<{ url: string; init: RequestInit }> = []
+  const fetchImpl = (async (url: unknown, init: unknown) => {
+    calls.push({ url: String(url), init: init as RequestInit })
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })
+  }) as unknown as typeof fetch
+  return { fetchImpl, calls }
+}
+
 beforeEach(() => {
   resetRateLimit(rateLimitKey({ userId: 'user-1' }, 'query'))
   resetRateLimit(rateLimitKey({ userId: 'user-2' }, 'query'))
+  vi.stubEnv('NL2SQL_SERVICE_URL', 'http://nl2sql.test:8088')
+  vi.stubEnv('NL2SQL_SERVICE_TOKEN', 'test-service-token')
 })
 
-describe('POST /api/query — executes via DuckDbEngine (P1 fix)', () => {
-  it('executes a read-only SELECT and returns rows', async () => {
-    const res = await POST(
-      makeReq({ body: { sql: 'SELECT 1 AS n, 2 AS m', database: 'mock', schema: 'public' } })
-    )
-    expect(res.status).toBe(200)
-    const json = await res.json()
-    expect(Array.isArray(json.rows)).toBe(true)
-    expect(json.rows.length).toBe(1)
-    expect(json.rowCount).toBe(1)
-    expect(json.columns.map((c: { key: string }) => c.key)).toEqual(['n', 'm'])
-  })
-
-  it('reads rows from the attached (read-only) source', async () => {
-    const res = await POST(
-      makeReq({ body: { sql: 'SELECT "visitRef", "patientRef" FROM mock.public."VisitMock" ORDER BY "visitRef"' } })
-    )
-    expect(res.status).toBe(200)
-    const json = await res.json()
-    expect(json.rowCount).toBe(2)
-    expect(json.rows[0].patientRef).toBe(100)
-  })
-
-  it('interval syntax that generation validated as duckdb executes cleanly here', async () => {
-    // The exact dialect construct the P1 gap risked (INTERVAL): validated as duckdb
-    // in /api/sql-generate, so it MUST run on the duckdb execution engine too.
-    const res = await POST(
-      makeReq({
-        body: {
-          sql: `SELECT "visitRef" FROM mock.public."VisitMock" WHERE "admittedAt" >= now() - INTERVAL '1 day'`,
-        },
-      })
-    )
-    expect(res.status).toBe(200)
-    const json = await res.json()
-    expect(json.rowCount).toBe(2)
-  })
+afterEach(() => {
+  __setServiceFetchForTest(null)
+  vi.unstubAllEnvs()
 })
 
-describe('POST /api/query — write / DDL rejected', () => {
-  it('rejects a DELETE with 422 SCOPE (guardSql)', async () => {
-    const res = await POST(makeReq({ body: { sql: 'DELETE FROM mock.public."VisitMock"' } }))
-    expect(res.status).toBe(422)
-    const json = await res.json()
-    expect(json.error.code).toBe('SCOPE')
-    expect(json.error.message).not.toMatch(/stack|at Object/i)
-  })
+// ── happy path: proxy to the service ──────────────────────────────────────────
 
-  it('rejects DDL (CREATE TABLE) with 422 SCOPE', async () => {
-    const res = await POST(makeReq({ body: { sql: 'CREATE TABLE public.evil (x INT)' } }))
-    expect(res.status).toBe(422)
-    expect((await res.json()).error.code).toBe('SCOPE')
-  })
-
-  it('rejects a comment-prefixed write (B1 bypass vector)', async () => {
-    const res = await POST(
-      makeReq({ body: { sql: `/* x */ DELETE FROM mock.public."VisitMock"` } })
-    )
-    expect(res.status).toBe(422)
-    expect((await res.json()).error.code).toBe('SCOPE')
-  })
-})
-
-describe('POST /api/query — dialect matches generation (mismatch eliminated)', () => {
-  it('the execution engine dialect === the resolved provisioning dialect (both duckdb)', () => {
-    // /api/sql-generate labels its response with `deps.engine.dialect()`, and
-    // deps.engine === getQueryEngine() (shared provisioning). The execution engine
-    // this route runs on is that same engine. resolvedDialect() is the config-derived
-    // dialect both routes agree on.
-    expect(engine.dialect()).toBe('duckdb')
-    expect(resolvedDialect()).toBe('duckdb')
-    expect(engine.dialect()).toBe(resolvedDialect())
-  })
-})
-
-describe('POST /api/query — catalog/schema allowlist (H22 identifier injection)', () => {
-  it('an unknown database alias is NOT forwarded verbatim (falls back to safe default)', async () => {
-    // `database: 'evil; DROP'` is neither in the allowlist nor identifier-shaped; the
-    // route falls back to the default alias and still runs the (guard-passed) SELECT.
-    const res = await POST(
-      makeReq({ body: { sql: 'SELECT 1 AS n', database: 'evil; DROP TABLE x', schema: 'public' } })
-    )
-    expect(res.status).toBe(200)
-  })
-
-  it('an unknown schema falls back to the default schema', async () => {
-    const res = await POST(
-      makeReq({ body: { sql: 'SELECT 1 AS n', database: 'mock', schema: 'not a schema' } })
-    )
-    expect(res.status).toBe(200)
-  })
-})
-
-describe('POST /api/query — hardening is preserved', () => {
-  it('401 when unauthenticated', async () => {
-    const res = await POST(makeReq({ authenticated: false }))
-    expect(res.status).toBe(401)
-  })
-
-  it('401 when the live store shows the caller is NOT a member of the forged org (membership boundary, not just HMAC)', async () => {
-    // Prove the route enforces LIVE membership, not merely a validly-signed
-    // cookie: install a resolver whose synthetic user has NO membership in the
-    // forged org, so requireAuthWithPermission's re-resolution finds no role → 401.
-    __setUserResolverForTest((id: string): User => ({
-      id,
-      email: `${id}@test.local`,
-      passwordHash: 'x',
-      memberships: [{ orgId: 'some-other-org', role: 'clinician' as const }],
-      defaultOrgId: 'some-other-org',
-      name: id,
-      createdAt: new Date(0).toISOString(),
-    }))
-    try {
-      // The cookie is validly HMAC-signed into orgA, but the caller is not a
-      // member of orgA in the live store.
-      const res = await POST(makeReq({ orgId: 'orgA' }))
-      expect(res.status).toBe(401)
-    } finally {
-      // Restore the default all-orgs resolver for the remaining tests.
-      __setUserResolverForTest((id: string): User => ({
-        id,
-        email: `${id}@test.local`,
-        passwordHash: 'x',
-        memberships: FORGED_ORGS.map((orgId) => ({ orgId, role: 'clinician' as const })),
-        defaultOrgId: FORGED_ORGS[0],
-        name: id,
-        createdAt: new Date(0).toISOString(),
-      }))
-    }
-  })
-
-  it('400 when the body fails the schema (missing sql)', async () => {
-    const res = await POST(makeReq({ body: { database: 'mock' } }))
-    expect(res.status).toBe(400)
-    expect((await res.json()).error.code).toBe('VALIDATION')
-  })
-
-  it('413 when Content-Length exceeds the body-size cap', async () => {
-    const res = await POST(makeReq({ contentLength: 5 * 1024 * 1024 }))
-    expect(res.status).toBe(413)
-  })
-
-  it('429 once the per-user rate limit is exceeded', async () => {
-    // query limit is 30/min; drain it, then the next call is limited.
-    let lastStatus = 0
-    for (let i = 0; i < 31; i++) {
-      // eslint-disable-next-line no-await-in-loop
-      const res = await POST(makeReq())
-      lastStatus = res.status
-    }
-    expect(lastStatus).toBe(429)
-  })
-})
-
-// ── Phase 4: NL2SQL_QUERY_RUNTIME=python cutover (mocked service fetch) ────────
-//
-// Proves the flag-on EXECUTION path (a) keeps ALL the TS hardening, (b) runs the
-// guardSql RE-GUARD in TS BEFORE any service dispatch (a DELETE never reaches the
-// service — the boundary stays TS, §1.3), (c) sends the correct request shape
-// (bearer token + correlation id + tenantId/context + clamped maxRows + deadline)
-// to /nl2sql/execute, (d) maps the {columns,rows,rowCount,truncated} response back
-// to the route's client shape, (e) maps a service error envelope / transport
-// failure onto a generic safeError 502 (H20), and (f) still writes the audit
-// event. All with a MOCKED fetch (no live service, fully hermetic). The default
-// 'ts' path is covered by every describe above; those run with the flag unset.
-
-describe('POST /api/query — python runtime (NL2SQL_QUERY_RUNTIME=python)', () => {
-  /** A service /nl2sql/execute success body (ExecuteResponse). */
-  const SERVICE_SUCCESS = {
-    columns: [
-      { name: 'visitRef', type: 'INTEGER' },
-      { name: 'patientRef', type: 'INTEGER' },
-    ],
-    rows: [
-      { visitRef: 1, patientRef: 100 },
-      { visitRef: 2, patientRef: 101 },
-    ],
-    rowCount: 2,
-    truncated: false,
-  }
-
-  /** Build a mocked fetch returning a chosen status + JSON body, capturing the call. */
-  function mockServiceFetch(status: number, body: unknown) {
-    const calls: Array<{ url: string; init: RequestInit }> = []
-    const fetchImpl = (async (url: unknown, init: unknown) => {
-      calls.push({ url: String(url), init: init as RequestInit })
-      return new Response(JSON.stringify(body), {
-        status,
-        headers: { 'content-type': 'application/json' },
-      })
-    }) as unknown as typeof fetch
-    return { fetchImpl, calls }
-  }
-
-  beforeEach(() => {
-    vi.stubEnv('NL2SQL_QUERY_RUNTIME', 'python')
-    vi.stubEnv('NL2SQL_SERVICE_URL', 'http://nl2sql.test:8088')
-    vi.stubEnv('NL2SQL_SERVICE_TOKEN', 'test-service-token')
-  })
-
-  afterEach(() => {
-    __setServiceFetchForTest(null)
-    vi.unstubAllEnvs()
-  })
-
-  it('keeps the auth hardening (401 unauthenticated) before ever calling the service', async () => {
-    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
-    __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ authenticated: false }))
-    expect(res.status).toBe(401)
-    expect(calls).toHaveLength(0) // never reached the service
-  })
-
-  it('keeps the body-validation hardening (400 missing sql) before ever calling the service', async () => {
-    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
-    __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ body: { database: 'mock' } }))
-    expect(res.status).toBe(400)
-    expect((await res.json()).error.code).toBe('VALIDATION')
-    expect(calls).toHaveLength(0)
-  })
-
-  it('keeps the body-size hardening (413) before ever calling the service', async () => {
-    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
-    __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ contentLength: 5 * 1024 * 1024 }))
-    expect(res.status).toBe(413)
-    expect(calls).toHaveLength(0)
-  })
-
-  it('keeps the rate-limit hardening (429) before ever calling the service', async () => {
+describe('POST /api/query — proxies execution to the Python service', () => {
+  it('executes a read-only SELECT and maps the service response to the client shape', async () => {
     const { fetchImpl } = mockServiceFetch(200, SERVICE_SUCCESS)
     __setServiceFetchForTest(fetchImpl)
-    let lastStatus = 0
-    for (let i = 0; i < 31; i++) {
-      // eslint-disable-next-line no-await-in-loop
-      const res = await POST(makeReq())
-      lastStatus = res.status
-    }
-    expect(lastStatus).toBe(429)
+    const res = await POST(makeReq({ body: { sql: 'SELECT "visitRef","patientRef" FROM mock.public."VisitMock"' } }))
+    expect(res.status).toBe(200)
+    const json = await res.json()
+    expect(json.rowCount).toBe(2)
+    expect(json.rows).toEqual(SERVICE_SUCCESS.rows)
+    // engine {name,type} → client {key,label,type}
+    expect(json.columns).toEqual([
+      { key: 'visitRef', label: 'visitRef', type: 'INTEGER' },
+      { key: 'patientRef', label: 'patientRef', type: 'INTEGER' },
+    ])
   })
 
-  it('guardSql REJECTS a write (DELETE) in TS BEFORE any service dispatch (boundary stays TS)', async () => {
-    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+  it('surfaces truncation from the service', async () => {
+    const { fetchImpl } = mockServiceFetch(200, { ...SERVICE_SUCCESS, rowCount: 1, truncated: true })
     __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ body: { sql: 'DELETE FROM mock.public."VisitMock"' } }))
-    expect(res.status).toBe(422)
-    expect((await res.json()).error.code).toBe('SCOPE')
-    // The service was NEVER called — the DELETE never left the TS boundary.
-    expect(calls).toHaveLength(0)
-  })
-
-  it('guardSql REJECTS a comment-prefixed write (B1 bypass) before dispatch', async () => {
-    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
-    __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ body: { sql: `/* x */ DROP TABLE mock.public."VisitMock"` } }))
-    expect(res.status).toBe(422)
-    expect((await res.json()).error.code).toBe('SCOPE')
-    expect(calls).toHaveLength(0)
+    const res = await POST(makeReq())
+    expect((await res.json()).truncated).toBe(true)
   })
 
   it('sends the correct request shape (bearer, correlation id, tenantId, context, clamped maxRows, deadline)', async () => {
@@ -433,61 +181,57 @@ describe('POST /api/query — python runtime (NL2SQL_QUERY_RUNTIME=python)', () 
   it('forwards an inbound x-correlation-id unchanged to the service', async () => {
     const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
     __setServiceFetchForTest(fetchImpl)
-    const req = makeReq({ body: { sql: 'SELECT 1 AS n' } })
+    const req = makeReq()
     req.headers.set('x-correlation-id', 'trace-abc-123')
     const res = await POST(req)
     expect(res.status).toBe(200)
     expect(new Headers(calls[0].init.headers).get('x-correlation-id')).toBe('trace-abc-123')
   })
+})
 
-  it('maps the service {columns,rows,rowCount,truncated} back to the route response shape', async () => {
-    const { fetchImpl } = mockServiceFetch(200, SERVICE_SUCCESS)
+// ── the relocated read-only boundary: service kind:"guard" → 422 SCOPE ────────
+
+describe('POST /api/query — write/DDL rejected by the service guard → 422 SCOPE', () => {
+  it('maps a service guard envelope (422 kind:"guard") to 422 SCOPE', async () => {
+    const { fetchImpl } = mockServiceFetch(422, {
+      error: { kind: 'guard', message: 'SQL rejected by the read-only guard.' },
+    })
     __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ body: { sql: 'SELECT 1 AS n' } }))
-    expect(res.status).toBe(200)
-    expect(res.headers.get('content-type')).toContain('application/json')
-
+    const res = await POST(makeReq({ body: { sql: 'DELETE FROM mock.public."VisitMock"' } }))
+    expect(res.status).toBe(422)
     const json = await res.json()
-    expect(json.rowCount).toBe(2)
-    expect(json.truncated).toBe(false)
-    expect(json.rows).toEqual(SERVICE_SUCCESS.rows)
-    // engine {name,type} → client {key,label,type}.
-    expect(json.columns).toEqual([
-      { key: 'visitRef', label: 'visitRef', type: 'INTEGER' },
-      { key: 'patientRef', label: 'patientRef', type: 'INTEGER' },
-    ])
+    expect(json.error.code).toBe('SCOPE')
+    expect(json.error.message).not.toMatch(/stack|at Object/i)
   })
 
-  it('surfaces truncation from the service', async () => {
-    const { fetchImpl } = mockServiceFetch(200, { ...SERVICE_SUCCESS, rowCount: 1, truncated: true })
+  it('writes a QUERY_FAILED audit line for a guard rejection (audit chain keeps guard events)', async () => {
+    const { fetchImpl } = mockServiceFetch(422, {
+      error: { kind: 'guard', message: 'SQL rejected by the read-only guard.' },
+    })
     __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ body: { sql: 'SELECT 1 AS n' } }))
-    expect((await res.json()).truncated).toBe(true)
+    const before = getRecentAuditEvents(50, 'orgFail').length
+    const res = await POST(makeReq({ orgId: 'orgFail', body: { sql: 'DROP TABLE mock.public."VisitMock"' } }))
+    expect(res.status).toBe(422)
+    const events = getRecentAuditEvents(50, 'orgFail')
+    expect(events.length).toBeGreaterThan(before)
+    expect(events[0].action).toBe('QUERY_FAILED')
+    expect(events[0].orgId).toBe('orgFail')
   })
+})
 
-  it('maps a service error envelope (502 engine) to a safeError 502 with NO leaked detail', async () => {
+// ── error mapping (non-guard) ─────────────────────────────────────────────────
+
+describe('POST /api/query — service/transport errors → safeError 502 (H20)', () => {
+  it('maps a service engine error (502) to a safeError 502 with NO leaked detail', async () => {
     const { fetchImpl } = mockServiceFetch(502, {
       error: { kind: 'engine', message: 'DuckDB Binder Error: no such column secret_internal_detail' },
     })
     __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ body: { sql: 'SELECT 1 AS n' } }))
+    const res = await POST(makeReq())
     expect(res.status).toBe(502)
     const json = await res.json()
     expect(json.error.code).toBe('UPSTREAM')
-    // H20: the raw upstream message never reaches the client.
     expect(json.error.message).not.toMatch(/DuckDB|secret_internal_detail|Binder/i)
-  })
-
-  it('maps a service guard envelope (422) to a safeError 502 (defense-in-depth signal, not a client 422)', async () => {
-    // The TS guard already passed (it is the boundary); a service-side guard
-    // rejection is an internal inconsistency surfaced as a generic upstream 502.
-    const { fetchImpl } = mockServiceFetch(422, {
-      error: { kind: 'guard', message: 'rejected by read-only guard' },
-    })
-    __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ body: { sql: 'SELECT 1 AS n' } }))
-    expect(res.status).toBe(502)
-    expect((await res.json()).error.code).toBe('UPSTREAM')
   })
 
   it('maps a transport failure to a safeError 502', async () => {
@@ -495,18 +239,102 @@ describe('POST /api/query — python runtime (NL2SQL_QUERY_RUNTIME=python)', () 
       throw new TypeError('fetch failed')
     }) as unknown as typeof fetch
     __setServiceFetchForTest(fetchImpl)
-    const res = await POST(makeReq({ body: { sql: 'SELECT 1 AS n' } }))
+    const res = await POST(makeReq())
     expect(res.status).toBe(502)
     expect((await res.json()).error.code).toBe('UPSTREAM')
   })
+})
 
-  it('writes the QUERY_RUN audit event on the python success path', async () => {
+// ── catalog/schema allowlist (H22 identifier injection) — stays TS-side ───────
+
+describe('POST /api/query — catalog/schema allowlist (coordination control)', () => {
+  it('an unknown database alias falls back to the safe default (not forwarded verbatim)', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(
+      makeReq({ body: { sql: 'SELECT 1 AS n', database: 'evil; DROP TABLE x', schema: 'public' } })
+    )
+    expect(res.status).toBe(200)
+    // the injected alias is NOT forwarded; the safe default 'mock' is.
+    expect(JSON.parse(calls[0].init.body as string).database).toBe('mock')
+  })
+
+  it('an unknown schema falls back to the default schema', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ body: { sql: 'SELECT 1 AS n', database: 'mock', schema: 'not a schema' } }))
+    expect(res.status).toBe(200)
+    expect(JSON.parse(calls[0].init.body as string).schema).toBe('public')
+  })
+})
+
+// ── hardening runs BEFORE any service dispatch ────────────────────────────────
+
+describe('POST /api/query — hardening is preserved and gates before dispatch', () => {
+  it('401 when unauthenticated (never calls the service)', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ authenticated: false }))
+    expect(res.status).toBe(401)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('401 when the live store shows the caller is NOT a member of the forged org', async () => {
+    __setUserResolverForTest((id: string): User => ({
+      id,
+      email: `${id}@test.local`,
+      passwordHash: 'x',
+      memberships: [{ orgId: 'some-other-org', role: 'clinician' as const }],
+      defaultOrgId: 'some-other-org',
+      name: id,
+      createdAt: new Date(0).toISOString(),
+    }))
+    try {
+      const res = await POST(makeReq({ orgId: 'orgA' }))
+      expect(res.status).toBe(401)
+    } finally {
+      allOrgsResolver()
+    }
+  })
+
+  it('400 when the body fails the schema (missing sql), never calls the service', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ body: { database: 'mock' } }))
+    expect(res.status).toBe(400)
+    expect((await res.json()).error.code).toBe('VALIDATION')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('413 when Content-Length exceeds the body-size cap', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ contentLength: 5 * 1024 * 1024 }))
+    expect(res.status).toBe(413)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('429 once the per-user rate limit is exceeded', async () => {
+    const { fetchImpl } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    let lastStatus = 0
+    for (let i = 0; i < 31; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await POST(makeReq())
+      lastStatus = res.status
+    }
+    expect(lastStatus).toBe(429)
+  })
+})
+
+// ── audit / anomaly post-pipeline (stays TS-side) ─────────────────────────────
+
+describe('POST /api/query — audit events (TS-side hash chain)', () => {
+  it('writes the QUERY_RUN audit event on the success path', async () => {
     const { fetchImpl } = mockServiceFetch(200, SERVICE_SUCCESS)
     __setServiceFetchForTest(fetchImpl)
     const before = getRecentAuditEvents(50, 'orgAudit').length
-    const res = await POST(
-      makeReq({ orgId: 'orgAudit', body: { sql: `SELECT ${Math.floor(Math.random() * 1e6)} AS n` } })
-    )
+    const res = await POST(makeReq({ orgId: 'orgAudit', body: { sql: `SELECT ${Math.floor(Math.random() * 1e6)} AS n` } }))
     expect(res.status).toBe(200)
     const events = getRecentAuditEvents(50, 'orgAudit')
     expect(events.length).toBeGreaterThan(before)
@@ -515,13 +343,11 @@ describe('POST /api/query — python runtime (NL2SQL_QUERY_RUNTIME=python)', () 
     expect(events[0].rowsAffected).toBe(2)
   })
 
-  it('writes the QUERY_FAILED audit event on the python error path', async () => {
+  it('writes the QUERY_FAILED audit event on the error path', async () => {
     const { fetchImpl } = mockServiceFetch(502, { error: { kind: 'engine', message: 'boom' } })
     __setServiceFetchForTest(fetchImpl)
     const before = getRecentAuditEvents(50, 'orgFail').length
-    const res = await POST(
-      makeReq({ orgId: 'orgFail', body: { sql: `SELECT ${Math.floor(Math.random() * 1e6)} AS n` } })
-    )
+    const res = await POST(makeReq({ orgId: 'orgFail', body: { sql: `SELECT ${Math.floor(Math.random() * 1e6)} AS n` } }))
     expect(res.status).toBe(502)
     const events = getRecentAuditEvents(50, 'orgFail')
     expect(events.length).toBeGreaterThan(before)
