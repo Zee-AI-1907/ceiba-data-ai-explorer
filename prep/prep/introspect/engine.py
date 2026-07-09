@@ -12,7 +12,11 @@ method on this Protocol that reads cell data. Every other method reads
 information_schema / pg_catalog (or the DB-agnostic equivalent) — schema
 metadata only, never a row value. `sample_aggregate` returns the same
 PHI-suppressed `AggregateProfile` shape `lib/phiScrubber.ts.buildAggregateProfile`
-defines (mirrored in Python by `prep.profile.AggregateProfile`, see profile.py).
+defines (mirrored in Python by
+`ceiba_nl2sql.compliance.aggregate_profile.AggregateProfile` — moved there
+from `prep/prep/profile.py` in Phase 1 of
+docs/PYTHON_NL2SQL_SERVICE_PLAN.md so it is shared with the future NL->SQL
+service).
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from prep.profile import AggregateProfile
+    from ceiba_nl2sql.compliance.aggregate_profile import AggregateProfile
 
 
 @dataclass(frozen=True)

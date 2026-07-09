@@ -14,7 +14,7 @@ DB-agnostic reducer directly with synthetic in-memory rows.
 
 from __future__ import annotations
 
-from prep.profile import (
+from ceiba_nl2sql.compliance.aggregate_profile import (
     HIGH_CARDINALITY_ABSOLUTE,
     MAX_TOP_CATEGORIES,
     ProfileColumn,

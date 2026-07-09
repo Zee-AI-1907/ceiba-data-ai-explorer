@@ -25,7 +25,8 @@ from pathlib import Path
 
 import pytest
 
-from prep.embed.local_embedder import DeterministicHashEmbedder
+from ceiba_nl2sql.embed.local_embedder import DeterministicHashEmbedder
+
 from prep.embed.vss_index import (
     PhiDocumentError,
     VectorDocument,

@@ -32,7 +32,7 @@ import math
 
 import pytest
 
-from prep.embed.local_embedder import (
+from ceiba_nl2sql.embed.local_embedder import (
     DeterministicHashEmbedder,
     EmbedderConfigError,
     EXPECTED_DIMENSION,

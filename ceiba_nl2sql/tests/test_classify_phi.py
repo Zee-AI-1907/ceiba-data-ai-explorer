@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from prep.classify_phi import (
+from ceiba_nl2sql.compliance.phi import (
     classify_column,
     classify_columns,
     egress_policy_for,

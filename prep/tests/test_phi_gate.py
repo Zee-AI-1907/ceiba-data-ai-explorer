@@ -20,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from prep.classify_phi import load_phi_columnset
+from ceiba_nl2sql.compliance.phi import load_phi_columnset
+
 from prep.config import load_config
 from prep.phi_gate import (
     check_columnset_hash,

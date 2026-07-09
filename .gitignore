@@ -3,11 +3,12 @@ node_modules/
 .pnp
 .pnp.js
 
-# Python (prep toolchain)
+# Python (prep toolchain + shared ceiba_nl2sql library)
 __pycache__/
 *.pyc
 prep/.venv/
 prep/*.egg-info/
+ceiba_nl2sql/*.egg-info/
 .pytest_cache/
 
 # NL2SQL generated artifact bundles (build output — regenerable via prep toolchain)

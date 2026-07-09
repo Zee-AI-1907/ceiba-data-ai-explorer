@@ -1,0 +1,26 @@
+[project]
+name = "ceiba-nl2sql"
+version = "0.0.0"
+description = "Ceiba NL->SQL shared Python library: local embedder, PHI classification, aggregate-profile reducer, bundle loader, sqlglot-based SQL guard. Imported by both the prep build-time toolchain and the future NL->SQL FastAPI service (docs/PYTHON_NL2SQL_SERVICE_PLAN.md)."
+requires-python = ">=3.10"
+dependencies = [
+    "fastembed",
+    "sqlglot>=25",
+]
+
+[project.optional-dependencies]
+# Test deps kept separate so CI can install them explicitly.
+test = [
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ceiba_nl2sql*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

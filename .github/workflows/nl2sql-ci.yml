@@ -51,10 +51,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      # Phase 1 (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §3, §6): the local embedder,
+      # PHI classification, aggregate-profile reducer, bundle loader, and
+      # sqlglot SQL guard now live in the shared `ceiba_nl2sql` package, which
+      # `prep` depends on by name ("ceiba-nl2sql") — install it FIRST so pip
+      # can resolve that dependency locally (it is not published to PyPI).
+      - name: Install shared ceiba_nl2sql library + test deps
+        working-directory: ceiba_nl2sql
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Run ceiba_nl2sql pytest (embedder, PHI, aggregate profile, bundle loader, SQL guard)
+        working-directory: ceiba_nl2sql
+        run: pytest -q
       - name: Install prep toolchain + test deps
         working-directory: prep
         run: |
-          python -m pip install --upgrade pip
           pip install -e ".[test]"
       - name: Run pytest
         working-directory: prep

@@ -24,7 +24,13 @@ from dataclasses import dataclass
 
 import duckdb
 
-from prep.classify_phi import load_phi_columnset
+from ceiba_nl2sql.compliance.aggregate_profile import (
+    AggregateProfile,
+    ProfileColumn,
+    sample_aggregate_from_rows,
+)
+from ceiba_nl2sql.compliance.phi import load_phi_columnset
+
 from prep.introspect.engine import (
     ColumnMeta,
     ForeignKeyMeta,
@@ -32,7 +38,6 @@ from prep.introspect.engine import (
     KeyMeta,
     TableMeta,
 )
-from prep.profile import AggregateProfile, ProfileColumn, sample_aggregate_from_rows
 
 
 class ReadOnlyAttachError(RuntimeError):

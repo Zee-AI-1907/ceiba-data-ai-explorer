@@ -18,7 +18,7 @@ the parent's key space (§1.8, §2.5 `check_synthetic_json`). `--no-embed` skips
 stage [6] (the bundle still emits, minus vectors.duckdb). Embedding is LOCAL
 ONLY (`fastembed`/`BAAI/bge-small-en-v1.5`, SPEC §2.5 invariant 4);
 `--test-fallback-embedder` is the ONLY way to opt into the deterministic
-hash-based test embedder (`prep.embed.local_embedder.DeterministicHashEmbedder`)
+hash-based test embedder (`ceiba_nl2sql.embed.local_embedder.DeterministicHashEmbedder`)
 — never the default, exists solely for hermetic/offline test runs. `build`
 exits non-zero if the PHI gate fails, INCLUDING a scan of the embedded
 vectors.duckdb documents AND synthetic.json — this is the CI gate (SPEC §2.5).
@@ -33,12 +33,17 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from prep.classify_phi import build_phi_json, load_phi_columnset
+from ceiba_nl2sql.compliance.aggregate_profile import (
+    ProfileColumn,
+    build_table_profile,
+    sample_aggregate_from_rows,
+)
+from ceiba_nl2sql.compliance.phi import build_phi_json, load_phi_columnset
+
 from prep.config import ConfigError, PrepConfig, load_config
 from prep.introspect.engine import ColumnMeta, TableMeta
 from prep.introspect.sqlalchemy_introspector import SqlAlchemyIntrospector
 from prep.phi_gate import run_gate, run_gate_from_bundle_dir
-from prep.profile import ProfileColumn, build_table_profile, sample_aggregate_from_rows
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -502,11 +507,12 @@ def _run_build_pipeline_p3b(
     """P3b stages [5] ENRICH -> [6] EMBED+INDEX -> [7] EMIT (full bundle)."""
     import time
 
-    from prep.embed.local_embedder import (
+    from ceiba_nl2sql.embed.local_embedder import (
         DeterministicHashEmbedder,
         assert_fingerprint_matches_expected,
         build_embedder,
     )
+
     from prep.embed.vss_index import (
         build_column_document,
         build_exemplar_document,
@@ -976,7 +982,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="test_fallback_embedder",
         help=(
-            "TEST-ONLY: use prep.embed.local_embedder.DeterministicHashEmbedder "
+            "TEST-ONLY: use ceiba_nl2sql.embed.local_embedder.DeterministicHashEmbedder "
             "instead of the real fastembed/bge-small-en-v1.5 model. Never the "
             "default; for hermetic/offline test runs only."
         ),

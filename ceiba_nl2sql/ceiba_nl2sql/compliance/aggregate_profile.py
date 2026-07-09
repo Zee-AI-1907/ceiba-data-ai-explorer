@@ -1,4 +1,7 @@
-"""profile.py — stage [3]; wraps sample_aggregate -> AggregateProfile (SPEC §2.3, §2.5).
+"""aggregate_profile.py (formerly prep/prep/profile.py) — stage [3]; wraps
+sample_aggregate -> AggregateProfile (SPEC §2.3, §2.5). Shared via
+ceiba_nl2sql (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §3.1) since prep and the
+future NL->SQL service both need the PHI-aware aggregate-profile reducer.
 
 `sample_aggregate` (invoked here via `sample_aggregate_from_rows`, the
 DB-agnostic reducer both Introspector implementations call into) is the ONLY
@@ -29,7 +32,7 @@ import numbers
 from dataclasses import dataclass, field
 from typing import Literal
 
-from prep.classify_phi import classify_column, normalize_key
+from ceiba_nl2sql.compliance.phi import classify_column, normalize_key
 
 # ── constants mirrored VERBATIM from lib/phiScrubber.ts ─────────────────────
 MAX_TOP_CATEGORIES = 8

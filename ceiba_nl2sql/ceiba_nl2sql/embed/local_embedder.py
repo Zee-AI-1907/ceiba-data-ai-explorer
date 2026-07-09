@@ -1,11 +1,17 @@
-"""local_embedder.py — local model ONLY (fastembed BAAI/bge-small-en-v1.5, SPEC §1.2, §2.5).
+"""local_embedder.py (moved from prep/prep/embed/local_embedder.py into
+ceiba_nl2sql — docs/PYTHON_NL2SQL_SERVICE_PLAN.md §3.1/§3.2) — local model
+ONLY (fastembed BAAI/bge-small-en-v1.5, SPEC §1.2, §2.5).
 
 No external embedding API, ever (locked decision #2, SPEC §0 #2, §2.5
-invariant 4). This module is the ONE place the prep toolchain calls an
-embedding model, and it is pluggable behind the `Embedder` protocol so tests
-can swap in a deterministic, offline, dependency-free fallback without ever
-touching a real model — while the REAL default embedder used by `build` is
-always `FastEmbedEmbedder` wrapping `BAAI/bge-small-en-v1.5`.
+invariant 4). This module is the ONE place the prep toolchain (and, later,
+the NL->SQL service) calls an embedding model, and it is pluggable behind the
+`Embedder` protocol so tests can swap in a deterministic, offline,
+dependency-free fallback without ever touching a real model — while the REAL
+default embedder used by `build` is always `FastEmbedEmbedder` wrapping
+`BAAI/bge-small-en-v1.5`. Sharing this module (rather than a TS
+reproduction) is what eliminates the `lib/rag/queryEmbedder.ts` parity-risk
+gap the plan documents (§0 #1, §3.2): query and document vectors will be
+produced by the exact same code path.
 
 Manifest fingerprint (SPEC §1.2 `manifest.json.embeddingModel`):
 

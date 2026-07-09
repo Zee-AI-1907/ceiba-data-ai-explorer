@@ -1,4 +1,8 @@
-"""classify_phi.py — stage [4]; reuses phiScrubber PHI_COLUMNS (SPEC §2.5).
+"""phi.py (formerly prep/prep/classify_phi.py) — stage [4]; reuses phiScrubber
+PHI_COLUMNS (SPEC §2.5). Shared via ceiba_nl2sql
+(docs/PYTHON_NL2SQL_SERVICE_PLAN.md §3.1/§3.2) so prep and the future NL->SQL
+service call the exact same PHI classification code — one Python
+implementation instead of a second copy in the service.
 
 Loads the authoritative PHI set from config/phi_columns.json (generated from
 lib/phiScrubber.ts via `npm run phi:sync`) so the prep toolchain and TS runtime

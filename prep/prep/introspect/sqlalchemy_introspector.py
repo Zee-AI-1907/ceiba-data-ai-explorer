@@ -19,7 +19,13 @@ import sqlalchemy as sa
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 
-from prep.classify_phi import load_phi_columnset
+from ceiba_nl2sql.compliance.aggregate_profile import (
+    AggregateProfile,
+    ProfileColumn,
+    sample_aggregate_from_rows,
+)
+from ceiba_nl2sql.compliance.phi import load_phi_columnset
+
 from prep.introspect.engine import (
     ColumnMeta,
     ForeignKeyMeta,
@@ -27,7 +33,6 @@ from prep.introspect.engine import (
     KeyMeta,
     TableMeta,
 )
-from prep.profile import AggregateProfile, ProfileColumn, sample_aggregate_from_rows
 
 
 def _register_infinity_safe_loaders(dbapi_connection) -> None:  # noqa: ANN001

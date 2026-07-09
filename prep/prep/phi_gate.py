@@ -32,7 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from prep.classify_phi import compute_columnset_hash, load_phi_columnset
+from ceiba_nl2sql.compliance.phi import compute_columnset_hash, load_phi_columnset
+
 from prep.config import PrepConfig
 
 
@@ -403,14 +404,29 @@ def run_gate(
     glossary_json: dict | None = None,
     exemplars_json: dict | None = None,
     prep_package_dir: str | Path | None = None,
+    extra_package_dirs: list[str | Path] | None = None,
 ) -> PhiGateReport:
     """Run every PHI gate check and return a single report. `synthetic_json`,
     `glossary_json`, `exemplars_json` are optional because P3a alone does not
     emit them yet (P3b does) — when absent they are simply skipped, not
     treated as a violation.
+
+    `extra_package_dirs` (Phase 1, docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5):
+    check 3 ("sole data path") must scan every Python module that could
+    plausibly contain a raw per-row `SELECT` — `sample_aggregate_from_rows`
+    (the one function allowed to touch cell data) moved from
+    `prep/prep/profile.py` into the shared `ceiba_nl2sql` package
+    (`ceiba_nl2sql.compliance.aggregate_profile`). Defaults to also scanning
+    the sibling `ceiba_nl2sql/ceiba_nl2sql` package dir alongside
+    `prep_package_dir` so the invariant does not silently stop covering code
+    that moved out of `prep/prep` — pass `[]` explicitly to scan only
+    `prep_package_dir` (e.g. isolated unit tests of this function).
     """
     repo_root = Path(repo_root)
     prep_package_dir = Path(prep_package_dir) if prep_package_dir else repo_root / "prep" / "prep"
+    if extra_package_dirs is None:
+        default_shared_dir = repo_root / "ceiba_nl2sql" / "ceiba_nl2sql"
+        extra_package_dirs = [default_shared_dir] if default_shared_dir.is_dir() else []
 
     violations: list[GateViolation] = []
     checked_files = 0
@@ -433,6 +449,8 @@ def run_gate(
             # extend with targeted checks once these files are real.
 
     violations.extend(scan_package_for_raw_select(prep_package_dir))
+    for extra_dir in extra_package_dirs:
+        violations.extend(scan_package_for_raw_select(extra_dir))
     violations.extend(check_embedding_local(config))
 
     return PhiGateReport(

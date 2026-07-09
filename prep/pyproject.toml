@@ -1,3 +1,13 @@
+# Local dev setup NOTE (Phase 1, docs/PYTHON_NL2SQL_SERVICE_PLAN.md): this
+# package depends on the sibling `ceiba_nl2sql` package by NAME
+# ("ceiba-nl2sql"), not by a path/URL, since both are meant to be installable
+# the same way a future `ceiba_nl2sql_service` package would be. On a FRESH
+# venv, install the shared lib first so pip can resolve the name locally:
+#   pip install -e ../ceiba_nl2sql
+#   pip install -e .
+# (An index/workspace config that resolves "ceiba-nl2sql" automatically is a
+# possible follow-up; not needed for this phase since both are installed by
+# the same `pip install -e` invocations in CI/dev.)
 [project]
 name = "ceiba-nl2sql-prep"
 version = "0.0.0"
@@ -8,7 +18,11 @@ dependencies = [
     "duckdb",
     "psycopg[binary]",
     "pyyaml",
-    "fastembed",
+    # The local embedder, PHI classification, and aggregate-profile reducer
+    # moved to the shared ceiba_nl2sql package (docs/PYTHON_NL2SQL_SERVICE_PLAN.md
+    # Phase 1, §3) — prep now imports them from there instead of owning them.
+    # `fastembed` itself is pulled in transitively via ceiba-nl2sql's own deps.
+    "ceiba-nl2sql",
 ]
 
 [project.optional-dependencies]
