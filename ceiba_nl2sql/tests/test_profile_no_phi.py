@@ -148,3 +148,41 @@ def test_max_sample_rows_bounds_the_scan():
 
     assert profile.sampled_rows == 100
     assert profile.total_rows == 10_000
+
+
+# ── P2 categorical rescue in the reducer ─────────────────────────────────────
+
+
+def test_low_cardinality_text_column_rescued_with_whole_table_evidence():
+    rows = [{"TriageLevel": v} for v in ("red", "yellow", "green", "red", "green")]
+    columns = [
+        ProfileColumn(key="TriageLevel", label="TriageLevel", type="text", distinct_count_estimate=3)
+    ]
+    profile = sample_aggregate_from_rows(rows, columns, PHI_COLUMNS)
+    col = _column_by_key(profile, "TriageLevel")
+    assert col.kind == "categorical"
+    assert col.top_categories is not None
+    assert {c.value for c in col.top_categories} == {"red", "yellow", "green"}
+
+
+def test_text_column_without_evidence_stays_suppressed():
+    # Same rows, but no whole-table distinct evidence -> the type heuristic
+    # fails closed exactly as before the rescue existed.
+    rows = [{"TriageLevel": v} for v in ("red", "yellow", "green")]
+    columns = [ProfileColumn(key="TriageLevel", label="TriageLevel", type="text")]
+    profile = sample_aggregate_from_rows(rows, columns, PHI_COLUMNS)
+    col = _column_by_key(profile, "TriageLevel")
+    assert col.kind == "phi-suppressed"
+    assert col.top_categories is None
+
+
+def test_rescued_column_with_sample_cardinality_above_20_gets_counts_only():
+    # Whole-table evidence rescues classification (<=50), but the emitted
+    # topCategories discipline (<=20 distinct in sample, TS-mirrored) still
+    # applies — a 21..50-distinct vocabulary gets kind=categorical, no labels.
+    rows = [{"Code": f"code-{i}"} for i in range(25)]
+    columns = [ProfileColumn(key="Code", label="Code", type="text", distinct_count_estimate=25)]
+    profile = sample_aggregate_from_rows(rows, columns, PHI_COLUMNS)
+    col = _column_by_key(profile, "Code")
+    assert col.kind == "categorical"
+    assert col.top_categories is None

@@ -97,11 +97,19 @@ class AggregateProfile:
 
 @dataclass(frozen=True)
 class ProfileColumn:
-    """Minimal column descriptor sample_aggregate needs: name/key + declared type."""
+    """Minimal column descriptor sample_aggregate needs: name/key + declared type.
+
+    `distinct_count_estimate` (P2 categorical rescue): WHOLE-TABLE distinct
+    count evidence from pg_stats, threaded into `classify_column` so a
+    low-cardinality coded text column is profiled as categorical instead of
+    being suppressed by the type-based free-text heuristic. None = no
+    evidence = no rescue (fail closed).
+    """
 
     key: str
     label: str
     type: str = "text"
+    distinct_count_estimate: int | None = None
 
 
 def _is_finite_number(value: object) -> bool:
@@ -150,7 +158,9 @@ def sample_aggregate_from_rows(
 
     column_aggregates: list[ColumnAggregate] = []
     for col in columns:
-        phi_class, _matched_rule = classify_column(col.key, phi_columns, col.type)
+        phi_class, _matched_rule = classify_column(
+            col.key, phi_columns, col.type, distinct_count_estimate=col.distinct_count_estimate
+        )
         phi = phi_class != "non-phi"
 
         non_null_count = 0

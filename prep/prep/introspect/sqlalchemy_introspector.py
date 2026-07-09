@@ -476,13 +476,41 @@ class SqlAlchemyIntrospector:
             result = connection.execute(query, {"limit": sample_rows})
             rows = [dict(r._mapping) for r in result]
 
-        profile_columns = [ProfileColumn(key=c.name, label=c.name, type=c.data_type) for c in columns]
+        profile_columns = self._profile_columns_with_stats(table, columns)
         return sample_aggregate_from_rows(
             rows=rows,
             columns=profile_columns,
             phi_columns=self._phi_columns,
             max_sample_rows=sample_rows,
         )
+
+    def _profile_columns_with_stats(
+        self, table: TableMeta, columns: list[ColumnMeta]
+    ) -> list[ProfileColumn]:
+        """ProfileColumns carrying WHOLE-TABLE distinct evidence (pg_stats via
+        `column_statistics`) so the profiling reducer's PHI classification can
+        apply the P2 categorical rescue on real-cardinality grounds, never on
+        the bounded sample's apparent cardinality.
+        """
+        stats = self.column_statistics(table)
+        approx_rows = self.approx_row_count(table)
+
+        def _estimate(name: str) -> int | None:
+            stat = stats.get(name)
+            if stat is None or stat.n_distinct is None:
+                return None
+            if stat.n_distinct >= 0:
+                return int(stat.n_distinct)
+            if approx_rows <= 0:
+                return None
+            return int(round(-stat.n_distinct * approx_rows))
+
+        return [
+            ProfileColumn(
+                key=c.name, label=c.name, type=c.data_type, distinct_count_estimate=_estimate(c.name)
+            )
+            for c in columns
+        ]
 
     def fetch_code_table_rows(
         self, source_id: str, schema: str, table: str, id_column: str, label_column: str
@@ -536,7 +564,7 @@ class SqlAlchemyIntrospector:
             result = connection.execute(query, {"limit": sample_rows})
             rows = [dict(r._mapping) for r in result]
 
-        profile_columns = [ProfileColumn(key=c.name, label=c.name, type=c.data_type) for c in columns]
+        profile_columns = self._profile_columns_with_stats(table, columns)
         return sample_aggregate_from_rows(
             rows=rows,
             columns=profile_columns,

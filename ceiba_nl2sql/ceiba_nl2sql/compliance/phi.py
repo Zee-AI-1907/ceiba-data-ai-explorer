@@ -207,8 +207,21 @@ def _is_unbounded_text_type(data_type: str | None) -> bool:
     return any(hint in lowered for hint in _UNBOUNDED_TEXT_TYPE_HINTS)
 
 
+# P2 categorical rescue: a text-typed column with NO name-based PHI/free-text
+# signal whose WHOLE-TABLE distinct count (pg_stats, not a sample) is at or
+# under this bound is a closed coded vocabulary (status/type/code), not
+# narrative free text — narrative text is unbounded by nature. Only the
+# TYPE-based heuristic is ever rescued; the authoritative PHI set and the
+# name-based free-text hints always win.
+LOW_CARDINALITY_CODED_TEXT_MAX = 50
+
+
 def classify_column(
-    column_name: str, phi_columns: frozenset[str], data_type: str | None = None
+    column_name: str,
+    phi_columns: frozenset[str],
+    data_type: str | None = None,
+    *,
+    distinct_count_estimate: int | None = None,
 ) -> tuple[PhiClass, str | None]:
     """Classify a single column name (+ optional declared SQL type) into a
     SPEC §1.7 `phiClass`.
@@ -225,6 +238,19 @@ def classify_column(
     schema — none of which match a name-based "notes" hint). Absent a
     positive known-safe-text name signal, an unbounded string column defaults
     to `free-text` rather than silently trusting the name alone.
+
+    `distinct_count_estimate` (P2 categorical rescue) is WHOLE-TABLE evidence
+    (pg_stats n_distinct — never a bounded sample, which can make a
+    high-cardinality column look small). On Postgres every string column is
+    `text`, so the type heuristic alone suppresses the entire coded
+    vocabulary of the schema (status/type/code columns) unless its name
+    happens to be on the known-safe list. A column whose whole-table distinct
+    count is a small closed set (<= LOW_CARDINALITY_CODED_TEXT_MAX) is a
+    coded vocabulary, not narrative — narrative text is unbounded by nature.
+    The rescue applies ONLY to the type-based branch: the authoritative PHI
+    set and the name-based free-text hints always suppress regardless of
+    cardinality (a `Gender` or `Notes` column stays suppressed at any
+    distinct count).
     """
     normalized = normalize_key(column_name)
 
@@ -242,6 +268,11 @@ def classify_column(
         return "free-text", f"heuristic:free-text:{normalized}"
 
     if _is_unbounded_text_type(data_type) and not _looks_like_known_safe_text(normalized):
+        if (
+            distinct_count_estimate is not None
+            and 0 < distinct_count_estimate <= LOW_CARDINALITY_CODED_TEXT_MAX
+        ):
+            return "non-phi", f"heuristic:low-cardinality-coded-text:{normalized}"
         return "free-text", f"heuristic:unbounded-text-type:{normalized}"
 
     return "non-phi", None
@@ -279,23 +310,29 @@ class ColumnPhiClassification:
 
 
 def classify_columns(
-    column_ids_and_names: list[tuple[str, str] | tuple[str, str, str | None]],
+    column_ids_and_names: list[tuple],
     phi_columns: frozenset[str],
 ) -> list[ColumnPhiClassification]:
-    """Classify a batch of (columnId, columnName[, dataType]) tuples.
+    """Classify a batch of (columnId, columnName[, dataType[,
+    distinctCountEstimate]]) tuples.
 
     `columnId` is the canonical bundle key (e.g.
     "staging.Shared.Patients.IdentificationNumber"); `columnName` is the bare
     column name used for PHI-set matching (matching is name-based, not
     path-based, mirroring lib/phiScrubber.ts which only ever sees a column
     key). An optional third element, `dataType`, sharpens the free-text
-    heuristic for unbounded string columns (see `classify_column`).
+    heuristic for unbounded string columns; an optional fourth,
+    `distinctCountEstimate` (whole-table, pg_stats), enables the P2
+    low-cardinality coded-text rescue (see `classify_column`).
     """
     results: list[ColumnPhiClassification] = []
     for entry in column_ids_and_names:
         column_id, column_name = entry[0], entry[1]
         data_type = entry[2] if len(entry) > 2 else None
-        phi_class, matched_rule = classify_column(column_name, phi_columns, data_type)
+        distinct_estimate = entry[3] if len(entry) > 3 else None
+        phi_class, matched_rule = classify_column(
+            column_name, phi_columns, data_type, distinct_count_estimate=distinct_estimate
+        )
         results.append(
             ColumnPhiClassification(
                 column_id=column_id,
@@ -309,7 +346,7 @@ def classify_columns(
 
 
 def build_phi_json(
-    column_ids_and_names: list[tuple[str, str] | tuple[str, str, str | None]],
+    column_ids_and_names: list[tuple],
     phi_columns: frozenset[str],
     phi_columnset_hash: str,
 ) -> dict:

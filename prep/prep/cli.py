@@ -407,14 +407,26 @@ def classify_source(model: dict, phi_columns: frozenset[str], phi_columnset_hash
     `classify_column`'s `data_type` parameter.
     """
     source_id = model["source_id"]
-    triples: list[tuple[str, str, str]] = []
+    triples: list[tuple] = []
     for schema_entry in model["schemas"]:
         schema = schema_entry["schema"]
         for table_entry in schema_entry["tables"]:
             table: TableMeta = table_entry["table"]
             table_id = _table_id(source_id, schema, table.name)
+            approx_rows: int = table_entry.get("approx_row_count", 0)
+            column_stats: dict = table_entry.get("column_stats") or {}
             for col in table_entry["columns"]:
-                triples.append((_column_id(table_id, col.name), col.name, col.data_type))
+                # P2 categorical rescue: thread the SAME whole-table distinct
+                # evidence the profiling reducer uses, so phi.json and
+                # profiles.json classify identically (the PHI gate's
+                # topCategories-vs-phiClass cross-check depends on it).
+                stats = column_stats.get(col.name)
+                estimate = _distinct_count_estimate(
+                    stats.n_distinct if stats else None, approx_rows
+                )
+                triples.append(
+                    (_column_id(table_id, col.name), col.name, col.data_type, estimate)
+                )
     return build_phi_json(triples, phi_columns, phi_columnset_hash)
 
 

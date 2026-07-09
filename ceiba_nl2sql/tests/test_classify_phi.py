@@ -157,3 +157,60 @@ def test_classify_columns_batch_produces_phi_json_shape(phi_columns):
     # JSON shape matches SPEC §1.7 exactly.
     json_shape = patient_name.to_json()
     assert set(json_shape.keys()) == {"columnId", "normalizedKey", "phiClass", "matchedRule", "egressPolicy"}
+
+
+# ── P2 categorical rescue: whole-table low-cardinality coded text ────────────
+
+
+def test_low_cardinality_text_column_rescued_to_non_phi(phi_columns):
+    # A bare `text` column with no name signal used to be suppressed purely by
+    # type. Whole-table evidence of a small closed vocabulary rescues it.
+    phi_class, rule = classify_column(
+        "TriageLevel", phi_columns, "text", distinct_count_estimate=5
+    )
+    assert phi_class == "non-phi"
+    assert rule == "heuristic:low-cardinality-coded-text:triagelevel"
+
+
+def test_rescue_never_applies_to_name_based_free_text(phi_columns):
+    # A `Notes` column is narrative by NAME — cardinality evidence must not
+    # override the name-based hint.
+    phi_class, _ = classify_column("Notes", phi_columns, "text", distinct_count_estimate=3)
+    assert phi_class == "free-text"
+
+
+def test_rescue_never_applies_to_authoritative_phi_columns(phi_columns):
+    phi_class, _ = classify_column("Name", phi_columns, "text", distinct_count_estimate=2)
+    assert phi_class == "direct-identifier"
+
+
+def test_no_evidence_or_high_cardinality_stays_suppressed(phi_columns):
+    assert classify_column("SomethingText", phi_columns, "text")[0] == "free-text"
+    assert (
+        classify_column("SomethingText", phi_columns, "text", distinct_count_estimate=None)[0]
+        == "free-text"
+    )
+    assert (
+        classify_column("SomethingText", phi_columns, "text", distinct_count_estimate=51)[0]
+        == "free-text"
+    )
+    assert (
+        classify_column("SomethingText", phi_columns, "text", distinct_count_estimate=0)[0]
+        == "free-text"
+    )
+
+
+def test_rescue_boundary_at_max(phi_columns):
+    from ceiba_nl2sql.compliance.phi import LOW_CARDINALITY_CODED_TEXT_MAX
+
+    at_max = classify_column(
+        "SomethingText", phi_columns, "text", distinct_count_estimate=LOW_CARDINALITY_CODED_TEXT_MAX
+    )
+    assert at_max[0] == "non-phi"
+
+
+def test_classify_columns_accepts_four_tuples(phi_columns):
+    results = classify_columns(
+        [("src.public.T.TriageLevel", "TriageLevel", "text", 4)], phi_columns
+    )
+    assert results[0].phi_class == "non-phi"
