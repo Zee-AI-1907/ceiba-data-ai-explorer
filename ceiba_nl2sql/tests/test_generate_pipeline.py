@@ -217,6 +217,59 @@ class TestExplainEstimateGuardComposition:
         finally:
             retriever.dispose()
 
+    async def test_repair_round_candidates_are_probed_too(self, engine):
+        """Regression: the repair-round validate used to omit source_dsn /
+        pg_explain_runner, so a REPAIRED candidate was never EXPLAIN-probed —
+        the authoritative guard silently applied only to the first draft.
+        The runner must be consulted once per candidate (initial + repair).
+        """
+        from ceiba_nl2sql.generation.pipeline import GenerateOptions
+
+        retriever = _build_retriever()
+        try:
+            calls: list[str] = []
+
+            def runner(probe_sql: str, timeout_ms: int):
+                calls.append(probe_sql)
+                return self._plan(500_000_000) if len(calls) == 1 else self._plan(42)
+
+            llm = StubLlmClient([GOOD_HEART_RATE_SQL, GOOD_HEART_RATE_SQL])
+            options = GenerateOptions(pg_explain_runner=runner)
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+            )
+            assert response.repair is not None and response.repair.rounds == 1
+            # BOTH candidates were probed: the huge first draft AND the repair.
+            assert len(calls) == 2
+        finally:
+            retriever.dispose()
+
+    async def test_persistently_huge_estimate_cannot_pass_via_repair(self, engine):
+        """Regression: with the probe omitted from repair rounds, a repaired
+        candidate that was STILL estimated huge passed on the syntactic verdict
+        alone. Now every candidate is probed, so a persistently huge estimate
+        exhausts the repair budget and raises instead of executing.
+        """
+        from ceiba_nl2sql.generation.pipeline import GenerateOptions
+
+        retriever = _build_retriever()
+        try:
+            calls: list[str] = []
+
+            def runner(probe_sql: str, timeout_ms: int):
+                calls.append(probe_sql)
+                return self._plan(500_000_000)  # every candidate estimated huge
+
+            llm = StubLlmClient([GOOD_HEART_RATE_SQL, GOOD_HEART_RATE_SQL, GOOD_HEART_RATE_SQL])
+            options = GenerateOptions(pg_explain_runner=runner)
+            with pytest.raises(GenerationError):
+                await generate_sql(
+                    question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+                )
+            assert len(calls) == 3  # initial + 2 repair rounds, all probed
+        finally:
+            retriever.dispose()
+
     async def test_unavailable_probe_defers_to_syntactic_and_passes_good_sql(self, engine):
         from ceiba_nl2sql.generation.pipeline import GenerateOptions
 

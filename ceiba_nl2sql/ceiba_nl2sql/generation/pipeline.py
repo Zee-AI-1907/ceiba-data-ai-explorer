@@ -517,6 +517,11 @@ async def generate_sql(
         if extracted_description:
             description = extracted_description
 
+        # CRITICAL: the repair-round validate must carry the SAME EXPLAIN-probe
+        # configuration as the initial validate. Omitting source_dsn /
+        # pg_explain_runner here silently downgraded every REPAIRED candidate to
+        # the syntactic guard alone — a repair that satisfied a syntactic escape
+        # hatch but was still estimated to scan a huge table slipped through.
         ok, accepted_sql, failure = await offload(
             _validate_candidate,
             candidate_sql,
@@ -525,6 +530,8 @@ async def generate_sql(
             default_limit=default_limit,
             table_allowlist=options.table_allowlist,
             dialect=resolved_dialect,
+            source_dsn=options.source_dsn,
+            pg_explain_runner=options.pg_explain_runner,
         )
 
     if not ok:
