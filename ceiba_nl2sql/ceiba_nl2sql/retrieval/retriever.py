@@ -611,10 +611,20 @@ class HybridRetriever:
 
     # ── stage 3: hybrid table recall ────────────────────────────────────────
 
-    def _recall_tables(self, expanded_question: str, source_scope: list[str] | None, recall_tables: int) -> list[str]:
+    def _recall_tables(
+        self,
+        expanded_question: str,
+        source_scope: list[str] | None,
+        recall_tables: int,
+        query_embedding: list[float] | None = None,
+    ) -> list[str]:
         bundle, vss, table_bm25, _ = self._ensure_loaded()
 
-        query_embedding = self._embed_query(expanded_question)
+        # The embedding is computed ONCE per retrieve() and passed down —
+        # table and column recall share the same expanded question, so
+        # embedding it twice was pure duplicated latency.
+        if query_embedding is None:
+            query_embedding = self._embed_query(expanded_question)
         dense_hits = vss.search(
             query_embedding,
             doc_kind="table",
@@ -643,10 +653,17 @@ class HybridRetriever:
 
     # ── stage 4: hybrid column recall, scoped to survivor tables ────────────
 
-    def _recall_columns(self, expanded_question: str, survivor_table_ids: list[str], recall_columns: int) -> list[str]:
+    def _recall_columns(
+        self,
+        expanded_question: str,
+        survivor_table_ids: list[str],
+        recall_columns: int,
+        query_embedding: list[float] | None = None,
+    ) -> list[str]:
         bundle, vss, _, column_bm25 = self._ensure_loaded()
 
-        query_embedding = self._embed_query(expanded_question)
+        if query_embedding is None:
+            query_embedding = self._embed_query(expanded_question)
         dense_hits = vss.search(
             query_embedding,
             doc_kind="column",
@@ -870,7 +887,12 @@ class HybridRetriever:
 
         source_scope = opts.source_scope
 
-        recalled_table_ids = self._recall_tables(expanded, source_scope, recall_tables_count)
+        # Embed the expanded question ONCE; table + column recall both use it.
+        query_embedding = self._embed_query(expanded)
+
+        recalled_table_ids = self._recall_tables(
+            expanded, source_scope, recall_tables_count, query_embedding=query_embedding
+        )
 
         # Fix D §4.2/§8.3 — the RETRIEVAL PIN: a matched glossary hint's
         # hosting table is injected at rank 0, AHEAD of the dense/BM25 fused
@@ -891,7 +913,9 @@ class HybridRetriever:
             ordered_recalled_table_ids.append(tid)
         recalled_table_ids = ordered_recalled_table_ids
 
-        recalled_column_ids = self._recall_columns(expanded, recalled_table_ids, recall_columns_count)
+        recalled_column_ids = self._recall_columns(
+            expanded, recalled_table_ids, recall_columns_count, query_embedding=query_embedding
+        )
         recalled_column_id_set = set(recalled_column_ids)
 
         expanded_table_ids = self._graph_expand(recalled_table_ids)

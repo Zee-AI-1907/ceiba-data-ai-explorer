@@ -68,6 +68,29 @@ def test_exemplars_recalled_for_heart_rate_question(retriever: HybridRetriever):
     assert any("heart_rate" in e.id for e in ctx.exemplars)
 
 
+def test_retrieve_embeds_the_question_exactly_once():
+    """Regression: table recall and column recall each embedded the same
+    expanded question — two embedder forward passes per request for one
+    string. retrieve() must compute the embedding once and share it.
+    """
+    calls: list[str] = []
+    inner = _embed_query_factory()
+
+    def counting_embed(text: str):
+        calls.append(text)
+        return inner(text)
+
+    r = HybridRetriever(
+        embed_query=counting_embed, dialect="duckdb", expected_embedding_model_id=TEST_FALLBACK_EMBEDDING_MODEL_ID
+    )
+    r.load(FIXTURE_BUNDLE_DIR)
+    try:
+        r.retrieve("heart rate over 120 in the last 3 hours", RetrieveOptions(token_budget=2500, max_tables=6))
+        assert len(calls) == 1
+    finally:
+        r.dispose()
+
+
 def test_retrieve_before_load_raises():
     r = HybridRetriever(embed_query=_embed_query_factory(), dialect="duckdb", expected_embedding_model_id=TEST_FALLBACK_EMBEDDING_MODEL_ID)
     with pytest.raises(RuntimeError):
