@@ -226,6 +226,12 @@ def _resolve_synonym_map_entry(entry: dict, index: CatalogIndex) -> list[dict]:
             map_entry: dict[str, Any] = {
                 "kind": "coded-measurement",
                 "valueColumnId": value_column_id,
+                # SEMANTIC_HINTS.md §3.3: hostingTableId is the load-bearing
+                # retrieval-pin field. Simplest-and-correct derivation: the
+                # table `valueColumnId` belongs to — always derivable, covers
+                # every hand-seeded coded-measurement entry uniformly without
+                # requiring a new `hostingTable` seed field.
+                "hostingTableId": table_id,
             }
             if unit:
                 map_entry["unit"] = unit
@@ -371,9 +377,17 @@ def extract_temporal_phrase(text: str, temporal_entries: list[dict]) -> dict | N
 # ── top-level build ──────────────────────────────────────────────────────────
 
 
-def build_glossary_json(catalog: dict, seed: dict) -> dict:
+def build_glossary_json(catalog: dict, seed: dict, auto_synonyms: list[dict] | None = None) -> dict:
     """Build the full glossary.json document (SPEC §1.9) from an already-loaded
     seed dict (see `load_glossary_seed`) and the current build's catalog.json.
+
+    `auto_synonyms` (SEMANTIC_HINTS.md §3.2/§8.2): the machine-mined hint
+    matrix, already resolved to plain JSON-shaped dicts (see
+    `prep.enrich.code_tables.build_auto_synonyms` +
+    `resolve_auto_synonym_columns`, and `cli.py`'s enrich-stage wiring).
+    Defaults to `[]` when no code tables were detected/no row-fetcher was
+    available in this build context — always present, never crashes an old
+    reader that doesn't expect the key (additive, backward compatible).
     """
     index = build_catalog_index(catalog)
     return {
@@ -382,10 +396,13 @@ def build_glossary_json(catalog: dict, seed: dict) -> dict:
         "codeSystems": resolve_code_systems(seed.get("codeSystems", []), index),
         "units": resolve_units(seed.get("units", []), index),
         "temporal": resolve_temporal(seed.get("temporal", []), index),
+        "autoSynonyms": list(auto_synonyms) if auto_synonyms else [],
     }
 
 
-def build_glossary_from_seed_file(catalog: dict, seed_path: str | Path) -> dict:
+def build_glossary_from_seed_file(
+    catalog: dict, seed_path: str | Path, auto_synonyms: list[dict] | None = None
+) -> dict:
     """Convenience wrapper: load the seed file then build glossary.json."""
     seed = load_glossary_seed(seed_path)
-    return build_glossary_json(catalog, seed)
+    return build_glossary_json(catalog, seed, auto_synonyms=auto_synonyms)

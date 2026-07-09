@@ -18,12 +18,64 @@ pulled from the target engine's capabilities()/dialect().
 from __future__ import annotations
 
 from ceiba_nl2sql.engine.base import EngineCapabilities, SqlDialect
-from ceiba_nl2sql.retrieval.retriever import CardinalityWarning, RenderedColumn, RenderedTable
+from ceiba_nl2sql.retrieval.retriever import (
+    CardinalityWarning,
+    GlossaryHit,
+    JoinHint,
+    JoinPath,
+    RenderedColumn,
+    RenderedTable,
+    _estimate_tokens,
+)
 
 USER_REQUEST_OPEN = "<user_request>"
 USER_REQUEST_CLOSE = "</user_request>"
 PRIOR_SQL_OPEN = "<prior_sql>"
 PRIOR_SQL_CLOSE = "</prior_sql>"
+
+# Fix A (JOINGRAPH_SURFACING.md §8.1): cardinality tag rendered on each edge.
+_CARDINALITY_TAG = {
+    "many-to-one": "N:1",
+    "one-to-many": "1:N",
+    "one-to-one": "1:1",
+    "many-to-many": "N:N",
+}
+
+# JOINGRAPH_SURFACING.md §6: cap the join-graph render at ~15% of token_budget.
+JOIN_GRAPH_TOKEN_CEILING_FRACTION = 0.15
+
+# SEMANTIC_HINTS.md §5.3: cap matched hints rendered per query.
+MAX_SEMANTIC_HINTS = 6
+
+
+def _source_id_of(table: RenderedTable) -> str:
+    """Fix B: `RenderedTable.table_id` is `<sourceId>.<schema>.<table>`
+    (NL2SQL_SPEC.md §3.2) — sourceId is always the first dot-segment.
+    """
+    return table.table_id.split(".", 1)[0]
+
+
+def _source_qualified_ref(table: RenderedTable) -> str:
+    """Fix B: prefix `quoted_ref` with its source alias so generated SQL is
+    catalog-qualified against the DuckDB ATTACH topology (alias == source_id
+    per NL2SQL_SPEC.md §3.2), e.g. `staging."Shared"."MonitorMeasurements"`.
+    Does NOT mutate `RenderedTable.quoted_ref` itself — retriever.py's
+    internal token-estimate rendering and cardinality.py's bare-name
+    extraction both assume the schema-only quotedRef, and bare-name
+    extraction strips to the LAST quoted segment anyway, so it is unaffected
+    by this catalog prefix appearing only in generation-facing prompt text.
+    """
+    return f"{_source_id_of(table)}.{table.quoted_ref}"
+
+
+def _quoted_ref_for(ref_by_table_id: dict[str, RenderedTable], table_id: str, fallback_ref: str) -> str:
+    """Resolve a join-graph edge endpoint's ref to its source-qualified form
+    when the table is a known RenderedTable; otherwise fall back to whatever
+    ref the edge/JoinHint already carried (schema-only), for a table outside
+    the rendered set.
+    """
+    table = ref_by_table_id.get(table_id)
+    return _source_qualified_ref(table) if table else fallback_ref
 
 
 def _render_column(col: RenderedColumn) -> str:
@@ -36,8 +88,16 @@ def _render_column(col: RenderedColumn) -> str:
 
 
 def _render_table(table: RenderedTable) -> str:
+    if table.role == "bridge":
+        join_cols = ", ".join(c.quoted_name for c in table.columns)
+        lines = [
+            f"- Table {_source_qualified_ref(table)} (tableId: {table.table_id})",
+            "  role: BRIDGE / junction — needed only to join other selected tables; do not read business columns off it",
+            f"  join columns: {join_cols}",
+        ]
+        return "\n".join(lines)
     lines = [
-        f"- Table {table.quoted_ref} (tableId: {table.table_id})",
+        f"- Table {_source_qualified_ref(table)} (tableId: {table.table_id})",
         f"  grain: {table.grain}",
         f"  approxRowCount: {table.approx_row_count}" + (" (LARGE / TIME-SERIES)" if table.is_large_time_series else ""),
         "  columns:",
@@ -80,6 +140,189 @@ def derive_cardinality_warnings(tables: list[RenderedTable]) -> list[Cardinality
     ]
 
 
+# ── Fix A: JOIN GRAPH section (JOINGRAPH_SURFACING.md §8.1, §8.3, §8.4) ─────
+
+
+def _edge_endpoint_ref(ref: str, ref_to_source_qualified: dict[str, str]) -> str:
+    """Fix B: prefer the source-qualified ref for a join-graph edge endpoint
+    when its schema-only quotedRef matches a rendered table; fall back to the
+    edge's own schema-only ref otherwise (e.g. a table outside the rendered
+    survivor set, whose sourceId cannot be resolved from the edge alone).
+    """
+    return ref_to_source_qualified.get(ref, ref)
+
+
+def _render_join_edge_line(hint: JoinHint, ref_to_source_qualified: dict[str, str]) -> str:
+    tag = _CARDINALITY_TAG.get(hint.join_cardinality, hint.join_cardinality)
+    from_cols = ", ".join(hint.from_columns)
+    to_cols = ", ".join(hint.to_columns)
+    from_ref = _edge_endpoint_ref(hint.from_ref, ref_to_source_qualified)
+    to_ref = _edge_endpoint_ref(hint.to_ref, ref_to_source_qualified)
+    return f'  {from_ref}."{from_cols}" = {to_ref}."{to_cols}" [{tag}]'
+
+
+def _render_join_path_line(path: JoinPath, ref_by_table_id: dict[str, RenderedTable]) -> str:
+    """Renders the arrow-chain path per JOINGRAPH_SURFACING.md §8.1:
+    `"A" →(col=col, N:1) "B" →(col=col, N:1) "C"` using each node's quotedRef
+    (falling back to its bare tableId for a node outside the rendered set,
+    e.g. a bridge table that did not make the final render).
+    """
+
+    def _node_label(table_id: str) -> str:
+        table = ref_by_table_id.get(table_id)
+        return table.quoted_ref if table else table_id
+
+    segments = [_node_label(path.nodes[0])]
+    for i, edge in enumerate(path.edges):
+        from_cols = ", ".join(edge.from_columns)
+        to_cols = ", ".join(edge.to_columns)
+        tag = _CARDINALITY_TAG.get(edge.join_cardinality, edge.join_cardinality)
+        segments.append(f"→({from_cols}={to_cols}, {tag}) {_node_label(path.nodes[i + 1])}")
+    return "  " + " ".join(segments)
+
+
+def _render_bridge_table_stub(table: RenderedTable) -> str:
+    join_cols = ", ".join(c.quoted_name for c in table.columns)
+    return f"  - {_source_qualified_ref(table)}  join cols: {join_cols}"
+
+
+def _render_join_graph(
+    join_hints: list[JoinHint],
+    join_paths: list[JoinPath],
+    tables: list[RenderedTable],
+    *,
+    token_ceiling: int | None = None,
+) -> str:
+    """Renders the JOIN GRAPH section exactly per JOINGRAPH_SURFACING.md
+    §8.1: "Edges among selected tables:", then "Multi-hop path (...):" lines
+    per admitted bridge JoinPath, then "BRIDGE tables (...)" listing each
+    bridge table's source-qualified ref + join columns only.
+
+    Token budget (§6/§8.4): Tier-1 edges always included; bridge paths (and
+    their bridge-table stub lines) admitted shortest-first (already the
+    admission order `join_paths` arrives in) until `token_ceiling` trips —
+    the longest/lowest-confidence-ranked paths are dropped first since the
+    caller (`assemble_prompt`) already ranked `join_paths` that way.
+    """
+    ref_by_table_id = {t.table_id: t for t in tables}
+    ref_to_source_qualified = {t.quoted_ref: _source_qualified_ref(t) for t in tables}
+    bridge_table_ids = {t.table_id for t in tables if t.role == "bridge"}
+    bridge_tables_by_id = {t.table_id: t for t in tables if t.role == "bridge"}
+
+    lines: list[str] = [
+        "JOIN GRAPH (use these exact join predicates; direction is FK-side -> PK-side, [card] is row multiplicity):",
+    ]
+    running = _estimate_tokens("\n".join(lines))
+
+    def _within_budget(candidate_lines: list[str]) -> bool:
+        if token_ceiling is None:
+            return True
+        return running + _estimate_tokens("\n".join(candidate_lines)) <= token_ceiling
+
+    if join_hints:
+        edge_block = ["", "Edges among selected tables:"]
+        edge_block.extend(_render_join_edge_line(h, ref_to_source_qualified) for h in join_hints)
+        if _within_budget(edge_block):
+            lines.extend(edge_block)
+            running += _estimate_tokens("\n".join(edge_block))
+
+    def _bare_name(table_id: str) -> str:
+        table = ref_by_table_id.get(table_id)
+        return table.quoted_ref.split(".")[-1].strip('"') if table else table_id.split(".")[-1]
+
+    admitted_bridge_ids: set[str] = set()
+    for path in join_paths:
+        net_cardinality_tags = {e.join_cardinality for e in path.edges}
+        chain_line = _render_join_path_line(path, ref_by_table_id)
+        source_name = _bare_name(path.nodes[0])
+        target_name = _bare_name(path.nodes[-1])
+        header = f"Multi-hop path ({source_name} → {target_name}), hops={path.hop_count}:"
+        if net_cardinality_tags == {"many-to-one"}:
+            to_ref = ref_by_table_id.get(path.nodes[-1])
+            target_ref = to_ref.quoted_ref if to_ref else path.nodes[-1]
+            header = (
+                f"Multi-hop path ({source_name} → {target_name}), all hops N:1 — "
+                f"one {target_name} row per source row, so COUNT(DISTINCT {target_ref}.<pk>) when counting {target_name}:"
+            )
+        block = ["", header, chain_line]
+        if not _within_budget(block):
+            break
+        lines.extend(block)
+        running += _estimate_tokens("\n".join(block))
+        for node in path.nodes:
+            if node in bridge_table_ids:
+                admitted_bridge_ids.add(node)
+
+    admitted_bridge_tables = [t for tid, t in bridge_tables_by_id.items() if tid in admitted_bridge_ids]
+    if admitted_bridge_tables:
+        bridge_block = [
+            "",
+            "BRIDGE tables (present only to connect the above — do not read business columns off them):",
+        ]
+        bridge_block.extend(_render_bridge_table_stub(t) for t in admitted_bridge_tables)
+        if _within_budget(bridge_block):
+            lines.extend(bridge_block)
+            running += _estimate_tokens("\n".join(bridge_block))
+
+    return "\n".join(lines)
+
+
+# ── Fix D: SEMANTIC HINTS section (SEMANTIC_HINTS.md §5.2, §5.3) ───────────
+
+
+def _render_semantic_hint(hit: GlossaryHit, ref_by_table_id: dict[str, RenderedTable]) -> str:
+    lines = [f'- "{hit.term}"']
+    hosting_table = ref_by_table_id.get(hit.hosting_table_id) if hit.hosting_table_id else None
+    hosting_table_ref = hosting_table.quoted_ref if hosting_table else None
+
+    if hit.code_value is not None and hit.code_column_id:
+        # Prefer the literal code filter form (SEMANTIC_HINTS.md §5.3): avoids
+        # an extra lookup-table join when the code is stable.
+        code_col_bare = hit.code_column_id.split(".")[-1]
+        code_table_ref = hosting_table_ref or "<table>"
+        code_label_comment = (
+            f" -- code {hit.code_value!r} = {hit.code_label!r}" if hit.code_label else f" -- code {hit.code_value!r}"
+        )
+        code_value_literal = hit.code_value if isinstance(hit.code_value, (int, float)) else f"'{hit.code_value}'"
+        lines.append(f'    filter:  {code_table_ref}."{code_col_bare}" = {code_value_literal}{code_label_comment}')
+
+    if hit.resolved_column_id:
+        value_col_bare = hit.resolved_column_id.split(".")[-1]
+        value_table_id = ".".join(hit.resolved_column_id.split(".")[:-1])
+        value_table = ref_by_table_id.get(value_table_id)
+        value_table_ref = value_table.quoted_ref if value_table else hosting_table_ref or "<table>"
+        unit_part = f" (unit={hit.unit})" if hit.unit else ""
+        lines.append(f'    value:   {value_table_ref}."{value_col_bare}"{unit_part}')
+
+    if hit.time_column_id:
+        time_col_bare = hit.time_column_id.split(".")[-1]
+        time_table_id = ".".join(hit.time_column_id.split(".")[:-1])
+        time_table = ref_by_table_id.get(time_table_id)
+        time_table_ref = time_table.quoted_ref if time_table else hosting_table_ref or "<table>"
+        lines.append(f'    time:    {time_table_ref}."{time_col_bare}"')
+
+    if hit.hosting_table_id:
+        lines.append(
+            f"    hosted on {hit.hosting_table_id}; to reach other selected tables, follow the JOIN GRAPH below."
+        )
+
+    return "\n".join(lines)
+
+
+def _render_semantic_hints(glossary_hits: list[GlossaryHit], rendered_tables: list[RenderedTable]) -> str:
+    """Renders only hits with an actual coded-measurement/column resolution
+    (i.e. hits that carry either a resolved column or a hosting table) — the
+    caller (`_expand_question`) already only emits hits for terms that
+    matched THIS question. Cap at MAX_SEMANTIC_HINTS.
+    """
+    ref_by_table_id = {t.table_id: t for t in rendered_tables}
+    meaningful_hits = [h for h in glossary_hits if h.resolved_column_id or h.hosting_table_id or h.time_column_id]
+    hits = meaningful_hits[:MAX_SEMANTIC_HINTS]
+    lines = ["SEMANTIC HINTS (resolve NL terms to exact coded values; prefer a literal code filter over an extra lookup join):", ""]
+    lines.extend(_render_semantic_hint(h, ref_by_table_id) for h in hits)
+    return "\n".join(lines)
+
+
 def assemble_prompt(
     tables: list[RenderedTable],
     cardinality_warnings: list[CardinalityWarning],
@@ -88,17 +331,26 @@ def assemble_prompt(
     dialect: SqlDialect,
     *,
     default_limit: int = 1000,
+    join_hints: list[JoinHint] | None = None,
+    join_paths: list[JoinPath] | None = None,
+    glossary_hits: list[GlossaryHit] | None = None,
+    token_budget: int | None = None,
 ) -> str:
     """Builds the full NL->SQL generation prompt. Mirrors
     lib/rag/promptAssembly.ts `assemblePrompt` line-for-line.
 
-    Layout:
+    Layout (JOINGRAPH_SURFACING.md §8.3, SEMANTIC_HINTS.md §8.4):
       1. System-style preamble: role, dialect/capabilities, output contract.
       2. Rendered schema (tables + columns + time column markers).
-      3. Cardinality warnings (verbatim, one per large/time-series survivor).
-      4. The untrusted NL question, delimited and marked as data-not-instructions.
+      3. SEMANTIC HINTS (Fix D) — term -> coded value -> hosting table.
+      4. JOIN GRAPH (Fix A) — edges among survivors + bridge paths + bridge stubs.
+      5. Cardinality warnings (verbatim, one per large/time-series survivor).
+      6. The untrusted NL question, delimited and marked as data-not-instructions.
     """
     warnings = cardinality_warnings if cardinality_warnings else derive_cardinality_warnings(tables)
+    join_hints = join_hints or []
+    join_paths = join_paths or []
+    glossary_hits = glossary_hits or []
 
     sections: list[str] = []
 
@@ -113,6 +365,8 @@ def assemble_prompt(
                 "You may generate ONLY a single read-only SELECT (or WITH ... SELECT) statement.",
                 "Never generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, MERGE, CALL, EXECUTE, GRANT, REVOKE, or any statement that writes or changes schema.",
                 f"If no explicit row limit is requested, include LIMIT {default_limit}.",
+                # Fix A §4/§5: fan-out/wrong-grain preamble rule.
+                "When a join is 1:N or N:1 and you aggregate the 'one' side, use COUNT(DISTINCT ...) / guard against row fan-out.",
                 "Respond with the SQL only.",
             ]
         )
@@ -123,6 +377,15 @@ def assemble_prompt(
             ["SCHEMA CONTEXT (retrieved; treat as authoritative for table/column names):", *[_render_table(t) for t in tables]]
         )
     )
+
+    meaningful_hits = [h for h in glossary_hits if h.resolved_column_id or h.hosting_table_id or h.time_column_id]
+    if meaningful_hits:
+        sections.append(_render_semantic_hints(glossary_hits, tables))
+
+    if join_hints or join_paths:
+        # Fix A §6: cap the join-graph render at ~15% of token_budget.
+        ceiling = int(token_budget * JOIN_GRAPH_TOKEN_CEILING_FRACTION) if token_budget else None
+        sections.append(_render_join_graph(join_hints, join_paths, tables, token_ceiling=ceiling))
 
     if warnings:
         sections.append(
@@ -165,11 +428,27 @@ def assemble_repair_prompt(
     error: str,
     hint: str | None = None,
     default_limit: int = 1000,
+    join_hints: list[JoinHint] | None = None,
+    join_paths: list[JoinPath] | None = None,
+    glossary_hits: list[GlossaryHit] | None = None,
+    token_budget: int | None = None,
 ) -> str:
     """Builds the SELF-REPAIR round prompt. Mirrors
-    lib/rag/promptAssembly.ts `assembleRepairPrompt`.
+    lib/rag/promptAssembly.ts `assembleRepairPrompt`. Inherits the JOIN GRAPH
+    / SEMANTIC HINTS sections for free since it delegates to `assemble_prompt`.
     """
-    base_prompt = assemble_prompt(tables, cardinality_warnings, question, capabilities, dialect, default_limit=default_limit)
+    base_prompt = assemble_prompt(
+        tables,
+        cardinality_warnings,
+        question,
+        capabilities,
+        dialect,
+        default_limit=default_limit,
+        join_hints=join_hints,
+        join_paths=join_paths,
+        glossary_hits=glossary_hits,
+        token_budget=token_budget,
+    )
 
     repair_lines = [
         "REPAIR REQUIRED — your previous SQL was rejected. Produce a corrected, single",

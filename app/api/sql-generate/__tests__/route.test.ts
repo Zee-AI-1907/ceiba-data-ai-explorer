@@ -85,6 +85,7 @@ function stubRetriever(dialect: SqlDialect = 'duckdb'): HybridRetriever {
   const context: SchemaContext = {
     tables: [],
     joinHints: [],
+    joinPaths: [],
     cardinalityWarnings: [],
     glossaryHits: [],
     exemplars: [],

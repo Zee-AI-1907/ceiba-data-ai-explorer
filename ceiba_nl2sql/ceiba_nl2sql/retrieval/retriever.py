@@ -30,6 +30,7 @@ construction, not just by convention.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Sequence
@@ -43,6 +44,26 @@ DENSE_VSS_K_MULTIPLIER = 3
 DEFAULT_RECALL_TABLES = 20
 DEFAULT_RECALL_COLUMNS = 40
 DEFAULT_EXEMPLAR_K = 3
+
+# ── Fix A (JOINGRAPH_SURFACING.md §2, §6, §8.2) ─────────────────────────────
+MAX_BRIDGE_HOPS = 3
+MAX_BRIDGE_PATHS = 6
+
+# ── Fix D (SEMANTIC_HINTS.md §4.2/§8.3, §5.3) ───────────────────────────────
+HINT_PIN_THRESHOLD = 0.62
+MAX_SEMANTIC_HINTS = 6
+
+_CARDINALITY_TAG = {
+    "many-to-one": "N:1",
+    "one-to-many": "1:N",
+    "one-to-one": "1:1",
+    "many-to-many": "N:N",
+}
+
+# SEMANTIC_HINTS.md §7 stop-token deny-list: bare short abbreviations that are
+# common English words. A bare-form match only fires when the FULL multi-word
+# alias also matched (see _expand_question's autoSynonyms scan).
+_AMBIGUOUS_BARE_TERM_DENYLIST = frozenset({"map", "temp", "pa", "sap"})
 
 # Injectable query-embedding function: text -> a vector (sequence of floats).
 EmbedQuery = Callable[[str], Sequence[float]]
@@ -74,6 +95,10 @@ class RenderedColumn:
     data_type: str
     unit: str | None
     is_time_column: bool
+    # Fix C: whether this column is indexed/PK/FK — feeds the cardinality
+    # guard's selective-equality-or-IN-predicate check (ceiba_nl2sql.guard.cardinality).
+    is_indexed: bool = False
+    is_foreign_key_or_primary_key: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +110,10 @@ class RenderedTable:
     approx_row_count: int
     is_large_time_series: bool
     required_time_column: str | None = None
+    # Fix A (JOINGRAPH_SURFACING.md §8.3): "primary" survivors render with
+    # their full (possibly recall-scoped) column list; "bridge" tables render
+    # as PK/FK-only stubs — they exist to be joined THROUGH, not selected FROM.
+    role: str = "primary"
 
 
 @dataclass(frozen=True)
@@ -95,6 +124,18 @@ class JoinHint:
     to_columns: list[str]
     join_cardinality: str
     cross_source: bool
+
+
+@dataclass(frozen=True)
+class JoinPath:
+    """A BFS-shortest bridge path connecting two survivor tables through one
+    or more intermediate (bridge) tables. Mirrors JOINGRAPH_SURFACING.md
+    §8.3's `JoinPath{ nodes, edges, ... }`.
+    """
+
+    nodes: list[str]  # tableIds, from_ref -> ... -> to_ref, in traversal order
+    edges: list[JoinHint]  # one JoinHint per hop, same order as nodes
+    hop_count: int
 
 
 @dataclass(frozen=True)
@@ -111,6 +152,18 @@ class GlossaryHit:
     resolved_column_id: str | None = None
     time_column_id: str | None = None
     unit: str | None = None
+    # Fix D (SEMANTIC_HINTS.md §3.2/§8.2/§8.3): the fact table the coded value
+    # lives on (the retrieval-pin anchor) + how confident this hit is.
+    hosting_table_id: str | None = None
+    confidence: float = 1.0
+    # The literal coded value this hit resolves to (e.g. 2, or "Heart Rate")
+    # plus a human label for the `-- code N = 'NAME'` prompt provenance comment.
+    code_value: object | None = None
+    code_label: str | None = None
+    # The FK/discriminator column the code_value filters on (e.g.
+    # MonitorMeasurements.MeasurementTypeId) — needed to render the literal
+    # filter predicate without guessing a column name.
+    code_column_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +185,9 @@ class SchemaContext:
     exemplars: list[Exemplar]
     token_estimate: int
     dialect: str
+    # Fix A: Tier-2 bridge paths (JOINGRAPH_SURFACING.md §8.3), restricted to
+    # bridges that made it into the final rendered `tables` set.
+    join_paths: list[JoinPath] = field(default_factory=list)
 
 
 @dataclass
@@ -159,6 +215,124 @@ def _render_table_for_estimate(table: RenderedTable) -> str:
     return "\n".join(lines)
 
 
+# ── Fix A: pure BFS bridge-path functions (JOINGRAPH_SURFACING.md §2, §8.2) ─
+#
+# Deliberately free of any `HybridRetriever`/`LoadedBundle` dependency so they
+# are trivially unit-testable against a hand-built adjacency dict (see
+# ceiba_nl2sql/tests/test_retriever.py's bridge-expand tests) — the crux of
+# the HR failure (a 3-hop Measurements->Monitors->Acceptances->Patients path
+# through bridge tables the current fixture bundle does not model) can be
+# exercised without loading any bundle at all.
+
+# adjacency: tableId -> list of (neighbor_table_id, JoinEdgeDict) where
+# JoinEdgeDict is the raw joingraph.json edge shape: {"from", "fromColumns",
+# "to", "toColumns", "joinCardinality", "crossSource", "origin", "confidence"}.
+# Each edge is inserted TWICE (once per direction) so BFS can walk it either
+# way (JOINGRAPH_SURFACING.md §2: "BFS over the UNDIRECTED join graph").
+JoinAdjacency = dict[str, list[tuple[str, dict]]]
+
+
+def build_join_adjacency(edges: list[dict]) -> JoinAdjacency:
+    """Build an undirected adjacency map from joingraph.json's `edges` list.
+    Precomputed once (cached on `HybridRetriever._adjacency` at `load()` time)
+    per JOINGRAPH_SURFACING.md §6: "Precompute an adjacency map once at
+    load() time... rather than scanning `edges` linearly on every retrieve."
+    """
+    adjacency: JoinAdjacency = {}
+    for edge in edges:
+        adjacency.setdefault(edge["from"], []).append((edge["to"], edge))
+        adjacency.setdefault(edge["to"], []).append((edge["from"], edge))
+    return adjacency
+
+
+def bfs_shortest_path(
+    adjacency: JoinAdjacency, start: str, end: str, max_hops: int = MAX_BRIDGE_HOPS
+) -> list[tuple[str, str, dict]] | None:
+    """BFS shortest path from `start` to `end` over the undirected join graph,
+    capped at `max_hops` edges. Returns the path as a list of
+    `(from_node, to_node, edge_dict)` hops (in traversal order, `from_node`/
+    `to_node` being the BFS walk direction, NOT necessarily the edge's own
+    `from`/`to` — the edge is undirected for reachability purposes), or None
+    if no path within `max_hops` exists. Returns `None` (not an empty path)
+    when `start == end` — a table never needs to "bridge" to itself.
+    """
+    if start == end:
+        return None
+    visited = {start}
+    # queue entries: (node, path_so_far)
+    queue: deque[tuple[str, list[tuple[str, str, dict]]]] = deque([(start, [])])
+    while queue:
+        node, path = queue.popleft()
+        if len(path) >= max_hops:
+            continue
+        for neighbor, edge in adjacency.get(node, []):
+            if neighbor in visited:
+                continue
+            new_path = path + [(node, neighbor, edge)]
+            if neighbor == end:
+                return new_path
+            visited.add(neighbor)
+            queue.append((neighbor, new_path))
+    return None
+
+
+def _edge_confidence_sum(hops: list[tuple[str, str, dict]]) -> float:
+    return sum(edge.get("confidence", 1.0) for _, _, edge in hops)
+
+
+def bridge_expand(
+    adjacency: JoinAdjacency,
+    survivor_ids: list[str],
+    max_hops: int = MAX_BRIDGE_HOPS,
+    max_paths: int = MAX_BRIDGE_PATHS,
+) -> tuple[set[str], list[list[tuple[str, str, dict]]]]:
+    """JOINGRAPH_SURFACING.md §8.2's algorithm, as a pure function over plain
+    dicts/sets (no bundle/dataclass dependency — trivially unit-testable).
+
+    For every unordered pair of survivors with NO direct edge between them,
+    finds the BFS shortest path (<= max_hops); collects every intermediate
+    (bridge) node into a set, and every found path (each a list of
+    `(from_node, to_node, edge_dict)` hops), ranked shortest-first then by
+    total edge confidence descending, capped at `max_paths`.
+
+    Returns `(bridge_nodes, admitted_paths)`.
+    """
+    survivor_set = set(survivor_ids)
+    direct_pairs: set[tuple[str, str]] = set()
+    for node, neighbors in adjacency.items():
+        if node not in survivor_set:
+            continue
+        for neighbor, _edge in neighbors:
+            if neighbor in survivor_set:
+                direct_pairs.add(frozenset((node, neighbor)))  # type: ignore[arg-type]
+
+    candidate_paths: list[list[tuple[str, str, dict]]] = []
+    seen_pairs: set[frozenset] = set()
+    survivors_sorted = sorted(survivor_set)
+    for i, s_i in enumerate(survivors_sorted):
+        for s_j in survivors_sorted[i + 1 :]:
+            pair = frozenset((s_i, s_j))
+            if pair in direct_pairs or pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            path = bfs_shortest_path(adjacency, s_i, s_j, max_hops=max_hops)
+            if path is not None:
+                candidate_paths.append(path)
+
+    candidate_paths.sort(key=lambda hops: (len(hops), -_edge_confidence_sum(hops)))
+    admitted = candidate_paths[:max_paths]
+
+    bridge_nodes: set[str] = set()
+    for hops in admitted:
+        for from_node, to_node, _edge in hops:
+            if from_node not in survivor_set:
+                bridge_nodes.add(from_node)
+            if to_node not in survivor_set:
+                bridge_nodes.add(to_node)
+
+    return bridge_nodes, admitted
+
+
 class HybridRetriever:
     """The SPEC §4 `Retriever` implementation. Coarse-to-fine: glossary-expand
     -> table recall (hybrid dense+BM25 RRF, importance-biased) -> column
@@ -183,12 +357,17 @@ class HybridRetriever:
         self._vss: VssClient | None = None
         self._table_bm25: Bm25Index | None = None
         self._column_bm25: Bm25Index | None = None
+        self._adjacency: JoinAdjacency = {}
 
     def load(self, bundle_dir: str | Path) -> None:
         self._bundle = load_bundle(bundle_dir, expected_embedding_model_id=self._expected_embedding_model_id)
 
         dimension = self._bundle.manifest["embeddingModel"]["dimension"]
         self._vss = VssClient(self._bundle.vectors_duckdb_path, dimension)
+
+        # Fix A (JOINGRAPH_SURFACING.md §6): precompute the adjacency map ONCE
+        # at load() time rather than scanning `edges` linearly on every retrieve.
+        self._adjacency = build_join_adjacency(self._bundle.join_graph.get("edges", []))
 
         table_docs: list[Bm25Document] = []
         column_docs: list[Bm25Document] = []
@@ -227,6 +406,10 @@ class HybridRetriever:
         glossary = bundle.glossary
         abbreviations: dict[str, str] = glossary.get("abbreviations", {})
         synonyms: list[dict] = glossary.get("synonyms", [])
+        # Fix D (SEMANTIC_HINTS.md §3.2/§8.2): machine-mined hint matrix, kept
+        # separate from hand-seeded `synonyms` for auditable provenance.
+        # Backward compatible: absent on any bundle built before this fix.
+        auto_synonyms: list[dict] = glossary.get("autoSynonyms", [])
 
         glossary_hits: list[GlossaryHit] = []
         lower_question = question.lower()
@@ -247,27 +430,84 @@ class HybridRetriever:
             expanded_terms.append(synonym["term"])
             expanded_terms.extend(synonym.get("aliases", []))
             for m in synonym.get("maps", []):
-                glossary_hits.append(self._glossary_hit_from_map(synonym["term"], m))
+                glossary_hits.append(self._glossary_hit_from_map(synonym["term"], m, confidence=1.0))
+
+        for auto_synonym in auto_synonyms:
+            term = auto_synonym["term"]
+            aliases = auto_synonym.get("aliases", [])
+            confidence = auto_synonym.get("confidence", 1.0)
+            candidate_terms = [term, *aliases]
+
+            matched_multi_word_alias = any(
+                " " in t and t.lower() in lower_question for t in candidate_terms
+            )
+            matched_bare = False
+            for t in candidate_terms:
+                if " " in t:
+                    continue
+                if not re.search(r"\b" + re.escape(t.lower()) + r"\b", lower_question):
+                    continue
+                # SEMANTIC_HINTS.md §7 stop-token deny-list: a bare short
+                # ambiguous abbreviation only counts if a multi-word alias
+                # for THIS SAME term also matched.
+                if t.lower() in _AMBIGUOUS_BARE_TERM_DENYLIST and not matched_multi_word_alias:
+                    continue
+                matched_bare = True
+                break
+
+            if not (matched_multi_word_alias or matched_bare):
+                continue
+
+            expanded_terms.append(term)
+            expanded_terms.extend(aliases)
+            for m in auto_synonym.get("maps", []):
+                glossary_hits.append(self._glossary_hit_from_map(term, m, confidence=confidence))
 
         return " ".join(expanded_terms), glossary_hits
 
     @staticmethod
-    def _glossary_hit_from_map(term: str, m: dict) -> GlossaryHit:
+    def _glossary_hit_from_map(term: str, m: dict, *, confidence: float = 1.0) -> GlossaryHit:
         kind = m.get("kind")
         if kind == "coded-measurement":
-            return GlossaryHit(term=term, resolved_column_id=m.get("valueColumnId"), time_column_id=m.get("timeColumnId"), unit=m.get("unit"))
+            value_column_id = m.get("valueColumnId")
+            # Fix D §3.3: hostingTableId is the load-bearing retrieval-pin
+            # field. Prefer an explicit `hostingTableId` (auto-mined maps
+            # always carry it); derive it from valueColumnId's table for
+            # backward compat with hand-seeded entries that don't yet carry
+            # the field (SEMANTIC_HINTS.md §3.3: "derive-from-value-column is
+            # almost certainly simplest and covers both... cases uniformly").
+            hosting_table_id = m.get("hostingTableId")
+            if not hosting_table_id and value_column_id:
+                hosting_table_id = ".".join(value_column_id.split(".")[:-1])
+            return GlossaryHit(
+                term=term,
+                resolved_column_id=value_column_id,
+                time_column_id=m.get("timeColumnId"),
+                unit=m.get("unit"),
+                hosting_table_id=hosting_table_id,
+                confidence=m.get("confidence", confidence),
+                code_value=m.get("codeValue"),
+                code_label=m.get("codeLabel") or (m.get("codeValue") if isinstance(m.get("codeValue"), str) else None),
+                code_column_id=m.get("codeColumnId"),
+            )
         if kind == "column":
-            return GlossaryHit(term=term, resolved_column_id=m.get("columnId"), time_column_id=m.get("timeColumnId"), unit=m.get("unit"))
+            return GlossaryHit(
+                term=term,
+                resolved_column_id=m.get("columnId"),
+                time_column_id=m.get("timeColumnId"),
+                unit=m.get("unit"),
+                confidence=confidence,
+            )
         if kind == "temporal-column":
-            return GlossaryHit(term=term, time_column_id=m.get("columnId"))
+            return GlossaryHit(term=term, time_column_id=m.get("columnId"), confidence=confidence)
         if kind == "table":
-            return GlossaryHit(term=term)
+            return GlossaryHit(term=term, confidence=confidence)
         if kind == "derived":
-            return GlossaryHit(term=term, resolved_column_id=m.get("toColumnId"))
+            return GlossaryHit(term=term, resolved_column_id=m.get("toColumnId"), confidence=confidence)
         # Exhaustiveness guard mirror: unknown kind -> minimal hit rather than
         # a silent drop (the TS version fails at compile time; here we degrade
         # gracefully but the term is still recorded).
-        return GlossaryHit(term=term)
+        return GlossaryHit(term=term, confidence=confidence)
 
     # ── stage 3: hybrid table recall ────────────────────────────────────────
 
@@ -339,12 +579,69 @@ class HybridRetriever:
                 survivor_set.add(edge["from"])
         return list(survivor_set)
 
+    # ── Fix A stage: BFS bridge-expand (JOINGRAPH_SURFACING.md §2, §3, §8.2) ─
+
+    def _bridge_expand(self, recalled_survivor_ids: list[str]) -> tuple[set[str], list[JoinPath]]:
+        """Runs BETWEEN graph-expand (stage 5) and LLM-prune. For every
+        unordered pair of survivors with no direct edge, BFS the shortest
+        path (<= MAX_BRIDGE_HOPS) over the precomputed adjacency map; collects
+        intermediate bridge nodes + admits up to MAX_BRIDGE_PATHS paths
+        (shortest-first, then by edge confidence descending).
+        """
+        bundle, *_ = self._ensure_loaded()
+        bridge_nodes, admitted_hops = bridge_expand(
+            self._adjacency, recalled_survivor_ids, max_hops=MAX_BRIDGE_HOPS, max_paths=MAX_BRIDGE_PATHS
+        )
+
+        join_paths: list[JoinPath] = []
+        for hops in admitted_hops:
+            nodes = [hops[0][0]] + [to_node for _from, to_node, _edge in hops]
+            hints: list[JoinHint] = []
+            for from_node, to_node, edge in hops:
+                # Preserve the EDGE's own declared from/to direction (FK-side
+                # -> PK-side) in the rendered hint regardless of the BFS walk
+                # direction (JOINGRAPH_SURFACING.md §4: direction is FK->PK).
+                from_table = bundle.get_table(edge["from"])
+                to_table = bundle.get_table(edge["to"])
+                hints.append(
+                    JoinHint(
+                        from_ref=from_table["quotedRef"] if from_table else edge["from"],
+                        from_columns=edge["fromColumns"],
+                        to_ref=to_table["quotedRef"] if to_table else edge["to"],
+                        to_columns=edge["toColumns"],
+                        join_cardinality=edge["joinCardinality"],
+                        cross_source=edge["crossSource"],
+                    )
+                )
+            join_paths.append(JoinPath(nodes=nodes, edges=hints, hop_count=len(hops)))
+
+        return bridge_nodes, join_paths
+
     # ── stage 7: render ──────────────────────────────────────────────────────
 
-    def _render_table(self, table: dict, column_id_allowlist: set[str] | None) -> RenderedTable:
+    def _render_table(
+        self, table: dict, column_id_allowlist: set[str] | None, *, role: str = "primary"
+    ) -> RenderedTable:
         required_time_column = next(
             (c["quotedName"] for c in table.get("columns", []) if c.get("isTimeColumn")), None
         )
+        fk_column_names = {
+            col_name for cols in self._fk_from_columns_by_table(table["tableId"]) for col_name in cols
+        }
+        if role == "bridge":
+            # Bridge tables render as PK/FK-only stubs (JOINGRAPH_SURFACING.md
+            # §3): they exist to be joined THROUGH, not selected FROM.
+            raw_columns = [
+                c
+                for c in table.get("columns", [])
+                if c.get("isPrimaryKey") or c["name"] in fk_column_names
+            ]
+        else:
+            raw_columns = [
+                c
+                for c in table.get("columns", [])
+                if not column_id_allowlist or c["columnId"] in column_id_allowlist or c.get("isPrimaryKey")
+            ]
         columns = [
             RenderedColumn(
                 name=c["name"],
@@ -352,9 +649,10 @@ class HybridRetriever:
                 data_type=c["dataType"],
                 unit=c.get("unit"),
                 is_time_column=c.get("isTimeColumn", False),
+                is_indexed=c.get("isIndexed", False),
+                is_foreign_key_or_primary_key=bool(c.get("isPrimaryKey") or c["name"] in fk_column_names),
             )
-            for c in table.get("columns", [])
-            if not column_id_allowlist or c["columnId"] in column_id_allowlist or c.get("isPrimaryKey")
+            for c in raw_columns
         ]
         bundle, *_ = self._ensure_loaded()
         profile = bundle.get_table_profile(table["tableId"])
@@ -366,7 +664,16 @@ class HybridRetriever:
             approx_row_count=profile.get("approxRowCount", 0) if profile else 0,
             is_large_time_series=table.get("isLargeTimeSeries", False),
             required_time_column=required_time_column,
+            role=role,
         )
+
+    def _fk_from_columns_by_table(self, table_id: str) -> list[list[str]]:
+        """All `fromColumns` lists of join-graph edges where `table_id` is the
+        FK ("from") side — used to mark FK columns for bridge-stub rendering
+        and for Fix C's selective-column derivation.
+        """
+        bundle, *_ = self._ensure_loaded()
+        return [edge["fromColumns"] for edge in bundle.join_graph.get("edges", []) if edge["from"] == table_id]
 
     @staticmethod
     def _build_cardinality_warning(table: RenderedTable) -> CardinalityWarning:
@@ -385,6 +692,9 @@ class HybridRetriever:
         )
 
     def _build_join_hints(self, survivor_table_ids: list[str]) -> list[JoinHint]:
+        """Tier 1 (JOINGRAPH_SURFACING.md §2): edges among final rendered
+        survivors — unchanged existing behavior.
+        """
         bundle, *_ = self._ensure_loaded()
         survivor_set = set(survivor_table_ids)
         hints: list[JoinHint] = []
@@ -403,6 +713,17 @@ class HybridRetriever:
                     )
                 )
         return hints
+
+    @staticmethod
+    def _restrict_join_paths_to_rendered(
+        join_paths: list[JoinPath], rendered_table_ids: set[str]
+    ) -> list[JoinPath]:
+        """Tier 2: restrict bridge JoinPaths to those whose every node
+        actually made it into the final rendered set (JOINGRAPH_SURFACING.md
+        §8.2 step 5: "Bridge nodes feed back into stage 7 render as
+        protected... tables").
+        """
+        return [jp for jp in join_paths if all(n in rendered_table_ids for n in jp.nodes)]
 
     def _recall_exemplars(self, question: str, exemplar_k: int) -> list[Exemplar]:
         bundle, *_ = self._ensure_loaded()
@@ -432,17 +753,94 @@ class HybridRetriever:
         source_scope = opts.source_scope
 
         recalled_table_ids = self._recall_tables(expanded, source_scope, recall_tables_count)
+
+        # Fix D §4.2/§8.3 — the RETRIEVAL PIN: a matched glossary hint's
+        # hosting table is injected at rank 0, AHEAD of the dense/BM25 fused
+        # list, bypassing dense/BM25 entirely for a known coded-measurement
+        # hit. This is the recall fix for "HR" never surfacing MonitorMeasurements.
+        pinned_table_ids = [
+            h.hosting_table_id
+            for h in glossary_hits
+            if h.hosting_table_id and h.confidence >= HINT_PIN_THRESHOLD
+        ]
+        # De-dupe while preserving pin-then-recall order.
+        seen: set[str] = set()
+        ordered_recalled_table_ids: list[str] = []
+        for tid in [*pinned_table_ids, *recalled_table_ids]:
+            if tid in seen:
+                continue
+            seen.add(tid)
+            ordered_recalled_table_ids.append(tid)
+        recalled_table_ids = ordered_recalled_table_ids
+
         recalled_column_ids = self._recall_columns(expanded, recalled_table_ids, recall_columns_count)
         recalled_column_id_set = set(recalled_column_ids)
 
         expanded_table_ids = self._graph_expand(recalled_table_ids)
+        # Preserve the pin-then-recall RANK ORDER through graph-expand: the
+        # newly-reachable FK neighbors are appended after the already-ordered
+        # `recalled_table_ids` (pins at rank 0), rather than the arbitrary
+        # set-iteration order `_graph_expand` returns internally — this is
+        # what lets the deterministic stub LLM-prune's "keep incoming order,
+        # truncate to max_tables" actually respect the pin under a tight cap.
+        ordered_expanded_table_ids = list(recalled_table_ids)
+        seen_expanded = set(ordered_expanded_table_ids)
+        for tid in expanded_table_ids:
+            if tid in seen_expanded:
+                continue
+            seen_expanded.add(tid)
+            ordered_expanded_table_ids.append(tid)
+        expanded_table_ids = ordered_expanded_table_ids
+
+        # Fix A §2/§3 — BFS bridge-expand + bridge-protect: pull in the
+        # shortest connecting paths (and their intermediate bridge tables)
+        # between survivor pairs with no direct edge, BEFORE LLM-prune runs,
+        # and reserve slots for protected/bridge tables so max_tables
+        # truncation does not drop them ahead of lower-value non-bridge
+        # candidates (JOINGRAPH_SURFACING.md §3's bridge-protect pseudocode).
+        bridge_nodes, join_paths = self._bridge_expand(expanded_table_ids)
+        candidate_ids = list(expanded_table_ids)
+        seen_candidates = set(candidate_ids)
+        for tid in bridge_nodes:
+            if tid in seen_candidates:
+                continue
+            seen_candidates.add(tid)
+            candidate_ids.append(tid)
 
         candidates = [
             {"tableId": tid, "grain": (bundle.get_table(tid) or {}).get("grain") or f"table {tid}"}
-            for tid in expanded_table_ids
+            for tid in candidate_ids
         ]
         pruned_table_ids = self._llm_prune(question, candidates, opts.max_tables)
-        final_table_ids = pruned_table_ids[: opts.max_tables]
+
+        # Bridge-protect (+ pin-protect): if the LLM-prune truncated away a
+        # bridge node a still-admitted path needs, OR a pinned hosting table,
+        # re-admit it ahead of the cut — reserve slots for protected tables
+        # before truncating the rest. Pinned tables are protected the same
+        # way bridge nodes are: a "guaranteed recall" hit must not be silently
+        # dropped by a tight max_tables cap either.
+        protected_ordered = [t for t in pinned_table_ids if t in candidate_ids] + [
+            t for t in bridge_nodes if t in candidate_ids and t not in pinned_table_ids
+        ]
+
+        final_table_ids = list(pruned_table_ids[: opts.max_tables])
+        missing_protected = [t for t in protected_ordered if t not in final_table_ids]
+        if missing_protected and len(final_table_ids) + len(missing_protected) <= opts.max_tables:
+            final_table_ids.extend(missing_protected)
+        elif missing_protected:
+            # Not enough room for every protected table: reserve slots for
+            # them first (pins ahead of bridges, per `protected_ordered`'s
+            # construction), capped at max_tables, then fill any remainder
+            # with the highest-ranked non-protected candidates.
+            protected_capped = missing_protected[: opts.max_tables]
+            non_protected_ranked = [t for t in pruned_table_ids if t not in protected_ordered]
+            room_for_non_protected = max(opts.max_tables - len(protected_capped), 0)
+            final_table_ids = [*protected_capped, *non_protected_ranked[:room_for_non_protected]]
+
+        final_table_id_set = set(final_table_ids)
+        # A bridge node renders as a stub UNLESS it also independently
+        # survived as a primary candidate (e.g. it was recalled directly).
+        primary_rendered_ids = set(recalled_table_ids) | (set(final_table_ids) - bridge_nodes)
 
         rendered_tables: list[RenderedTable] = []
         running_tokens = 0
@@ -450,21 +848,36 @@ class HybridRetriever:
             table = bundle.get_table(table_id)
             if not table:
                 continue
+            role = "bridge" if table_id in bridge_nodes and table_id not in primary_rendered_ids else "primary"
             column_allowlist = recalled_column_id_set if table_id in recalled_table_ids else None
-            rendered = self._render_table(table, column_allowlist)
+            rendered = self._render_table(table, column_allowlist, role=role)
             rendered_tokens = _estimate_tokens(_render_table_for_estimate(rendered))
             if rendered_tables and running_tokens + rendered_tokens > opts.token_budget:
+                # Bridge tables are protected from the token-budget cut too,
+                # as long as at least one non-bridge table already rendered
+                # (JOINGRAPH_SURFACING.md §3/§6): a bridge-only render with no
+                # target table would be useless, so only skip the BREAK for a
+                # bridge stub, never force past budget for a primary table.
+                if role == "bridge":
+                    rendered_tables.append(rendered)
+                    running_tokens += rendered_tokens
+                    continue
                 break
             rendered_tables.append(rendered)
             running_tokens += rendered_tokens
 
-        cardinality_warnings = [self._build_cardinality_warning(t) for t in rendered_tables if t.is_large_time_series]
+        rendered_table_ids = {t.table_id for t in rendered_tables}
+        cardinality_warnings = [
+            self._build_cardinality_warning(t) for t in rendered_tables if t.is_large_time_series
+        ]
         join_hints = self._build_join_hints([t.table_id for t in rendered_tables])
+        rendered_join_paths = self._restrict_join_paths_to_rendered(join_paths, rendered_table_ids)
         exemplars = self._recall_exemplars(question, exemplar_k)
 
         return SchemaContext(
             tables=rendered_tables,
             join_hints=join_hints,
+            join_paths=rendered_join_paths,
             cardinality_warnings=cardinality_warnings,
             glossary_hits=glossary_hits,
             exemplars=exemplars,

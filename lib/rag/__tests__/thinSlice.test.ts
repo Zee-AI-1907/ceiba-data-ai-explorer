@@ -58,6 +58,7 @@ const schemaContext: PromptSchemaContext = {
       approxRowCount: 480,
       isLargeTimeSeries: true,
       requiredTimeColumn: '"RecordedAt"',
+      role: 'primary',
       columns: [
         { name: 'Id', quotedName: '"Id"', dataType: 'BIGINT', isTimeColumn: false },
         { name: 'DeviceId', quotedName: '"DeviceId"', dataType: 'INTEGER', isTimeColumn: false },
@@ -73,6 +74,7 @@ const schemaContext: PromptSchemaContext = {
       grain: 'one row = one measurement type in the shared reference vocabulary',
       approxRowCount: 5,
       isLargeTimeSeries: false,
+      role: 'primary',
       columns: [
         { name: 'MeasurementTypeId', quotedName: '"MeasurementTypeId"', dataType: 'INTEGER', isTimeColumn: false },
         { name: 'name', quotedName: '"name"', dataType: 'TEXT', isTimeColumn: false },

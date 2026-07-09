@@ -331,11 +331,34 @@ Generalizes `lib/clinicalContext.ts` from code to versioned data (research §2.4
     { "phrase": "yesterday",    "kind": "relative-to-now", "intervalIso": "P1D" },
     { "phrase": "within 24h of admission", "kind": "relative-to-event",
       "eventColumnId": "staging.Shared.Acceptances.AcceptanceDate", "intervalIso": "PT24H" }
+  ],
+  "autoSynonyms": [
+    {
+      "term": "HR",
+      "aliases": ["heart rate", "pulse"],
+      "provenance": "curated",              // "curated" (hand-seeded alias, confidence 1.0) | "embedding" (deferred — see docs/research/SEMANTIC_HINTS.md §9)
+      "confidence": 1.0,
+      "maps": [
+        {
+          "kind": "coded-measurement",
+          "codeValue": 2,                                                   // MeasurementTypeId, from a REAL mined code row — never fabricated
+          "codeRefTableId":  "staging.Shared.MonitorMeasurementTypes",
+          "codeRefColumnId": "staging.Shared.MonitorMeasurementTypes.Id",
+          "codeColumnId":    "staging.Shared.MonitorMeasurements.MeasurementTypeId",
+          "valueColumnId":   "staging.Shared.MonitorMeasurements.Value",
+          "hostingTableId":  "staging.Shared.MonitorMeasurements",           // the retrieval-pin anchor (docs/research/SEMANTIC_HINTS.md §3.3)
+          "timeColumnId":    "staging.Shared.MonitorMeasurements.MeasuredDate",
+          "unit": "bpm"
+        }
+      ]
+    }
   ]
 }
 ```
 
 > The generator picks the time column **by the fact being filtered** (research §2.4, §3.2a): "HR > 120 in the last 3 hours" resolves `heart rate`→`HeartRate` and its `timeColumnId`→`RecordedAt`, so the window lands on the right column — not on `AcceptanceDate` (the bug generalized away from `TIME_RANGE_HINTS`).
+
+> **`autoSynonyms`** (docs/research/SEMANTIC_HINTS.md §3.2/§8.2, additive/backward-compatible — absent or `[]` on an older bundle, never crashes a reader): the machine-mined synonym matrix, auto-generated at prep build time from `catalog.json` + `joingraph.json` + `profiles.json`/`phi.json` (`prep/prep/enrich/code_tables.py`'s code-table detector) plus a hand-curated alias seed (`config/synonym_aliases.seed.yaml`). Kept separate from the hand-authored `synonyms` block for auditable provenance. Every `coded-measurement` map (both `autoSynonyms`-mined AND hand-seeded `synonyms` entries) additionally carries **`hostingTableId`** (the fact table the coded value lives on — the retrieval-boost anchor the runtime pins into the survivor set, §4.1 below) and **`confidence`** (1.0 for curated/declared resolutions). `hostingTableId` is derived from `valueColumnId`'s owning table when not explicitly present, so every existing hand-seeded bundle gets it "for free" without a seed-file change.
 
 ### 1.10 `exemplars.json` — few-shot NL→SQL exemplars
 
@@ -649,7 +672,8 @@ Replaces `getRelevantSchema`/`getSchemaForDb` keyword scoring. Coarse-to-fine, h
 
 export interface SchemaContext {
   tables: RenderedTable[]          // ONLY the survivors, full column detail
-  joinHints: JoinHint[]            // FK edges among the survivors (from joingraph.json)
+  joinHints: JoinHint[]            // Tier-1 FK edges among the survivors (from joingraph.json)
+  joinPaths: JoinPath[]            // Tier-2 BFS bridge paths, restricted to rendered survivors (docs/research/JOINGRAPH_SURFACING.md §2)
   cardinalityWarnings: CardinalityWarning[]  // per large table hit (research §3.2a)
   glossaryHits: GlossaryHit[]      // term → column/time-column/unit resolutions used
   exemplars: Exemplar[]            // top-k similar NL→SQL pairs (research §3.1.3)
@@ -659,19 +683,27 @@ export interface SchemaContext {
 
 export interface RenderedTable {
   tableId: string; quotedRef: string; grain: string
-  columns: { name: string; quotedName: string; dataType: string; unit?: string; isTimeColumn: boolean }[]
+  columns: { name: string; quotedName: string; dataType: string; unit?: string; isTimeColumn: boolean; isIndexed?: boolean; isForeignKeyOrPrimaryKey?: boolean }[]
   approxRowCount: number; isLargeTimeSeries: boolean
+  role: 'primary' | 'bridge'       // 'bridge' renders as a PK/FK-only stub (docs/research/JOINGRAPH_SURFACING.md §3)
 }
 export interface JoinHint {
   fromRef: string; fromColumns: string[]; toRef: string; toColumns: string[]
   joinCardinality: string; crossSource: boolean
+}
+export interface JoinPath {
+  nodes: string[]; edges: JoinHint[]; hopCount: number   // a BFS-shortest bridge path connecting two survivors (§4.1 step 5b)
 }
 export interface CardinalityWarning {
   tableId: string; approxRowCount: number
   requiredTimeColumn: string | null   // the indexed time column to bound on (research §3.2a)
   message: string                      // injected verbatim into the prompt
 }
-export interface GlossaryHit { term: string; resolvedColumnId?: string; timeColumnId?: string; unit?: string }
+export interface GlossaryHit {
+  term: string; resolvedColumnId?: string; timeColumnId?: string; unit?: string
+  hostingTableId?: string; confidence: number   // docs/research/SEMANTIC_HINTS.md §3.3 — the retrieval-pin anchor
+  codeValue?: string | number; codeLabel?: string; codeColumnId?: string
+}
 
 export interface RetrieveOptions {
   tokenBudget: number              // max tokens for rendered schema context (e.g. 2500)
@@ -694,15 +726,18 @@ export interface Retriever {
 
 Each stage divides the ~1,200-table space by an order of magnitude (research §2.3a "never rank all columns flat"):
 
-1. **Expand + normalize** the question with `glossary.abbreviations` (the `clinicalContext` expansion, now data-driven) *before* retrieval, feeding expanded terms to both retrievers (research §2.2).
+1. **Expand + normalize** the question with `glossary.abbreviations` (the `clinicalContext` expansion, now data-driven) *before* retrieval, feeding expanded terms to both retrievers (research §2.2). This stage ALSO scans `glossary.synonyms` AND `glossary.autoSynonyms` (docs/research/SEMANTIC_HINTS.md §3.2) for a term/alias match against the question, producing `glossaryHits` — bare short ambiguous abbreviations (`map`, `temp`, `pa`, `sap`) require a full multi-word alias match, per the stop-token deny-list (SEMANTIC_HINTS.md §7).
 2. **Domain/schema prune** (coarse): map question → candidate `domain`/`schema` set via glossary + schema doc similarity, restricting the vector search space (research §2.3a #2, the 5-schema split is a free partition).
 3. **Table recall** (hierarchical stage 1): hybrid **dense (DuckDB-vss HNSW over `doc_kind='table'`) + BM25 (lexical over table names/grain)**, fused by **reciprocal-rank fusion**; bias by `importanceScore` (research §2.3a #3). Keep top `recallTables`.
+   - **Retrieval pin** (SEMANTIC_HINTS.md §4.2/§8.3): any `glossaryHits[].hostingTableId` whose `confidence >= HINT_PIN_THRESHOLD` (0.62; curated hits are always 1.0) is unioned at rank 0, AHEAD of the dense/BM25 fused list — this bypasses dense/BM25 entirely for a known coded-measurement hit (the fix for a hosting table like `MonitorMeasurements` never surfacing lexically/semantically for "heart rate").
 4. **Column recall** (hierarchical stage 2): hybrid dense+BM25 over `doc_kind='column'` **scoped to the recalled tables only**. Keep top `recallColumns` (research §2.3a #1).
-5. **Graph-expand**: pull FK neighbors of every survivor from `joingraph.json` into the candidate set — a column is useless without its join partners (research §2.2).
-6. **LLM-prune** (precision): send the cheap model **table names + one-line grains only** (not full columns) to select the final ≤ `maxTables` tables (research §2.3a #4).
-7. **Render**: the structured layer emits only the survivor tables with full column detail + join edges among them, honoring `tokenBudget`; attach `cardinalityWarnings` for any `isLargeTimeSeries` survivor, and `glossaryHits`/`exemplars`.
+5. **Graph-expand + bridge-expand**:
+   - (a) pull FK neighbors of every survivor from `joingraph.json` into the candidate set — a column is useless without its join partners (research §2.2).
+   - (b) **BFS bridge-expand** (docs/research/JOINGRAPH_SURFACING.md §2/§3): for every unordered pair of survivors with NO direct edge, BFS the shortest path (≤ `MAX_BRIDGE_HOPS`=3 hops) over the join graph's precomputed undirected adjacency map; every intermediate (bridge) table is pulled into the candidate set and PROTECTED from prune/token-budget truncation (reserving slots ahead of lower-value non-bridge candidates), ranked shortest-first then by edge confidence descending, capped at `MAX_BRIDGE_PATHS`=6. This is the fix for a 3-hop path (e.g. `MonitorMeasurements→Monitors→Acceptances→Patients`) whose bridge tables (`Monitors`, `Acceptances`) the column-recall stage has no reason to rank on their own.
+6. **LLM-prune** (precision): send the cheap model **table names + one-line grains only** (not full columns) to select the final ≤ `maxTables` tables (research §2.3a #4). Pinned tables and bridge nodes are re-admitted ahead of the cut if the prune stage would otherwise drop them.
+7. **Render**: the structured layer emits only the survivor tables with full column detail (bridge tables render as PK/FK-only stubs, `role: 'bridge'`) + Tier-1 join edges among rendered survivors (`joinHints`) + Tier-2 bridge paths restricted to the rendered set (`joinPaths`), honoring `tokenBudget`; attach `cardinalityWarnings` for any `isLargeTimeSeries` survivor, and `glossaryHits`/`exemplars`.
 
-BM25 is built at load time over the bundle's document text (no external service). Dense uses the same local embedding model id as the bundle (verified against the manifest — §1.2).
+BM25 is built at load time over the bundle's document text (no external service). Dense uses the same local embedding model id as the bundle (verified against the manifest — §1.2). The join-graph adjacency map is precomputed once at `load()` time alongside the BM25 indices (JOINGRAPH_SURFACING.md §6), so bridge-expand's BFS is O(microseconds) per survivor pair even at ~1,200-table scale.
 
 ---
 
@@ -756,7 +791,11 @@ interface SqlGenerateResponse {
 
 - **Untrusted user text is delimited** between `<user_request>…</user_request>`, marked as DATA not instructions — the existing route's stance (research §3, `sql-generate/route.ts` H25). Retrieved schema/exemplars/warnings go in the *system* prompt; the raw question goes in the *user* prompt inside the delimiters.
 - **Dialect is `engine.dialect()`**, not a hardcoded string. The generation prompt states the exact dialect + `intervalSyntax` + `identifierQuote` from `capabilities()` (research §3.1.5, R6). This removes the "Generate PostgreSQL" vs actual-engine mismatch.
+- **Table refs are source-qualified** (`{sourceId}.{quotedRef}`, e.g. `staging."Shared"."MonitorMeasurements"`) everywhere a table is rendered into generation-facing text — table headers, join-graph edges, bridge stubs, semantic-hints filter literals — so the generated SQL's `FROM`/`JOIN` clauses are directly catalog-qualified against the DuckDB `ATTACH` topology (§3.2: `alias === sourceId`). This does NOT change `RenderedTable.quotedRef` itself (schema-only, used internally by the retriever's token estimator and by the cardinality guard's bare-name extraction); the prefix is applied only at render time.
+- **SEMANTIC HINTS section** (docs/research/SEMANTIC_HINTS.md §5): inserted between SCHEMA CONTEXT and JOIN GRAPH, rendering every `glossaryHits` entry that actually matched the question (`resolvedColumnId`/`hostingTableId`/`timeColumnId` present), capped at `MAX_SEMANTIC_HINTS`=6. Prefers a literal code filter (`"MonitorMeasurements"."MeasurementTypeId" = 2 -- code 2 = 'HR'`) over an extra lookup-table join when the code is stable, and names the hosting table so the model can connect the hint to the JOIN GRAPH below it.
+- **JOIN GRAPH section** (docs/research/JOINGRAPH_SURFACING.md §8.1): inserted between SEMANTIC HINTS and CARDINALITY WARNINGS. Renders "Edges among selected tables:" in the exact `"A"."col" = "B"."col" [N:1]` compact M-Schema-style form (cardinality tag from `joinCardinality`: many-to-one→`[N:1]`, one-to-many→`[1:N]`, one-to-one→`[1:1]`, many-to-many→`[N:N]`), then "Multi-hop path (...):" arrow-chain lines per admitted `JoinPath` (`"A" →(col=col, N:1) "B" →(col=col, N:1) "C"`), then a "BRIDGE tables (...)" section listing each bridge table's source-qualified ref + PK/FK join columns only. Capped at ~15% of `tokenBudget` (`JOIN_GRAPH_TOKEN_CEILING_FRACTION`); bridge paths are admitted shortest-first, dropping the longest/lowest-confidence ones first if the cap trips. The preamble also states the fan-out rule: *"When a join is 1:N or N:1 and you aggregate the 'one' side, use COUNT(DISTINCT ...) / guard against row fan-out."*
 - **Cardinality warnings** from `SchemaContext.cardinalityWarnings` are injected verbatim: e.g. *"`MonitorMeasurements` has ~337M rows; you MUST include a time-bound predicate on `RecordedAt` and a `LIMIT`; do not scan unbounded."* (research §3.2a).
+- **Section order**: SCHEMA CONTEXT → SEMANTIC HINTS → JOIN GRAPH → CARDINALITY WARNINGS → the delimited user question. `assembleRepairPrompt` inherits all of the above for free, since it delegates to `assemblePrompt` internally.
 
 ### 5.4 Cardinality guard
 
@@ -767,14 +806,22 @@ New module; the natural sibling of the `sqlGuard.ts` H25 table-allowlist seam (r
 export interface CardinalityVerdict {
   allowed: boolean
   action: 'pass' | 'repair' | 'reject'
-  repairHint?: string              // fed to the self-repair loop (§5.5): "add a time bound on RecordedAt"
+  repairHint?: string              // fed to the self-repair loop (§5.5): "add a time bound on RecordedAt, or an equality/IN filter on an indexed column (e.g. PatientId)"
   reason?: string
 }
 export function cardinalityGuard(sql: string, ctx: SchemaContext): CardinalityVerdict
-// Policy: if the SQL references a table with isLargeTimeSeries=true AND has no predicate on that
-// table's requiredTimeColumn (indexed) AND/OR no LIMIT → action='repair' (preferred) or 'reject'.
-// Detection is lexical over guard-stripped SQL (reuses sqlGuard's stripCommentsAndSplit), matching
-// the large table's quotedRef and its indexed time column. Missing LIMIT alone → append LIMIT (repair).
+// Policy (strengthened): for a table flagged isLargeTimeSeries=true, a SELECTIVE predicate is
+// required — EITHER (a) a valid time-bound predicate on the table's requiredTimeColumn (when
+// configured), OR (b) a selective equality/IN predicate on one of the table's indexed/FK/PK
+// columns (LargeTableSpec.selectiveColumns). A table satisfying NEITHER is "unbounded" →
+// action='reject', regardless of whether a LIMIT is present — a LIMIT after a full unfiltered
+// scan still scans the whole table before limiting (the fix for a "ventilator count" query timing
+// out over a 271M-row table with a LIMIT but no selective filter at all). A table satisfying (a)
+// OR (b) but missing a LIMIT → action='repair' (append one) — unchanged for the already-passing
+// time-bound-satisfied case. Python (ceiba_nl2sql/ceiba_nl2sql/guard/cardinality.py) walks the
+// sqlglot AST for an `exp.EQ`/`exp.In` node whose column resolves to a selective column; the TS
+// mirror (lib/rag/cardinalityGuard.ts) uses an equivalent lexical/regex check
+// (hasSelectiveEqualityOrInPredicate), consistent with its own lexical (not AST) detection approach.
 ```
 
 Wired into `guardSql` via the H25 `tableAllowlist` seam for the known-tables check, and run as a *separate* step for the predicate/LIMIT policy (the allowlist seam answers "is this table allowed", the cardinality guard answers "is this scan bounded").

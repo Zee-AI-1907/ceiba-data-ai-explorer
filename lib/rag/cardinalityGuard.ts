@@ -47,6 +47,12 @@ export interface LargeTableSpec {
   tableName: string
   /** Fully-quoted reference for display in messages (e.g. `"MeasurementsMock"`). */
   quotedRef?: string
+  /**
+   * Fix C: indexed/FK/PK bare column names for this table — feeds the
+   * selective equality/IN predicate escape hatch (see
+   * `hasSelectiveEqualityOrInPredicate`).
+   */
+  selectiveColumns?: string[]
 }
 
 export interface CardinalityGuardOptions {
@@ -98,6 +104,26 @@ function hasTimeBoundPredicate(sql: string, timeColumn: string): boolean {
   return pattern.test(sql)
 }
 
+/**
+ * Fix C: lexical equivalent of `hasTimeBoundPredicate`, but for an equality
+ * (`=`) or `IN (...)` predicate against one of `selectiveColumns` — a
+ * large table's indexed/FK/PK bare column names. This is the escape-hatch
+ * selective predicate that lets a query pass without a time bound when it
+ * instead filters on a real selective (indexed/FK/PK) column, e.g.
+ * `WHERE "PatientId" = 42` on a table with no time column configured.
+ */
+function hasSelectiveEqualityOrInPredicate(sql: string, selectiveColumns: string[]): boolean {
+  if (selectiveColumns.length === 0) return false
+  return selectiveColumns.some((col) => {
+    const escaped = col.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    // `(?:\w+\.)?"?col"?` optionally table/alias-qualified, followed by `=`
+    // (not `==`/`<=`/`>=`, avoid matching those) or `IN (`.
+    const eqPattern = new RegExp(`(?:\\w+\\.)?"?${escaped}"?\\s*=(?!=)`, 'i')
+    const inPattern = new RegExp(`(?:\\w+\\.)?"?${escaped}"?\\s+IN\\s*\\(`, 'i')
+    return eqPattern.test(sql) || inPattern.test(sql)
+  })
+}
+
 /** Appends a LIMIT clause to SQL that has none. Assumes a single statement (guardSql already enforces this upstream). */
 function appendLimit(sql: string, limit: number): string {
   const trimmed = sql.trimEnd()
@@ -125,34 +151,42 @@ export function cardinalityGuard(sql: string, options: CardinalityGuardOptions):
     return { ok: true, action: 'pass' }
   }
 
-  const missingTimeBoundTables: LargeTableSpec[] = []
+  // Fix C: a table satisfies the SELECTIVE-predicate policy via EITHER (a) a
+  // valid time-bound predicate on its configured requiredTimeColumn, OR (b)
+  // a selective equality/IN predicate on one of its indexed/FK/PK columns.
+  // Only a table satisfying NEITHER is "unbounded".
+  const unboundedTables: LargeTableSpec[] = []
   for (const table of referencedLargeTables) {
     const timeColumn = options.requiredTimeColumnByTable[table.tableName]
-    if (!timeColumn) {
-      // A large table with no configured requiredTimeColumn: we cannot verify a
-      // bound, so we cannot safely pass it. Treat as reject (no fabricated repair).
-      missingTimeBoundTables.push(table)
-      continue
-    }
-    if (!hasTimeBoundPredicate(stripped, timeColumn)) {
-      missingTimeBoundTables.push(table)
-    }
+    const hasTimeBound = !!timeColumn && hasTimeBoundPredicate(stripped, timeColumn)
+    if (hasTimeBound) continue
+    const hasSelectivePredicate = hasSelectiveEqualityOrInPredicate(stripped, table.selectiveColumns ?? [])
+    if (hasSelectivePredicate) continue
+    unboundedTables.push(table)
   }
 
-  if (missingTimeBoundTables.length > 0) {
-    const names = missingTimeBoundTables.map((t) => t.quotedRef ?? t.tableName).join(', ')
-    const hints = missingTimeBoundTables
+  if (unboundedTables.length > 0) {
+    const names = unboundedTables.map((t) => t.quotedRef ?? t.tableName).join(', ')
+    const hints = unboundedTables
       .map((t) => {
         const col = options.requiredTimeColumnByTable[t.tableName]
-        return col
-          ? `Add a time-bound predicate on ${col} for ${t.quotedRef ?? t.tableName} (e.g. WHERE ${col} >= now() - INTERVAL '...').`
-          : `${t.quotedRef ?? t.tableName} is a large table with no known time column configured; a bounding predicate is required before this query can run.`
+        const hasSelectiveColumns = (t.selectiveColumns ?? []).length > 0
+        if (col && hasSelectiveColumns) {
+          return `Add a time-bound predicate on ${col} for ${t.quotedRef ?? t.tableName} (e.g. WHERE ${col} >= now() - INTERVAL '...'), or an equality/IN filter on an indexed column (e.g. ${t.selectiveColumns![0]}).`
+        }
+        if (col) {
+          return `Add a time-bound predicate on ${col} for ${t.quotedRef ?? t.tableName} (e.g. WHERE ${col} >= now() - INTERVAL '...').`
+        }
+        if (hasSelectiveColumns) {
+          return `${t.quotedRef ?? t.tableName} is a large table with no known time column configured; add an equality/IN filter on an indexed column (e.g. ${t.selectiveColumns![0]}).`
+        }
+        return `${t.quotedRef ?? t.tableName} is a large table with no known time column configured; a bounding predicate is required before this query can run.`
       })
       .join(' ')
     return {
       ok: false,
       action: 'reject',
-      reason: `Unbounded scan of large table(s) ${names}: missing a required time-bound predicate.`,
+      reason: `Unbounded scan of large table(s) ${names}: missing a required selective predicate (a time-bound predicate on the configured time column, or an equality/IN filter on an indexed/FK column).`,
       repairHint: hints,
     }
   }
@@ -199,6 +233,15 @@ function bareColumnNameOf(quotedColumn: string): string {
 }
 
 /**
+ * Fix C: derive a large table's selective (indexed/FK/PK) bare column names
+ * from its rendered columns. A column counts as selective when it is
+ * indexed (`isIndexed`) or a primary/foreign key (`isForeignKeyOrPrimaryKey`).
+ */
+function selectiveColumnsOf(table: RenderedTable): string[] {
+  return table.columns.filter((c) => c.isIndexed || c.isForeignKeyOrPrimaryKey).map((c) => c.name)
+}
+
+/**
  * buildCardinalityGuardOptions — derive the large-table bounding policy directly
  * from a retrieved `SchemaContext` (SPEC §5.4: `cardinalityGuard(sql, ctx)`).
  * Every survivor table flagged `isLargeTimeSeries` becomes a `LargeTableSpec`,
@@ -216,7 +259,7 @@ export function buildCardinalityGuardOptions(
   for (const table of ctx.tables) {
     if (!table.isLargeTimeSeries) continue
     const tableName = bareTableNameOf(table)
-    largeTables.push({ tableName, quotedRef: table.quotedRef })
+    largeTables.push({ tableName, quotedRef: table.quotedRef, selectiveColumns: selectiveColumnsOf(table) })
     if (table.requiredTimeColumn) {
       requiredTimeColumnByTable[tableName] = bareColumnNameOf(table.requiredTimeColumn)
     }

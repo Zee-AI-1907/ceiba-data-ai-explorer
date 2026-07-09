@@ -5,18 +5,29 @@ docs/PYTHON_NL2SQL_SERVICE_PLAN.md §1.1, §1.3, §3.1, §3.2: "Upgraded from
 lexical to sqlglot-AST detection of large-table scans").
 
 ── Policy (mirrors NL2SQL_SPEC.md §5.4 / lib/rag/cardinalityGuard.ts) ───────
-For each configured large/time-series table referenced by the SQL:
-  - Missing LIMIT (anywhere in the statement) alone -> action='repair':
-    append a LIMIT to the repaired SQL.
-  - No predicate on the table's required_time_column -> action='reject' with
-    a repair_hint describing which column to bound on, UNLESS the table has
-    no required_time_column configured, in which case action='reject' too
-    (no safe repair is possible — the correct time window is a business
-    decision the guard cannot fabricate).
-  - A wholly-unbounded scan (no time predicate at all on a table with a known
-    required time column) is `reject`, not silently repairable. Only a "has
-    a time bound, missing LIMIT" case is auto-repaired (safe,
-    meaning-preserving).
+For each configured large/time-series table referenced by the SQL, a
+SELECTIVE predicate is required — EITHER (a) a valid time-bound predicate on
+the table's required_time_column (when one is configured), OR (b) a selective
+equality/IN predicate on one of the table's indexed/FK/PK columns
+(`selective_columns`). Concretely:
+  - Missing LIMIT (anywhere in the statement) alone, with a selective
+    predicate otherwise satisfied -> action='repair': append a LIMIT to the
+    repaired SQL.
+  - A table WITH a configured required_time_column and a valid time-bound
+    predicate on it -> the policy is satisfied via (a); the equality/IN
+    alternative is not needed (existing behavior, UNCHANGED).
+  - A table WITHOUT a valid time-bound predicate (either no required_time_column
+    is configured, or one is configured but no bound is present) now also
+    checks for (b): a selective equality/IN predicate on an indexed/FK/PK
+    column. If found, the policy is satisfied the same way (a) would have
+    been — pass, or repair for a missing LIMIT.
+  - Only if NEITHER (a) NOR (b) holds is the table "unbounded" -> action=
+    'reject', not silently repairable (no safe repair is possible — the
+    correct time window or filter is a business decision the guard cannot
+    fabricate). This is the Fix C hardening: a bare COUNT(*)/full scan with a
+    LIMIT but no selective filter at all (e.g. a 271M-row table scanned before
+    the LIMIT even applies) is rejected regardless of whether a LIMIT is
+    present — "a LIMIT after a full scan still scans".
 
 ── Why sqlglot instead of the TS lexical/regex approach ─────────────────────
 `lib/rag/cardinalityGuard.ts`'s own header calls this a defense-in-depth
@@ -43,7 +54,7 @@ real bound — a `LIMIT $1` placeholder is treated as absent, matching the TS
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import sqlglot
@@ -69,6 +80,10 @@ class LargeTableSpec:
 
     table_name: str
     quoted_ref: str | None = None
+    # Fix C: indexed/FK/PK bare column names for this table — feeds the
+    # selective equality/IN predicate escape hatch (see
+    # `_has_selective_equality_or_in_predicate`).
+    selective_columns: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -162,6 +177,36 @@ def _has_time_bound_predicate(root: exp.Expression, time_column: str) -> bool:
     return False
 
 
+def _has_selective_equality_or_in_predicate(root: exp.Expression, selective_columns: list[str]) -> bool:
+    """Fix C: walks the WHOLE statement AST for an `exp.EQ` or `exp.In` node
+    whose column operand (unwrapping a CAST, same as `_has_time_bound_predicate`)
+    matches (case-insensitive) one of `selective_columns` (a large table's
+    indexed/FK/PK bare column names). This is the escape-hatch selective
+    predicate that lets a query pass without a time bound when it instead
+    filters on a real selective (indexed/FK/PK) column — e.g. `WHERE
+    "PatientId" = 42` on a table with no time column configured.
+    """
+    if not selective_columns:
+        return False
+    targets = {c.lower() for c in selective_columns}
+
+    for node in root.walk():
+        node = node[0] if isinstance(node, tuple) else node
+        if isinstance(node, exp.EQ):
+            operands = [node.this, node.expression]
+        elif isinstance(node, exp.In):
+            operands = [node.this]
+        else:
+            continue
+        for operand in operands:
+            probe = operand
+            if isinstance(probe, exp.Cast):
+                probe = probe.this
+            if isinstance(probe, exp.Column) and probe.name.lower() in targets:
+                return True
+    return False
+
+
 def _append_limit(sql: str, limit: int) -> str:
     trimmed = sql.rstrip()
     had_trailing_semicolon = trimmed.endswith(";")
@@ -218,32 +263,51 @@ def cardinality_guard(
     if not referenced_large_tables:
         return CardinalityVerdict(ok=True, action="pass")
 
-    missing_time_bound_tables: list[LargeTableSpec] = []
+    # Fix C: a table satisfies the SELECTIVE-predicate policy via EITHER (a) a
+    # valid time-bound predicate on its configured required_time_column, OR
+    # (b) a selective equality/IN predicate on one of its indexed/FK/PK
+    # columns. Only a table satisfying NEITHER is "unbounded".
+    unbounded_tables: list[LargeTableSpec] = []
     for table in referenced_large_tables:
         time_column = required_time_column_by_table.get(table.table_name)
-        if not time_column:
-            missing_time_bound_tables.append(table)
+        has_time_bound = bool(time_column) and _has_time_bound_predicate(root, time_column)
+        if has_time_bound:
             continue
-        if not _has_time_bound_predicate(root, time_column):
-            missing_time_bound_tables.append(table)
+        has_selective_predicate = _has_selective_equality_or_in_predicate(root, table.selective_columns)
+        if has_selective_predicate:
+            continue
+        unbounded_tables.append(table)
 
-    if missing_time_bound_tables:
-        names = ", ".join(t.quoted_ref or t.table_name for t in missing_time_bound_tables)
+    if unbounded_tables:
+        names = ", ".join(t.quoted_ref or t.table_name for t in unbounded_tables)
         hints = " ".join(
             (
                 f"Add a time-bound predicate on {required_time_column_by_table[t.table_name]} for "
                 f"{t.quoted_ref or t.table_name} (e.g. WHERE {required_time_column_by_table[t.table_name]} >= "
-                "now() - INTERVAL '...')."
-                if t.table_name in required_time_column_by_table
-                else f"{t.quoted_ref or t.table_name} is a large table with no known time column configured; "
-                "a bounding predicate is required before this query can run."
+                "now() - INTERVAL '...'), or an equality/IN filter on an indexed column "
+                f"(e.g. {t.selective_columns[0]})."
+                if t.table_name in required_time_column_by_table and t.selective_columns
+                else (
+                    f"Add a time-bound predicate on {required_time_column_by_table[t.table_name]} for "
+                    f"{t.quoted_ref or t.table_name} (e.g. WHERE {required_time_column_by_table[t.table_name]} >= "
+                    "now() - INTERVAL '...')."
+                    if t.table_name in required_time_column_by_table
+                    else (
+                        f"{t.quoted_ref or t.table_name} is a large table with no known time column configured; "
+                        f"add an equality/IN filter on an indexed column (e.g. {t.selective_columns[0]})."
+                        if t.selective_columns
+                        else f"{t.quoted_ref or t.table_name} is a large table with no known time column configured; "
+                        "a bounding predicate is required before this query can run."
+                    )
+                )
             )
-            for t in missing_time_bound_tables
+            for t in unbounded_tables
         )
         return CardinalityVerdict(
             ok=False,
             action="reject",
-            reason=f"Unbounded scan of large table(s) {names}: missing a required time-bound predicate.",
+            reason=f"Unbounded scan of large table(s) {names}: missing a required selective predicate "
+            "(a time-bound predicate on the configured time column, or an equality/IN filter on an indexed/FK column).",
             repair_hint=hints,
         )
 
@@ -286,6 +350,33 @@ def _bare_column_name_of(quoted_column: str) -> str:
     return match.group(1) if match else quoted_column
 
 
+def _selective_columns_of(table: dict) -> list[str]:
+    """Fix C: derive a large table's selective (indexed/FK/PK) bare column
+    names from its rendered columns. A column counts as selective when it is
+    indexed (`is_indexed`/`isIndexed`), a primary/foreign key
+    (`is_foreign_key_or_primary_key`/`isPrimaryKey`), or — for the raw
+    camelCase bundle shape, which has no direct FK flag on the column —
+    simply `isPrimaryKey`. This deliberately does not require a large
+    dataclass rewrite: `RenderedColumn` already carries `is_indexed` +
+    `is_foreign_key_or_primary_key` (see retriever.py), and the raw bundle
+    column dict already carries `isIndexed`/`isPrimaryKey` from catalog.json.
+    """
+    selective: list[str] = []
+    for col in table.get("columns", []):
+        is_selective = (
+            col.get("is_indexed")
+            or col.get("isIndexed")
+            or col.get("is_foreign_key_or_primary_key")
+            or col.get("isPrimaryKey")
+        )
+        if not is_selective:
+            continue
+        name = col.get("name") or col.get("quoted_name") or col.get("quotedName")
+        if name:
+            selective.append(_bare_column_name_of(name))
+    return selective
+
+
 def build_cardinality_guard_options(
     tables: list[dict], default_limit: int = 1000
 ) -> tuple[list[LargeTableSpec], dict[str, str]]:
@@ -307,7 +398,10 @@ def build_cardinality_guard_options(
             continue
         table_name = _bare_table_name_of(table)
         quoted_ref = table.get("quoted_ref") or table.get("quotedRef")
-        large_tables.append(LargeTableSpec(table_name=table_name, quoted_ref=quoted_ref))
+        selective_columns = _selective_columns_of(table)
+        large_tables.append(
+            LargeTableSpec(table_name=table_name, quoted_ref=quoted_ref, selective_columns=selective_columns)
+        )
         required_time_column = table.get("required_time_column") or table.get("requiredTimeColumn")
         if required_time_column:
             required_time_column_by_table[table_name] = _bare_column_name_of(required_time_column)

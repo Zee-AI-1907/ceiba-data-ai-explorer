@@ -535,6 +535,12 @@ def _run_build_pipeline_p3b(
         update_latest_symlink,
         write_manifest_and_report,
     )
+    from prep.enrich.code_tables import (
+        build_auto_synonyms,
+        build_code_table_hints,
+        load_synonym_alias_seed,
+        resolve_auto_synonym_columns,
+    )
     from prep.enrich.glossary import build_glossary_from_seed_file
     from prep.enrich.importance import apply_importance_and_large_flag
     from prep.enrich.joingraph import build_join_graph
@@ -568,8 +574,44 @@ def _run_build_pipeline_p3b(
         foreign_keys=keys["foreignKeys"],
         min_confidence=config.enrich.infer_join_edges.min_confidence,
     )
+
+    # Fix D: auto-mine code/lookup tables -> autoSynonyms (SEMANTIC_HINTS.md
+    # §8.1). `row_fetcher=None` here: the per-source introspector connections
+    # are already disposed by the time this P3b stage runs (see cmd_build's
+    # per-source loop above), so this build context has no live DB handle to
+    # extract `(id, label)` rows from — `build_code_table_hints` degrades
+    # gracefully to `[]` in that case (documented, backward-compatible
+    # default; SEMANTIC_HINTS.md §8.1 step 6 / glossary.py's own
+    # `autoSynonyms` docstring: "never crash on an old bundle without this
+    # key when reading"). Wiring a genuine live-row-fetcher would require
+    # restructuring the connection lifecycle to keep a source's introspector
+    # open through the enrich stage — out of scope for this fix; the
+    # detector/extractor/synonym-matrix machinery itself is fully
+    # implemented and exercised by prep/tests/test_code_tables.py via an
+    # injected fake row_fetcher.
+    code_table_row_fetcher = None
+    code_table_hints = build_code_table_hints(
+        catalog=catalog,
+        joingraph=joingraph,
+        profiles=profiles,
+        phi=phi,
+        row_fetcher=code_table_row_fetcher,
+    )
+    alias_seed_path = REPO_ROOT / "config" / "synonym_aliases.seed.yaml"
+    alias_seed = load_synonym_alias_seed(alias_seed_path)
+    auto_synonyms = build_auto_synonyms(
+        catalog=catalog,
+        joingraph=joingraph,
+        profiles=profiles,
+        phi=phi,
+        code_table_hints=code_table_hints,
+        alias_seed=alias_seed,
+    )
+    auto_synonyms = resolve_auto_synonym_columns(auto_synonyms, catalog)
+    auto_synonyms_json = [s.to_json() for s in auto_synonyms]
+
     glossary_seed_path = REPO_ROOT / config.enrich.glossary
-    glossary = build_glossary_from_seed_file(catalog, glossary_seed_path)
+    glossary = build_glossary_from_seed_file(catalog, glossary_seed_path, auto_synonyms=auto_synonyms_json)
     include_staging_exemplars = any(s.source_id == "staging" for s in sources)
     exemplars = build_exemplars_json(include_staging=include_staging_exemplars)
 
@@ -590,6 +632,7 @@ def _run_build_pipeline_p3b(
             extra={
                 "inferredJoinEdges": sum(1 for e in joingraph["edges"] if e["origin"] == "inferred"),
                 "glossaryTerms": len(glossary["synonyms"]),
+                "autoSynonyms": len(glossary.get("autoSynonyms", [])),
                 "syntheticTables": len(synthetic["tables"]),
             },
         )

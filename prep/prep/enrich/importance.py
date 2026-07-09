@@ -62,6 +62,73 @@ def _has_time_or_code_column(table: dict) -> bool:
     return False
 
 
+# ── Fix A-bonus: templated grain (Fix A-bonus §1) ───────────────────────────
+
+_FACT_TABLE_NAME_SUFFIX_HINTS = ("measurements", "measurement", "readings", "events", "logs", "history")
+_CODE_TABLE_NAME_SUFFIX_HINTS = ("types", "statuses", "categories", "codes", "ref")
+
+
+def _fk_count(table: dict) -> int:
+    """Approximates FK-column count from name-based heuristics already used
+    elsewhere in this module (`_CODE_COLUMN_NAME_HINTS`'s "Id"-suffix
+    convention) — a column literally named `<Something>Id` (other than the
+    table's own PK) is treated as a probable FK for grain-templating purposes
+    only; this is deliberately approximate (Fix A-bonus is templated text
+    quality, not a hard-graded fix) and does not require joingraph.json.
+    """
+    count = 0
+    for col in table.get("columns", []):
+        if col.get("isPrimaryKey"):
+            continue
+        name = str(col.get("name", ""))
+        if name.lower().endswith("id"):
+            count += 1
+    return count
+
+
+def _non_fk_non_pk_column_count(table: dict) -> int:
+    total = len(table.get("columns", []))
+    return total - _fk_count(table) - sum(1 for c in table.get("columns", []) if c.get("isPrimaryKey"))
+
+
+def derive_grain(table: dict) -> str:
+    """Templated grain-sentence derivation (Fix A-bonus §1): deterministic,
+    pattern-based — NOT NLP. Branches on FK count, time-column presence, and
+    name-suffix heuristics (reusing the same kind of hints
+    `_has_time_or_code_column`/`_CODE_COLUMN_NAME_HINTS` already apply):
+
+      - Bridge/junction shape (>=2 FK-shaped columns AND few non-FK/PK
+        columns) -> "one row per <name> linking A to B".
+      - Fact/measurement shape (has a time column AND/OR a name matching the
+        measurement/event suffix hints) -> "one row per <TableName> reading/
+        event, keyed by <FK col>".
+      - Code/lookup shape (name matches Types/Statuses/Categories/Codes/Ref
+        suffix hints) -> "one row per <TableName> code/lookup value".
+      - Else -> generic fallback "one row per <TableName> record".
+    """
+    name = table.get("name") or table["tableId"].split(".")[-1]
+    name_lower = name.lower()
+    fk_count = _fk_count(table)
+    non_fk_non_pk_count = _non_fk_non_pk_column_count(table)
+    has_time_column = any(c.get("isTimeColumn") for c in table.get("columns", []))
+    fk_column_names = [c["name"] for c in table.get("columns", []) if not c.get("isPrimaryKey") and c["name"].lower().endswith("id")]
+
+    if fk_count >= 2 and non_fk_non_pk_count <= 2:
+        if len(fk_column_names) >= 2:
+            return f"one row per {name} record linking {fk_column_names[0]} to {fk_column_names[1]}"
+        return f"one row per {name} record linking related entities"
+
+    if has_time_column or any(hint in name_lower for hint in _FACT_TABLE_NAME_SUFFIX_HINTS):
+        if fk_column_names:
+            return f"one row per {name} reading/event, keyed by {fk_column_names[0]}"
+        return f"one row per {name} reading/event"
+
+    if any(hint in name_lower for hint in _CODE_TABLE_NAME_SUFFIX_HINTS):
+        return f"one row per {name} code/lookup value"
+
+    return f"one row per {name} record"
+
+
 @dataclass(frozen=True)
 class ImportanceWeights:
     """Weights for the three importanceScore signals; must sum to 1.0 so the
@@ -141,6 +208,11 @@ def apply_importance_and_large_flag(
         approx_rows = row_counts_by_table_id.get(table_id, 0)
         t["approxRowCount"] = approx_rows
         t["isLargeTimeSeries"] = approx_rows > large_table_row_threshold
+        # Fix A-bonus: populate `grain` when the catalog doesn't already
+        # carry one (e.g. a not-yet-enriched build, or a hand-authored
+        # fixture) — never overwrite an already-populated grain.
+        if not t.get("grain"):
+            t["grain"] = derive_grain(t)
 
     scores = compute_importance_scores(tables_copy, foreign_keys, weights=weights)
     for t in tables_copy:

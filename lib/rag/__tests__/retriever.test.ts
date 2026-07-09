@@ -19,9 +19,9 @@
 
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { HybridRetriever, type LlmPrune } from '../Retriever'
+import { HybridRetriever, bfsShortestPath, bridgeExpand, buildJoinAdjacency, type LlmPrune } from '../Retriever'
 import { createDeterministicTestEmbedder } from '../vssClient'
-import { TEST_FALLBACK_EMBEDDING_MODEL_ID } from '../BundleLoader'
+import { TEST_FALLBACK_EMBEDDING_MODEL_ID, type JoinGraphEdge } from '../BundleLoader'
 
 const FIXTURE_BUNDLE_DIR = path.join(__dirname, 'fixtures', 'bundles', 'mock-v1')
 const HEART_RATE_QUESTION = 'heart rate over 120 in the last 3 hours'
@@ -170,5 +170,129 @@ describe('HybridRetriever — embedding-model mismatch is refused at load()', ()
       bundleLoaderOptions: { expectedEmbeddingModelId: 'bge-small-en-v1.5' },
     })
     await expect(retriever.load(FIXTURE_BUNDLE_DIR)).rejects.toThrow(/embeddingModel\.id/)
+  })
+})
+
+// ── Fix A: pure BFS bridge-path functions (JOINGRAPH_SURFACING.md §2, §8.2) ─
+//
+// mock-v1's own joingraph.json is FLAT, so these tests hand-build a MINIMAL
+// 3-hop adjacency shaped like the REAL staging bridge (MonitorMeasurements ->
+// Monitors -> Acceptances -> Patients) — no bundle/retriever needed at all.
+
+function realStagingShapedEdges(): JoinGraphEdge[] {
+  return [
+    {
+      from: 'staging.Shared.MonitorMeasurements',
+      fromColumns: ['DeviceId'],
+      to: 'staging.Shared.Monitors',
+      toColumns: ['Id'],
+      joinCardinality: 'many-to-one',
+      crossSource: false,
+      origin: 'declared',
+      confidence: 1.0,
+    },
+    {
+      from: 'staging.Shared.Monitors',
+      fromColumns: ['AcceptanceId'],
+      to: 'staging.Shared.Acceptances',
+      toColumns: ['Id'],
+      joinCardinality: 'many-to-one',
+      crossSource: false,
+      origin: 'declared',
+      confidence: 1.0,
+    },
+    {
+      from: 'staging.Shared.Acceptances',
+      fromColumns: ['PatientId'],
+      to: 'staging.Shared.Patients',
+      toColumns: ['Id'],
+      joinCardinality: 'many-to-one',
+      crossSource: false,
+      origin: 'declared',
+      confidence: 1.0,
+    },
+    {
+      from: 'staging.Shared.MonitorMeasurements',
+      fromColumns: ['MeasurementTypeId'],
+      to: 'staging.Shared.MonitorMeasurementTypes',
+      toColumns: ['Id'],
+      joinCardinality: 'many-to-one',
+      crossSource: false,
+      origin: 'declared',
+      confidence: 1.0,
+    },
+  ]
+}
+
+describe('bfsShortestPath / bridgeExpand — pure BFS bridge-path functions', () => {
+  it('finds the 3-hop bridge from MonitorMeasurements to Patients', () => {
+    const adjacency = buildJoinAdjacency(realStagingShapedEdges())
+    const path = bfsShortestPath(adjacency, 'staging.Shared.MonitorMeasurements', 'staging.Shared.Patients', 3)
+    expect(path).not.toBeNull()
+    expect(path).toHaveLength(3)
+    const intermediateNodes = new Set(path!.slice(0, -1).map((hop) => hop.to))
+    expect(intermediateNodes).toEqual(new Set(['staging.Shared.Monitors', 'staging.Shared.Acceptances']))
+  })
+
+  it('returns null beyond maxHops', () => {
+    const adjacency = buildJoinAdjacency(realStagingShapedEdges())
+    const path = bfsShortestPath(adjacency, 'staging.Shared.MonitorMeasurements', 'staging.Shared.Patients', 2)
+    expect(path).toBeNull()
+  })
+
+  it('returns null for identical start and end', () => {
+    const adjacency = buildJoinAdjacency(realStagingShapedEdges())
+    expect(bfsShortestPath(adjacency, 'staging.Shared.Patients', 'staging.Shared.Patients')).toBeNull()
+  })
+
+  it('bridgeExpand pulls in Monitors and Acceptances as bridge nodes for the HR failure mode', () => {
+    const adjacency = buildJoinAdjacency(realStagingShapedEdges())
+    const survivors = ['staging.Shared.MonitorMeasurements', 'staging.Shared.Patients']
+    const { bridgeNodes, paths } = bridgeExpand(adjacency, survivors, 3, 6)
+
+    expect(bridgeNodes).toEqual(new Set(['staging.Shared.Monitors', 'staging.Shared.Acceptances']))
+    expect(paths).toHaveLength(1)
+    expect(paths[0]![0]!.from).toBe('staging.Shared.MonitorMeasurements')
+    expect(paths[0]!.at(-1)!.to).toBe('staging.Shared.Patients')
+  })
+
+  it('bridgeExpand finds no bridge needed when a direct edge already connects the pair', () => {
+    const adjacency = buildJoinAdjacency(realStagingShapedEdges())
+    const survivors = ['staging.Shared.MonitorMeasurements', 'staging.Shared.MonitorMeasurementTypes']
+    const { bridgeNodes, paths } = bridgeExpand(adjacency, survivors, 3, 6)
+    expect(bridgeNodes.size).toBe(0)
+    expect(paths).toHaveLength(0)
+  })
+})
+
+// ── Fix D: retrieval pin + glossary hint fields ─────────────────────────────
+
+describe('HybridRetriever — Fix D retrieval pin + glossary hint fields', () => {
+  it('the "heart rate" glossaryHit carries hostingTableId + codeValue', async () => {
+    const retriever = await createLoadedRetriever()
+    try {
+      const context = await retriever.retrieve(HEART_RATE_QUESTION, { tokenBudget: 4000, maxTables: 6 })
+      const hit = context.glossaryHits.find((h) => h.term === 'heart rate')
+      expect(hit).toBeDefined()
+      expect(hit?.hostingTableId).toBe('mock.public.MeasurementsMock')
+      expect(hit?.confidence).toBeGreaterThanOrEqual(0.62)
+      expect(hit?.codeValue).toBe('Heart Rate')
+      expect(hit?.codeColumnId).toBe('mock.public.MeasurementsMock.MeasurementTypeId')
+    } finally {
+      await retriever.dispose()
+    }
+  })
+
+  it('the pinned hosting table is present in ctx.tables even under a tight maxTables', async () => {
+    const retriever = await createLoadedRetriever()
+    try {
+      const context = await retriever.retrieve(HEART_RATE_QUESTION, { tokenBudget: 4000, maxTables: 3 })
+      const hit = context.glossaryHits.find((h) => h.term === 'heart rate')
+      const tableIds = context.tables.map((t) => t.tableId)
+      expect(hit?.hostingTableId).toBeDefined()
+      expect(tableIds).toContain(hit!.hostingTableId!)
+    } finally {
+      await retriever.dispose()
+    }
   })
 })

@@ -1,0 +1,46 @@
+# synonym_aliases.seed.yaml — hand-curated clinical vitals alias seed
+# (SEMANTIC_HINTS.md §2.1, §8.1 Layer A).
+#
+# Keyed by CANONICAL MINED NAME (the code table's `name`/`Name`/label column
+# value, e.g. MonitorMeasurementTypes.Name = "HR") -> a list of NL aliases a
+# clinician might actually type. `prep/prep/enrich/code_tables.py`'s
+# `build_auto_synonyms` matches each key against the ACTUAL mined code rows
+# for the current build (`detect_code_tables` + `extract_code_table_rows`):
+# an alias entry here for a canonical name with NO matching code row in ANY
+# mined code table is silently dropped — never fabricated (same discipline
+# as `config/glossary.seed.yaml`'s reference resolution).
+#
+# Precision note (SEMANTIC_HINTS.md §7): bare short abbreviations that are
+# common English words (map, temp, pa, sap) are NOT listed as a bare-form
+# alias on their own — only as part of the canonical name key or a
+# multi-word alias. The retriever (`_expand_question`) additionally applies a
+# stop-token deny-list at match time: for these terms, only a FULL
+# multi-word alias match counts, never the bare abbreviation alone.
+
+HR:
+  - heart rate
+  - pulse
+  - hr
+  - ventricular rate
+
+SPO2:
+  - oxygen saturation
+  - o2 sat
+  - spo2
+  - sats
+  - pulse ox
+
+TEMP:
+  - temperature
+  - body temperature
+
+MAP:
+  - mean arterial pressure
+  - mean art pressure
+
+NIMAP:
+  - non-invasive mean arterial pressure
+  - nibp mean
+
+CVP:
+  - central venous pressure

@@ -173,3 +173,176 @@ def test_lexical_fallback_catches_large_table_the_ast_missed():
     verdict = cardinality_guard(sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN)
     assert verdict.ok is False
     assert verdict.action == "reject"
+
+
+# ── Fix C: strengthened selective-predicate policy ─────────────────────────
+#
+# A large table (e.g. a 271M-row VentilatorMeasurements analog) must have
+# EITHER a time-bound predicate OR a selective equality/IN predicate on an
+# indexed/FK/PK column — "a LIMIT after a full scan still scans".
+
+VENTILATOR_TABLE = LargeTableSpec(
+    table_name="VentilatorMeasurements",
+    quoted_ref='"Shared"."VentilatorMeasurements"',
+    selective_columns=["PatientId", "DeviceId"],
+)
+
+
+def test_reject_when_no_time_bound_and_no_selective_predicate_and_no_time_column_configured():
+    """The exact failure case from the task: a bare COUNT/scan over a huge
+    table with a LIMIT (or nothing) but NO selective filter at all -> reject,
+    regardless of the LIMIT's presence.
+    """
+    sql = 'SELECT COUNT(*) FROM "VentilatorMeasurements" LIMIT 1000'
+    verdict = cardinality_guard(sql, large_tables=[VENTILATOR_TABLE], required_time_column_by_table={})
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+    assert "selective" in (verdict.reason or "").lower()
+
+
+def test_reject_when_no_time_bound_and_no_selective_predicate_at_all_no_limit():
+    sql = 'SELECT COUNT(*) FROM "VentilatorMeasurements"'
+    verdict = cardinality_guard(sql, large_tables=[VENTILATOR_TABLE], required_time_column_by_table={})
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+
+
+def test_pass_when_selective_equality_predicate_present_no_time_column_configured():
+    """A selective equality filter on an indexed/FK column satisfies the
+    policy even with no required_time_column configured at all.
+    """
+    sql = 'SELECT * FROM "VentilatorMeasurements" WHERE "PatientId" = 42 LIMIT 1000'
+    verdict = cardinality_guard(sql, large_tables=[VENTILATOR_TABLE], required_time_column_by_table={})
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_repair_when_selective_equality_predicate_present_but_missing_limit():
+    sql = 'SELECT * FROM "VentilatorMeasurements" WHERE "PatientId" = 42'
+    verdict = cardinality_guard(
+        sql, large_tables=[VENTILATOR_TABLE], required_time_column_by_table={}, default_limit=250
+    )
+    assert verdict.ok is True
+    assert verdict.action == "repair"
+    assert "LIMIT 250" in (verdict.repaired_sql or "")
+
+
+def test_pass_when_selective_in_predicate_present():
+    sql = 'SELECT * FROM "VentilatorMeasurements" WHERE "DeviceId" IN (1, 2, 3) LIMIT 1000'
+    verdict = cardinality_guard(sql, large_tables=[VENTILATOR_TABLE], required_time_column_by_table={})
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_selective_predicate_on_non_selective_column_does_not_satisfy_policy():
+    """Filtering on a column that is NOT in `selective_columns` (not indexed/
+    FK/PK) does not satisfy the escape hatch — this is not a real selective
+    filter as far as the guard can verify.
+    """
+    sql = 'SELECT * FROM "VentilatorMeasurements" WHERE "SomeUnindexedNote" = \'x\' LIMIT 1000'
+    verdict = cardinality_guard(sql, large_tables=[VENTILATOR_TABLE], required_time_column_by_table={})
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+
+
+def test_selective_predicate_also_satisfies_policy_when_time_column_is_configured():
+    """SQL wording: "EITHER a time-bound predicate... OR a selective
+    equality/IN predicate" — the equality/IN alternative is accepted even
+    when a required_time_column IS configured, as long as no valid time
+    bound is present but a real selective filter is.
+    """
+    sql = 'SELECT * FROM "MeasurementsMock" WHERE "PatientId" = 42 LIMIT 1000'
+    table = LargeTableSpec(
+        table_name="MeasurementsMock", quoted_ref='"public"."MeasurementsMock"', selective_columns=["PatientId"]
+    )
+    verdict = cardinality_guard(sql, large_tables=[table], required_time_column_by_table=REQUIRED_TIME_COLUMN)
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_existing_time_bound_behavior_unchanged_when_selective_columns_present():
+    """Regression guard: a table that already satisfies the time-bound path
+    behaves exactly as before, whether or not `selective_columns` is also
+    populated — the new rule does not require BOTH.
+    """
+    sql = """SELECT * FROM "MeasurementsMock" WHERE "RecordedAt" >= now() - INTERVAL '3 hours' LIMIT 1000"""
+    table = LargeTableSpec(
+        table_name="MeasurementsMock", quoted_ref='"public"."MeasurementsMock"', selective_columns=["PatientId"]
+    )
+    verdict = cardinality_guard(sql, large_tables=[table], required_time_column_by_table=REQUIRED_TIME_COLUMN)
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_repair_hint_mentions_both_time_bound_and_selective_filter_options():
+    sql = 'SELECT * FROM "MeasurementsMock" LIMIT 1000'
+    table = LargeTableSpec(
+        table_name="MeasurementsMock", quoted_ref='"public"."MeasurementsMock"', selective_columns=["DeviceId"]
+    )
+    verdict = cardinality_guard(sql, large_tables=[table], required_time_column_by_table=REQUIRED_TIME_COLUMN)
+    assert verdict.ok is False
+    assert verdict.action == "reject"
+    hint = verdict.repair_hint or ""
+    assert "time-bound predicate" in hint
+    assert "equality/IN filter" in hint
+
+
+def test_build_cardinality_guard_options_derives_selective_columns_from_indexed_and_fk_columns():
+    tables = [
+        {
+            "table_id": "staging.Shared.VentilatorMeasurements",
+            "quoted_ref": '"Shared"."VentilatorMeasurements"',
+            "is_large_time_series": True,
+            "required_time_column": None,
+            "columns": [
+                {"name": "Id", "isPrimaryKey": True, "isIndexed": True},
+                {"name": "PatientId", "is_indexed": False, "is_foreign_key_or_primary_key": True},
+                {"name": "Value", "isIndexed": False, "isPrimaryKey": False},
+            ],
+        }
+    ]
+    large_tables, _ = build_cardinality_guard_options(tables)
+    assert len(large_tables) == 1
+    assert set(large_tables[0].selective_columns) == {"Id", "PatientId"}
+
+
+def test_cardinality_guard_from_context_passes_with_selective_predicate_and_no_time_column():
+    tables = [
+        {
+            "table_id": "staging.Shared.VentilatorMeasurements",
+            "quoted_ref": '"Shared"."VentilatorMeasurements"',
+            "is_large_time_series": True,
+            "required_time_column": None,
+            "columns": [
+                {"name": "Id", "isPrimaryKey": True},
+                {"name": "PatientId", "is_foreign_key_or_primary_key": True},
+            ],
+        }
+    ]
+    sql = 'SELECT * FROM "VentilatorMeasurements" WHERE "PatientId" = 7 LIMIT 1000'
+    verdict = cardinality_guard_from_context(sql, tables)
+    assert verdict.ok is True
+    assert verdict.action == "pass"
+
+
+def test_cardinality_guard_from_context_still_rejects_bare_scan_with_no_selective_filter():
+    """This is the exact real-world regression the task describes: a
+    'ventilator count' query timing out scanning a 271M-row table with a
+    LIMIT (or an aggregate with no WHERE) but no selective filter.
+    """
+    tables = [
+        {
+            "table_id": "staging.Shared.VentilatorMeasurements",
+            "quoted_ref": '"Shared"."VentilatorMeasurements"',
+            "is_large_time_series": True,
+            "required_time_column": None,
+            "columns": [
+                {"name": "Id", "isPrimaryKey": True},
+                {"name": "PatientId", "is_foreign_key_or_primary_key": True},
+            ],
+        }
+    ]
+    sql = 'SELECT COUNT(*) FROM "VentilatorMeasurements" LIMIT 1000'
+    verdict = cardinality_guard_from_context(sql, tables)
+    assert verdict.ok is False
+    assert verdict.action == "reject"

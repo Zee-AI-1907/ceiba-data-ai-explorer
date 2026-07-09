@@ -241,10 +241,19 @@ export interface GlossaryMapCodedMeasurement {
   codeColumnId: string
   codeRefColumnId: string
   codeRefTableId: string
-  codeValue: string
+  codeValue: string | number
   valueColumnId: string
   timeColumnId?: string
   unit?: string
+  /**
+   * SEMANTIC_HINTS.md §3.2/§3.3: the fact table the coded value lives on —
+   * the retrieval-pin anchor. Optional for backward compatibility with an
+   * older bundle's hand-seeded maps that don't carry it yet; the retriever
+   * derives it from `valueColumnId`'s table when absent.
+   */
+  hostingTableId?: string
+  /** A human label for the value (e.g. "HR") — prompt provenance comment. */
+  codeLabel?: string
 }
 
 export interface GlossaryMapTable {
@@ -307,12 +316,28 @@ export interface GlossaryTemporal {
   anchor?: string
 }
 
+/**
+ * Fix D (SEMANTIC_HINTS.md §3.2/§8.2): a machine-mined synonym entry, kept
+ * separate from hand-authored `synonyms` for auditable provenance. Optional
+ * on `GlossaryJson` for backward compatibility with a bundle built before
+ * this fix — the retriever/prompt code must default to `[]`, never crash on
+ * an old bundle without this key.
+ */
+export interface AutoSynonym {
+  term: string
+  aliases: string[]
+  provenance: 'curated' | 'embedding'
+  confidence: number
+  maps: GlossaryMap[]
+}
+
 export interface GlossaryJson {
   synonyms: GlossarySynonym[]
   abbreviations: Record<string, string>
   codeSystems: GlossaryCodeSystem[]
   units: GlossaryUnit[]
   temporal: GlossaryTemporal[]
+  autoSynonyms?: AutoSynonym[]
 }
 
 // ── exemplars.json (SPEC §1.10) ─────────────────────────────────────────────

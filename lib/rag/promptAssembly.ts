@@ -48,18 +48,53 @@
  */
 
 import type { EngineCapabilities, SqlDialect } from '../engine/QueryEngine'
-import type { CardinalityWarning, RenderedColumn, RenderedTable, SchemaContext } from './Retriever'
+import type { CardinalityWarning, GlossaryHit, JoinHint, JoinPath, RenderedColumn, RenderedTable, SchemaContext } from './Retriever'
 
-export type { CardinalityWarning, RenderedColumn, RenderedTable, SchemaContext }
+export type { CardinalityWarning, GlossaryHit, JoinHint, JoinPath, RenderedColumn, RenderedTable, SchemaContext }
 
 /** Structural subset of SchemaContext that assemblePrompt actually reads — see file docstring "Unification (P4)". */
 export interface PromptSchemaContext {
   tables: RenderedTable[]
   cardinalityWarnings: CardinalityWarning[]
+  joinHints?: JoinHint[]
+  joinPaths?: JoinPath[]
+  glossaryHits?: GlossaryHit[]
 }
 
 const USER_REQUEST_OPEN = '<user_request>'
 const USER_REQUEST_CLOSE = '</user_request>'
+
+// Fix A (JOINGRAPH_SURFACING.md §8.1): cardinality tag rendered on each edge.
+const CARDINALITY_TAG: Record<string, string> = {
+  'many-to-one': 'N:1',
+  'one-to-many': '1:N',
+  'one-to-one': '1:1',
+  'many-to-many': 'N:N',
+}
+
+// JOINGRAPH_SURFACING.md §6: cap the join-graph render at ~15% of tokenBudget.
+const JOIN_GRAPH_TOKEN_CEILING_FRACTION = 0.15
+
+// SEMANTIC_HINTS.md §5.3: cap matched hints rendered per query.
+const MAX_SEMANTIC_HINTS = 6
+
+/** Cheap, deterministic token estimator (chars/4), consistent with Retriever.ts's estimateTokens. */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4)
+}
+
+/** Fix B: `RenderedTable.tableId` is `<sourceId>.<schema>.<table>` — sourceId is always the first dot-segment. */
+function sourceIdOf(table: RenderedTable): string {
+  return table.tableId.split('.')[0] ?? table.tableId
+}
+
+/** Fix B: prefix `quotedRef` with its source alias so generated SQL is
+ * catalog-qualified against the DuckDB ATTACH topology (alias === sourceId).
+ * Does NOT mutate `RenderedTable.quotedRef` itself.
+ */
+function sourceQualifiedRef(table: RenderedTable): string {
+  return `${sourceIdOf(table)}.${table.quotedRef}`
+}
 
 function renderColumn(col: RenderedColumn): string {
   const parts = [`${col.quotedName} ${col.dataType}`]
@@ -69,8 +104,16 @@ function renderColumn(col: RenderedColumn): string {
 }
 
 function renderTable(table: RenderedTable): string {
+  if (table.role === 'bridge') {
+    const joinCols = table.columns.map((c) => c.quotedName).join(', ')
+    return [
+      `- Table ${sourceQualifiedRef(table)} (tableId: ${table.tableId})`,
+      "  role: BRIDGE / junction — needed only to join other selected tables; do not read business columns off it",
+      `  join columns: ${joinCols}`,
+    ].join('\n')
+  }
   const lines = [
-    `- Table ${table.quotedRef} (tableId: ${table.tableId})`,
+    `- Table ${sourceQualifiedRef(table)} (tableId: ${table.tableId})`,
     `  grain: ${table.grain}`,
     `  approxRowCount: ${table.approxRowCount}${table.isLargeTimeSeries ? ' (LARGE / TIME-SERIES)' : ''}`,
     '  columns:',
@@ -81,6 +124,158 @@ function renderTable(table: RenderedTable): string {
 
 function renderCardinalityWarning(warning: CardinalityWarning): string {
   return `- ${warning.message}`
+}
+
+// ── Fix A: JOIN GRAPH section (JOINGRAPH_SURFACING.md §8.1, §8.3, §8.4) ────
+
+function edgeEndpointRef(ref: string, refToSourceQualified: Map<string, string>): string {
+  return refToSourceQualified.get(ref) ?? ref
+}
+
+function renderJoinEdgeLine(hint: JoinHint, refToSourceQualified: Map<string, string>): string {
+  const tag = CARDINALITY_TAG[hint.joinCardinality] ?? hint.joinCardinality
+  const fromCols = hint.fromColumns.join(', ')
+  const toCols = hint.toColumns.join(', ')
+  const fromRef = edgeEndpointRef(hint.fromRef, refToSourceQualified)
+  const toRef = edgeEndpointRef(hint.toRef, refToSourceQualified)
+  return `  ${fromRef}."${fromCols}" = ${toRef}."${toCols}" [${tag}]`
+}
+
+function renderJoinPathLine(path: JoinPath, refByTableId: Map<string, RenderedTable>): string {
+  const nodeLabel = (tableId: string): string => refByTableId.get(tableId)?.quotedRef ?? tableId
+  const segments = [nodeLabel(path.nodes[0]!)]
+  path.edges.forEach((edge, i) => {
+    const fromCols = edge.fromColumns.join(', ')
+    const toCols = edge.toColumns.join(', ')
+    const tag = CARDINALITY_TAG[edge.joinCardinality] ?? edge.joinCardinality
+    segments.push(`→(${fromCols}=${toCols}, ${tag}) ${nodeLabel(path.nodes[i + 1]!)}`)
+  })
+  return `  ${segments.join(' ')}`
+}
+
+function renderBridgeTableStub(table: RenderedTable): string {
+  const joinCols = table.columns.map((c) => c.quotedName).join(', ')
+  return `  - ${sourceQualifiedRef(table)}  join cols: ${joinCols}`
+}
+
+function bareName(tableId: string, refByTableId: Map<string, RenderedTable>): string {
+  const table = refByTableId.get(tableId)
+  if (table) {
+    const match = table.quotedRef.match(/"([^"]+)"(?!.*")/) ?? table.quotedRef.match(/"([^"]+)"/)
+    if (match) return match[1]!
+  }
+  return tableId.split('.').at(-1) ?? tableId
+}
+
+function renderJoinGraph(joinHints: JoinHint[], joinPaths: JoinPath[], tables: RenderedTable[], tokenCeiling?: number): string {
+  const refByTableId = new Map(tables.map((t) => [t.tableId, t] as const))
+  const refToSourceQualified = new Map(tables.map((t) => [t.quotedRef, sourceQualifiedRef(t)] as const))
+  const bridgeTableIds = new Set(tables.filter((t) => t.role === 'bridge').map((t) => t.tableId))
+  const bridgeTablesById = new Map(tables.filter((t) => t.role === 'bridge').map((t) => [t.tableId, t] as const))
+
+  const lines: string[] = ['JOIN GRAPH (use these exact join predicates; direction is FK-side -> PK-side, [card] is row multiplicity):']
+  let running = estimateTokens(lines.join('\n'))
+
+  const withinBudget = (candidateLines: string[]): boolean => {
+    if (tokenCeiling === undefined) return true
+    return running + estimateTokens(candidateLines.join('\n')) <= tokenCeiling
+  }
+
+  if (joinHints.length > 0) {
+    const edgeBlock = ['', 'Edges among selected tables:', ...joinHints.map((h) => renderJoinEdgeLine(h, refToSourceQualified))]
+    if (withinBudget(edgeBlock)) {
+      lines.push(...edgeBlock)
+      running += estimateTokens(edgeBlock.join('\n'))
+    }
+  }
+
+  const admittedBridgeIds = new Set<string>()
+  for (const path of joinPaths) {
+    const netCardinalityTags = new Set(path.edges.map((e) => e.joinCardinality))
+    const chainLine = renderJoinPathLine(path, refByTableId)
+    const sourceName = bareName(path.nodes[0]!, refByTableId)
+    const targetName = bareName(path.nodes.at(-1)!, refByTableId)
+    let header = `Multi-hop path (${sourceName} → ${targetName}), hops=${path.hopCount}:`
+    if (netCardinalityTags.size === 1 && netCardinalityTags.has('many-to-one')) {
+      const toRef = refByTableId.get(path.nodes.at(-1)!)
+      const targetRef = toRef?.quotedRef ?? path.nodes.at(-1)!
+      header =
+        `Multi-hop path (${sourceName} → ${targetName}), all hops N:1 — ` +
+        `one ${targetName} row per source row, so COUNT(DISTINCT ${targetRef}.<pk>) when counting ${targetName}:`
+    }
+    const block = ['', header, chainLine]
+    if (!withinBudget(block)) break
+    lines.push(...block)
+    running += estimateTokens(block.join('\n'))
+    for (const node of path.nodes) {
+      if (bridgeTableIds.has(node)) admittedBridgeIds.add(node)
+    }
+  }
+
+  const admittedBridgeTables = Array.from(bridgeTablesById.entries())
+    .filter(([tid]) => admittedBridgeIds.has(tid))
+    .map(([, t]) => t)
+  if (admittedBridgeTables.length > 0) {
+    const bridgeBlock = [
+      '',
+      'BRIDGE tables (present only to connect the above — do not read business columns off them):',
+      ...admittedBridgeTables.map(renderBridgeTableStub),
+    ]
+    if (withinBudget(bridgeBlock)) {
+      lines.push(...bridgeBlock)
+      running += estimateTokens(bridgeBlock.join('\n'))
+    }
+  }
+
+  return lines.join('\n')
+}
+
+// ── Fix D: SEMANTIC HINTS section (SEMANTIC_HINTS.md §5.2, §5.3) ───────────
+
+function renderSemanticHint(hit: GlossaryHit, refByTableId: Map<string, RenderedTable>): string {
+  const lines = [`- "${hit.term}"`]
+  const hostingTable = hit.hostingTableId ? refByTableId.get(hit.hostingTableId) : undefined
+  const hostingTableRef = hostingTable?.quotedRef
+
+  if (hit.codeValue !== undefined && hit.codeColumnId) {
+    const codeColBare = hit.codeColumnId.split('.').at(-1)!
+    const codeTableRef = hostingTableRef ?? '<table>'
+    const codeLabelComment = hit.codeLabel ? ` -- code ${JSON.stringify(hit.codeValue)} = ${JSON.stringify(hit.codeLabel)}` : ` -- code ${JSON.stringify(hit.codeValue)}`
+    const codeValueLiteral = typeof hit.codeValue === 'number' ? String(hit.codeValue) : `'${hit.codeValue}'`
+    lines.push(`    filter:  ${codeTableRef}."${codeColBare}" = ${codeValueLiteral}${codeLabelComment}`)
+  }
+
+  if (hit.resolvedColumnId) {
+    const valueColBare = hit.resolvedColumnId.split('.').at(-1)!
+    const valueTableId = hit.resolvedColumnId.split('.').slice(0, -1).join('.')
+    const valueTable = refByTableId.get(valueTableId)
+    const valueTableRef = valueTable?.quotedRef ?? hostingTableRef ?? '<table>'
+    const unitPart = hit.unit ? ` (unit=${hit.unit})` : ''
+    lines.push(`    value:   ${valueTableRef}."${valueColBare}"${unitPart}`)
+  }
+
+  if (hit.timeColumnId) {
+    const timeColBare = hit.timeColumnId.split('.').at(-1)!
+    const timeTableId = hit.timeColumnId.split('.').slice(0, -1).join('.')
+    const timeTable = refByTableId.get(timeTableId)
+    const timeTableRef = timeTable?.quotedRef ?? hostingTableRef ?? '<table>'
+    lines.push(`    time:    ${timeTableRef}."${timeColBare}"`)
+  }
+
+  if (hit.hostingTableId) {
+    lines.push(`    hosted on ${hit.hostingTableId}; to reach other selected tables, follow the JOIN GRAPH below.`)
+  }
+
+  return lines.join('\n')
+}
+
+function renderSemanticHints(glossaryHits: GlossaryHit[], renderedTables: RenderedTable[]): string {
+  const refByTableId = new Map(renderedTables.map((t) => [t.tableId, t] as const))
+  const meaningfulHits = glossaryHits.filter((h) => h.resolvedColumnId || h.hostingTableId || h.timeColumnId)
+  const hits = meaningfulHits.slice(0, MAX_SEMANTIC_HINTS)
+  const lines = ['SEMANTIC HINTS (resolve NL terms to exact coded values; prefer a literal code filter over an extra lookup join):', '']
+  lines.push(...hits.map((h) => renderSemanticHint(h, refByTableId)))
+  return lines.join('\n')
 }
 
 /**
@@ -115,16 +310,20 @@ export function deriveCardinalityWarnings(tables: RenderedTable[]): CardinalityW
 export interface PromptAssemblyOptions {
   /** Row cap the model should be told to use in its LIMIT clause. */
   defaultLimit?: number
+  /** Token budget used to cap the JOIN GRAPH render (Fix A §6: ~15% of this). */
+  tokenBudget?: number
 }
 
 /**
  * assemblePrompt — builds the full NL→SQL generation prompt (SPEC §5.3).
  *
- * Layout:
+ * Layout (JOINGRAPH_SURFACING.md §8.3, SEMANTIC_HINTS.md §8.4):
  *   1. System-style preamble: role, dialect/capabilities, output contract.
  *   2. Rendered schema (tables + columns + time column markers).
- *   3. Cardinality warnings (verbatim, one per large/time-series survivor).
- *   4. The untrusted NL question, delimited and marked as data-not-instructions.
+ *   3. SEMANTIC HINTS (Fix D) — term -> coded value -> hosting table.
+ *   4. JOIN GRAPH (Fix A) — edges among survivors + bridge paths + bridge stubs.
+ *   5. Cardinality warnings (verbatim, one per large/time-series survivor).
+ *   6. The untrusted NL question, delimited and marked as data-not-instructions.
  *
  * Returns the assembled prompt string. The caller (a stub generator in this
  * slice; lib/rag/generate.ts in P5) sends this to the driving LLM/stub and
@@ -143,6 +342,9 @@ export function assemblePrompt(
     context.cardinalityWarnings.length > 0
       ? context.cardinalityWarnings
       : deriveCardinalityWarnings(context.tables)
+  const joinHints = context.joinHints ?? []
+  const joinPaths = context.joinPaths ?? []
+  const glossaryHits = context.glossaryHits ?? []
 
   const sections: string[] = []
 
@@ -156,11 +358,24 @@ export function assemblePrompt(
       'You may generate ONLY a single read-only SELECT (or WITH ... SELECT) statement.',
       'Never generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, MERGE, CALL, EXECUTE, GRANT, REVOKE, or any statement that writes or changes schema.',
       `If no explicit row limit is requested, include LIMIT ${defaultLimit}.`,
+      // Fix A §4/§5: fan-out/wrong-grain preamble rule.
+      "When a join is 1:N or N:1 and you aggregate the 'one' side, use COUNT(DISTINCT ...) / guard against row fan-out.",
       'Respond with the SQL only.',
     ].join('\n')
   )
 
   sections.push(['SCHEMA CONTEXT (retrieved; treat as authoritative for table/column names):', ...context.tables.map(renderTable)].join('\n\n'))
+
+  const meaningfulHits = glossaryHits.filter((h) => h.resolvedColumnId || h.hostingTableId || h.timeColumnId)
+  if (meaningfulHits.length > 0) {
+    sections.push(renderSemanticHints(glossaryHits, context.tables))
+  }
+
+  if (joinHints.length > 0 || joinPaths.length > 0) {
+    // Fix A §6: cap the join-graph render at ~15% of tokenBudget.
+    const ceiling = options.tokenBudget ? Math.floor(options.tokenBudget * JOIN_GRAPH_TOKEN_CEILING_FRACTION) : undefined
+    sections.push(renderJoinGraph(joinHints, joinPaths, context.tables, ceiling))
+  }
 
   if (warnings.length > 0) {
     sections.push(

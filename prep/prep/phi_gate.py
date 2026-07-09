@@ -213,6 +213,48 @@ def check_synthetic_json(phi_json: dict, synthetic_json: dict) -> list[GateViola
     return violations
 
 
+def check_glossary_json(phi_json: dict, glossary_json: dict) -> list[GateViolation]:
+    """glossary.json invariant (SPEC §2.5 #2, Fix D §7 / SEMANTIC_HINTS.md
+    §8.1 step 6): the machine-mined `autoSynonyms` block is scanned the SAME
+    way the hand-seeded `synonyms` block already is — names/aliases/codeLabel
+    text only, never a value from a phi-suppressed column. Concretely: no
+    `coded-measurement` map's `codeColumnId`/`valueColumnId`/`hostingTableId`/
+    `codeRefColumnId` may point at a column whose phiClass != non-phi — a
+    coded-measurement hint must always resolve through non-PHI structural
+    columns (the code/value/time columns on a fact table), never a
+    suppressed one, in EITHER `synonyms` (hand-seeded) or `autoSynonyms`
+    (mined). This mirrors `check_profiles_json`'s "no value-bearing field on
+    a suppressed column" discipline, adapted to glossary.json's shape.
+    """
+    violations: list[GateViolation] = []
+    phi_class_by_id = _phi_class_by_column_id(phi_json)
+    column_id_fields = ("codeColumnId", "valueColumnId", "codeRefColumnId", "timeColumnId")
+
+    for block_name in ("synonyms", "autoSynonyms"):
+        for entry in glossary_json.get(block_name, []):
+            for m in entry.get("maps", []):
+                if m.get("kind") != "coded-measurement":
+                    continue
+                for field_name in column_id_fields:
+                    column_id = m.get(field_name)
+                    if not column_id:
+                        continue
+                    phi_class = phi_class_by_id.get(column_id)
+                    if phi_class is not None and phi_class != "non-phi":
+                        violations.append(
+                            GateViolation(
+                                check="no_raw_cell_value",
+                                message=(
+                                    f"glossary.json {block_name} entry {entry.get('term')!r} maps "
+                                    f"{field_name}={column_id!r} which is phiClass={phi_class!r} "
+                                    "(coded-measurement maps must resolve through non-phi columns only)"
+                                ),
+                                location="glossary.json",
+                            )
+                        )
+    return violations
+
+
 def _extract_text_blobs(value: Any) -> list[str]:
     """Recursively collect every string leaf in a JSON-like structure (used to
     scan glossary.json / exemplars.json / vectors.duckdb document text for a
@@ -452,12 +494,14 @@ def run_gate(
         violations.extend(check_synthetic_json(phi_json, synthetic_json))
         checked_files += 1
 
-    for extra_json, name in ((glossary_json, "glossary.json"), (exemplars_json, "exemplars.json")):
-        if extra_json is not None:
-            checked_files += 1
-            # Structural-only for now (no PHI-classified columnId fields
-            # expected in these payloads at P3a-scope); reserved for P3b to
-            # extend with targeted checks once these files are real.
+    if glossary_json is not None:
+        violations.extend(check_glossary_json(phi_json, glossary_json))
+        checked_files += 1  # glossary.json (synonyms + autoSynonyms, Fix D §7)
+
+    if exemplars_json is not None:
+        checked_files += 1
+        # Structural-only for now (no PHI-classified columnId fields expected
+        # in this payload); reserved for future extension.
 
     violations.extend(scan_package_for_raw_select(prep_package_dir))
     for extra_dir in extra_package_dirs:

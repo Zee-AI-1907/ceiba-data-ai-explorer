@@ -40,6 +40,7 @@ import {
   type BundleLoaderOptions,
   type CatalogTable,
   type GlossaryMap,
+  type JoinGraphEdge,
 } from './BundleLoader'
 import { Bm25Index, type Bm25Document } from './bm25'
 import { fuseTwo, type RankedItem } from './rankFusion'
@@ -54,6 +55,11 @@ export interface RenderedColumn {
   dataType: string
   unit?: string
   isTimeColumn: boolean
+  /** Fix C: whether this column is indexed/PK/FK — feeds the cardinality
+   * guard's selective-equality-or-IN-predicate check (cardinalityGuard.ts).
+   */
+  isIndexed?: boolean
+  isForeignKeyOrPrimaryKey?: boolean
 }
 
 export interface RenderedTable {
@@ -71,6 +77,12 @@ export interface RenderedTable {
    * undefined if the table has no known time column.
    */
   requiredTimeColumn?: string
+  /**
+   * Fix A (JOINGRAPH_SURFACING.md §8.3): 'primary' survivors render with
+   * their full (possibly recall-scoped) column list; 'bridge' tables render
+   * as PK/FK-only stubs — they exist to be joined THROUGH, not selected FROM.
+   */
+  role: 'primary' | 'bridge'
 }
 
 export interface JoinHint {
@@ -80,6 +92,15 @@ export interface JoinHint {
   toColumns: string[]
   joinCardinality: string
   crossSource: boolean
+}
+
+/** Fix A: a BFS-shortest bridge path connecting two survivor tables through
+ * one or more intermediate (bridge) tables (JOINGRAPH_SURFACING.md §8.3).
+ */
+export interface JoinPath {
+  nodes: string[] // tableIds, fromRef -> ... -> toRef, in traversal order
+  edges: JoinHint[] // one JoinHint per hop, same order as nodes
+  hopCount: number
 }
 
 export interface CardinalityWarning {
@@ -94,6 +115,18 @@ export interface GlossaryHit {
   resolvedColumnId?: string
   timeColumnId?: string
   unit?: string
+  /** Fix D (SEMANTIC_HINTS.md §3.2/§8.2/§8.3): the fact table the coded
+   * value lives on (the retrieval-pin anchor) + how confident this hit is.
+   */
+  hostingTableId?: string
+  confidence: number
+  /** The literal coded value this hit resolves to + a human label for the
+   * `-- code N = 'NAME'` prompt provenance comment.
+   */
+  codeValue?: string | number
+  codeLabel?: string
+  /** The FK/discriminator column the codeValue filters on. */
+  codeColumnId?: string
 }
 
 /** One few-shot NL->SQL exemplar surfaced by retrieval (SPEC §1.10, §3.1.3). */
@@ -109,6 +142,7 @@ export interface Exemplar {
 export interface SchemaContext {
   tables: RenderedTable[] // ONLY the survivors, full column detail
   joinHints: JoinHint[] // FK edges among the survivors (from joingraph.json)
+  joinPaths: JoinPath[] // Fix A: Tier-2 bridge paths restricted to rendered survivors
   cardinalityWarnings: CardinalityWarning[] // per large table hit (research §3.2a)
   glossaryHits: GlossaryHit[] // term -> column/time-column/unit resolutions used
   exemplars: Exemplar[] // top-k similar NL->SQL pairs (research §3.1.3)
@@ -179,6 +213,136 @@ function renderTableForEstimate(table: RenderedTable): string {
   return lines.join('\n')
 }
 
+// ── Fix A: pure BFS bridge-path functions (JOINGRAPH_SURFACING.md §2, §8.2) ─
+//
+// Deliberately free of any HybridRetriever/BundleLoader dependency so they
+// are trivially unit-testable against a hand-built adjacency map (see
+// lib/rag/__tests__/Retriever.test.ts's bridge-expand tests).
+
+export const MAX_BRIDGE_HOPS = 3
+export const MAX_BRIDGE_PATHS = 6
+export const HINT_PIN_THRESHOLD = 0.62
+export const MAX_SEMANTIC_HINTS = 6
+
+const CARDINALITY_TAG: Record<string, string> = {
+  'many-to-one': 'N:1',
+  'one-to-many': '1:N',
+  'one-to-one': '1:1',
+  'many-to-many': 'N:N',
+}
+
+/** adjacency: tableId -> list of (neighbor_table_id, joingraph edge). Each
+ * edge is inserted TWICE (once per direction) so BFS can walk it either way
+ * (undirected reachability, JOINGRAPH_SURFACING.md §2).
+ */
+export type JoinAdjacency = Map<string, Array<{ neighbor: string; edge: JoinGraphEdge }>>
+
+export function buildJoinAdjacency(edges: JoinGraphEdge[]): JoinAdjacency {
+  const adjacency: JoinAdjacency = new Map()
+  const add = (from: string, to: string, edge: JoinGraphEdge) => {
+    const list = adjacency.get(from) ?? []
+    list.push({ neighbor: to, edge })
+    adjacency.set(from, list)
+  }
+  for (const edge of edges) {
+    add(edge.from, edge.to, edge)
+    add(edge.to, edge.from, edge)
+  }
+  return adjacency
+}
+
+export interface JoinHop {
+  from: string
+  to: string
+  edge: JoinGraphEdge
+}
+
+/** BFS shortest path from `start` to `end` over the undirected join graph,
+ * capped at `maxHops` edges. Returns null when start === end (a table never
+ * needs to "bridge" to itself) or when no path within maxHops exists.
+ */
+export function bfsShortestPath(
+  adjacency: JoinAdjacency,
+  start: string,
+  end: string,
+  maxHops: number = MAX_BRIDGE_HOPS
+): JoinHop[] | null {
+  if (start === end) return null
+  const visited = new Set<string>([start])
+  const queue: Array<{ node: string; path: JoinHop[] }> = [{ node: start, path: [] }]
+  let qi = 0
+  while (qi < queue.length) {
+    const { node, path } = queue[qi++]!
+    if (path.length >= maxHops) continue
+    for (const { neighbor, edge } of adjacency.get(node) ?? []) {
+      if (visited.has(neighbor)) continue
+      const newPath = [...path, { from: node, to: neighbor, edge }]
+      if (neighbor === end) return newPath
+      visited.add(neighbor)
+      queue.push({ node: neighbor, path: newPath })
+    }
+  }
+  return null
+}
+
+function edgeConfidenceSum(hops: JoinHop[]): number {
+  return hops.reduce((sum, h) => sum + (h.edge.confidence ?? 1), 0)
+}
+
+/**
+ * bridgeExpand — JOINGRAPH_SURFACING.md §8.2's algorithm, as a pure function
+ * over a plain adjacency map (no bundle/class dependency — trivially
+ * unit-testable). For every unordered pair of survivors with NO direct edge
+ * between them, finds the BFS shortest path (<= maxHops); collects every
+ * intermediate (bridge) node into a set, and every found path, ranked
+ * shortest-first then by total edge confidence descending, capped at
+ * `maxPaths`.
+ */
+export function bridgeExpand(
+  adjacency: JoinAdjacency,
+  survivorIds: string[],
+  maxHops: number = MAX_BRIDGE_HOPS,
+  maxPaths: number = MAX_BRIDGE_PATHS
+): { bridgeNodes: Set<string>; paths: JoinHop[][] } {
+  const survivorSet = new Set(survivorIds)
+  const directPairs = new Set<string>()
+  for (const node of survivorSet) {
+    for (const { neighbor } of adjacency.get(node) ?? []) {
+      if (survivorSet.has(neighbor)) {
+        directPairs.add([node, neighbor].toSorted().join(' '))
+      }
+    }
+  }
+
+  const survivorsSorted = Array.from(survivorSet).toSorted()
+  const candidatePaths: JoinHop[][] = []
+  const seenPairs = new Set<string>()
+  for (let i = 0; i < survivorsSorted.length; i++) {
+    for (let j = i + 1; j < survivorsSorted.length; j++) {
+      const sI = survivorsSorted[i]!
+      const sJ = survivorsSorted[j]!
+      const pairKey = [sI, sJ].toSorted().join(' ')
+      if (directPairs.has(pairKey) || seenPairs.has(pairKey)) continue
+      seenPairs.add(pairKey)
+      const path = bfsShortestPath(adjacency, sI, sJ, maxHops)
+      if (path) candidatePaths.push(path)
+    }
+  }
+
+  candidatePaths.sort((a, b) => a.length - b.length || edgeConfidenceSum(b) - edgeConfidenceSum(a))
+  const admitted = candidatePaths.slice(0, maxPaths)
+
+  const bridgeNodes = new Set<string>()
+  for (const hops of admitted) {
+    for (const { from, to } of hops) {
+      if (!survivorSet.has(from)) bridgeNodes.add(from)
+      if (!survivorSet.has(to)) bridgeNodes.add(to)
+    }
+  }
+
+  return { bridgeNodes, paths: admitted }
+}
+
 // ── HybridRetriever implementation ──────────────────────────────────────────
 
 export interface HybridRetrieverOptions {
@@ -214,6 +378,7 @@ export class HybridRetriever implements Retriever {
   private columnBm25: Bm25Index | null = null
   private tableDocTextById = new Map<string, string>()
   private columnDocTextById = new Map<string, string>()
+  private adjacency: JoinAdjacency = new Map()
 
   constructor(options: HybridRetrieverOptions) {
     this.embedQuery = options.embedQuery
@@ -253,6 +418,10 @@ export class HybridRetriever implements Retriever {
     }
     this.tableBm25 = new Bm25Index(tableDocs)
     this.columnBm25 = new Bm25Index(columnDocs)
+
+    // Fix A (JOINGRAPH_SURFACING.md §6): precompute the adjacency map ONCE
+    // at load() time rather than scanning `edges` linearly on every retrieve.
+    this.adjacency = buildJoinAdjacency(this.loader.joinGraph.edges)
   }
 
   private ensureLoaded(): { vss: VssClient; tableBm25: Bm25Index; columnBm25: Bm25Index } {
@@ -268,8 +437,13 @@ export class HybridRetriever implements Retriever {
 
   // ── stage 1: expand + normalize the question ─────────────────────────────
 
+  // SEMANTIC_HINTS.md §7 stop-token deny-list: bare short ambiguous
+  // abbreviations that are common English words — a bare-form match only
+  // fires when a multi-word alias for the SAME term also matched.
+  private static readonly AMBIGUOUS_BARE_TERM_DENYLIST = new Set(['map', 'temp', 'pa', 'sap'])
+
   private expandQuestion(question: string): { expanded: string; glossaryHits: GlossaryHit[] } {
-    const { abbreviations, synonyms } = this.loader.glossary
+    const { abbreviations, synonyms, autoSynonyms } = this.loader.glossary
     const glossaryHits: GlossaryHit[] = []
     const lowerQuestion = question.toLowerCase()
     const expandedTerms: string[] = [question]
@@ -288,25 +462,70 @@ export class HybridRetriever implements Retriever {
 
       expandedTerms.push(synonym.term, ...synonym.aliases)
       for (const map of synonym.maps) {
-        glossaryHits.push(this.glossaryHitFromMap(synonym.term, map))
+        glossaryHits.push(this.glossaryHitFromMap(synonym.term, map, 1.0))
+      }
+    }
+
+    // Fix D (SEMANTIC_HINTS.md §3.2/§8.2): machine-mined hint matrix, kept
+    // separate from hand-seeded `synonyms` for auditable provenance.
+    // Backward compatible: `autoSynonyms` may be absent on an older bundle.
+    for (const autoSynonym of autoSynonyms ?? []) {
+      const { term, aliases, confidence } = autoSynonym
+      const candidateTerms = [term, ...aliases]
+
+      const matchedMultiWordAlias = candidateTerms.some(
+        (t) => t.includes(' ') && lowerQuestion.includes(t.toLowerCase())
+      )
+      let matchedBare = false
+      for (const t of candidateTerms) {
+        if (t.includes(' ')) continue
+        const pattern = new RegExp(`\\b${t.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+        if (!pattern.test(lowerQuestion)) continue
+        if (HybridRetriever.AMBIGUOUS_BARE_TERM_DENYLIST.has(t.toLowerCase()) && !matchedMultiWordAlias) continue
+        matchedBare = true
+        break
+      }
+
+      if (!matchedMultiWordAlias && !matchedBare) continue
+
+      expandedTerms.push(term, ...aliases)
+      for (const map of autoSynonym.maps) {
+        glossaryHits.push(this.glossaryHitFromMap(term, map, confidence))
       }
     }
 
     return { expanded: expandedTerms.join(' '), glossaryHits }
   }
 
-  private glossaryHitFromMap(term: string, map: GlossaryMap): GlossaryHit {
+  private glossaryHitFromMap(term: string, map: GlossaryMap, confidence: number): GlossaryHit {
     switch (map.kind) {
-      case 'coded-measurement':
-        return { term, resolvedColumnId: map.valueColumnId, timeColumnId: map.timeColumnId, unit: map.unit }
+      case 'coded-measurement': {
+        // Fix D §3.3: hostingTableId is the load-bearing retrieval-pin
+        // field. Prefer an explicit `hostingTableId` (auto-mined maps
+        // always carry it); derive it from valueColumnId's table for
+        // backward compat with hand-seeded entries that don't carry it yet.
+        const hostingTableId =
+          map.hostingTableId ?? map.valueColumnId.split('.').slice(0, -1).join('.')
+        return {
+          term,
+          resolvedColumnId: map.valueColumnId,
+          timeColumnId: map.timeColumnId,
+          unit: map.unit,
+          hostingTableId,
+          confidence,
+          codeValue: map.codeValue,
+          codeLabel: map.codeLabel ?? (typeof map.codeValue === 'string' ? map.codeValue : undefined),
+          codeColumnId: map.codeColumnId,
+        }
+      }
       case 'column':
-        return { term, resolvedColumnId: map.columnId, timeColumnId: map.timeColumnId, unit: map.unit }
+        return { term, resolvedColumnId: map.columnId, timeColumnId: map.timeColumnId, unit: map.unit, confidence }
       case 'temporal-column':
-        return { term, timeColumnId: map.columnId }
+        return { term, timeColumnId: map.columnId, confidence }
       case 'table':
-        return { term }
+        return { term, confidence }
       case 'derived':
-        return { term, resolvedColumnId: map.toColumnId }
+        return { term, resolvedColumnId: map.toColumnId, confidence }
       default: {
         // Exhaustiveness guard: if a new GlossaryMap variant is added to
         // BundleLoader.ts without updating this switch, fail loudly at
@@ -397,19 +616,63 @@ export class HybridRetriever implements Retriever {
     return Array.from(survivorSet)
   }
 
+  // ── Fix A stage: BFS bridge-expand (JOINGRAPH_SURFACING.md §2, §3, §8.2) ──
+
+  private bridgeExpandSurvivors(recalledSurvivorIds: string[]): { bridgeNodes: Set<string>; joinPaths: JoinPath[] } {
+    const { bridgeNodes, paths } = bridgeExpand(this.adjacency, recalledSurvivorIds, MAX_BRIDGE_HOPS, MAX_BRIDGE_PATHS)
+
+    const joinPaths: JoinPath[] = paths.map((hops) => {
+      const nodes = [hops[0]!.from, ...hops.map((h) => h.to)]
+      const edges: JoinHint[] = hops.map(({ edge }) => {
+        const fromTable = this.loader.getTable(edge.from)
+        const toTable = this.loader.getTable(edge.to)
+        return {
+          fromRef: fromTable?.quotedRef ?? edge.from,
+          fromColumns: edge.fromColumns,
+          toRef: toTable?.quotedRef ?? edge.to,
+          toColumns: edge.toColumns,
+          joinCardinality: edge.joinCardinality,
+          crossSource: edge.crossSource,
+        }
+      })
+      return { nodes, edges, hopCount: hops.length }
+    })
+
+    return { bridgeNodes, joinPaths }
+  }
+
+  private static restrictJoinPathsToRendered(joinPaths: JoinPath[], renderedTableIds: Set<string>): JoinPath[] {
+    return joinPaths.filter((jp) => jp.nodes.every((n) => renderedTableIds.has(n)))
+  }
+
   // ── stage 7: render ─────────────────────────────────────────────────────────
 
-  private renderTable(table: CatalogTable, columnIdAllowlist?: Set<string>): RenderedTable {
+  private fkFromColumnsByTable(tableId: string): Set<string> {
+    const names = new Set<string>()
+    for (const edge of this.loader.joinGraph.edges) {
+      if (edge.from === tableId) {
+        for (const col of edge.fromColumns) names.add(col)
+      }
+    }
+    return names
+  }
+
+  private renderTable(table: CatalogTable, columnIdAllowlist?: Set<string>, role: 'primary' | 'bridge' = 'primary'): RenderedTable {
     const requiredTimeColumn = table.columns.find((c) => c.isTimeColumn)?.quotedName
-    const columns = table.columns
-      .filter((c) => !columnIdAllowlist || columnIdAllowlist.has(c.columnId) || c.isPrimaryKey)
-      .map((c) => ({
-        name: c.name,
-        quotedName: c.quotedName,
-        dataType: c.dataType,
-        unit: c.unit ?? undefined,
-        isTimeColumn: c.isTimeColumn,
-      }))
+    const fkColumnNames = this.fkFromColumnsByTable(table.tableId)
+    const sourceColumns =
+      role === 'bridge'
+        ? table.columns.filter((c) => c.isPrimaryKey || fkColumnNames.has(c.name))
+        : table.columns.filter((c) => !columnIdAllowlist || columnIdAllowlist.has(c.columnId) || c.isPrimaryKey)
+    const columns = sourceColumns.map((c) => ({
+      name: c.name,
+      quotedName: c.quotedName,
+      dataType: c.dataType,
+      unit: c.unit ?? undefined,
+      isTimeColumn: c.isTimeColumn,
+      isIndexed: c.isIndexed,
+      isForeignKeyOrPrimaryKey: c.isPrimaryKey || fkColumnNames.has(c.name),
+    }))
     const profile = this.loader.getTableProfile(table.tableId)
     return {
       tableId: table.tableId,
@@ -419,6 +682,7 @@ export class HybridRetriever implements Retriever {
       approxRowCount: profile?.approxRowCount ?? 0,
       isLargeTimeSeries: table.isLargeTimeSeries,
       requiredTimeColumn,
+      role,
     }
   }
 
@@ -481,22 +745,85 @@ export class HybridRetriever implements Retriever {
     const sourceScope = opts.sourceScope
 
     // 3. table recall (hybrid dense+BM25 RRF, importance-biased)
-    const recalledTableIds = await this.recallTables(expanded, sourceScope, recallTablesCount)
+    let recalledTableIds = await this.recallTables(expanded, sourceScope, recallTablesCount)
+
+    // Fix D §4.2/§8.3 — the RETRIEVAL PIN: a matched glossary hint's hosting
+    // table is injected at rank 0, AHEAD of the dense/BM25 fused list,
+    // bypassing dense/BM25 entirely for a known coded-measurement hit.
+    const pinnedTableIds = glossaryHits
+      .filter((h) => h.hostingTableId && h.confidence >= HINT_PIN_THRESHOLD)
+      .map((h) => h.hostingTableId as string)
+    {
+      const seen = new Set<string>()
+      const ordered: string[] = []
+      for (const tid of [...pinnedTableIds, ...recalledTableIds]) {
+        if (seen.has(tid)) continue
+        seen.add(tid)
+        ordered.push(tid)
+      }
+      recalledTableIds = ordered
+    }
 
     // 4. column recall, scoped to stage-3 survivors
     const recalledColumnIds = await this.recallColumns(expanded, recalledTableIds, recallColumnsCount)
     const recalledColumnIdSet = new Set(recalledColumnIds)
 
-    // 5. FK graph-expand
-    const expandedTableIds = this.graphExpand(recalledTableIds)
+    // 5. FK graph-expand — preserve pin-then-recall rank order through
+    // expansion (newly-reachable FK neighbors appended after the already-
+    // ordered recalledTableIds) so a tight maxTables cap still respects the pin.
+    let expandedTableIds = this.graphExpand(recalledTableIds)
+    {
+      const ordered = [...recalledTableIds]
+      const seen = new Set(ordered)
+      for (const tid of expandedTableIds) {
+        if (seen.has(tid)) continue
+        seen.add(tid)
+        ordered.push(tid)
+      }
+      expandedTableIds = ordered
+    }
+
+    // Fix A §2/§3 — BFS bridge-expand + bridge-protect: pull in the shortest
+    // connecting paths (and their intermediate bridge tables) between
+    // survivor pairs with no direct edge, BEFORE LLM-prune runs.
+    const { bridgeNodes, joinPaths } = this.bridgeExpandSurvivors(expandedTableIds)
+    const candidateIds = [...expandedTableIds]
+    {
+      const seen = new Set(candidateIds)
+      for (const tid of bridgeNodes) {
+        if (seen.has(tid)) continue
+        seen.add(tid)
+        candidateIds.push(tid)
+      }
+    }
 
     // 6. LLM-prune (stub by default) — down to <= maxTables
-    const candidates: LlmPruneCandidateTable[] = expandedTableIds.map((tableId) => {
+    const candidates: LlmPruneCandidateTable[] = candidateIds.map((tableId) => {
       const table = this.loader.getTable(tableId)
       return { tableId, grain: table?.grain ?? `table ${tableId}` }
     })
     const prunedTableIds = await this.llmPrune(question, candidates, opts.maxTables)
-    const finalTableIds = prunedTableIds.slice(0, opts.maxTables)
+
+    // Bridge-protect (+ pin-protect): reserve slots for protected tables
+    // (pins ahead of bridges) so a tight maxTables cap does not silently
+    // drop a "guaranteed recall" hit or a needed bridge table.
+    const protectedOrdered = [
+      ...pinnedTableIds.filter((t) => candidateIds.includes(t)),
+      ...Array.from(bridgeNodes).filter((t) => candidateIds.includes(t) && !pinnedTableIds.includes(t)),
+    ]
+
+    let finalTableIds = prunedTableIds.slice(0, opts.maxTables)
+    const missingProtected = protectedOrdered.filter((t) => !finalTableIds.includes(t))
+    if (missingProtected.length > 0 && finalTableIds.length + missingProtected.length <= opts.maxTables) {
+      finalTableIds = [...finalTableIds, ...missingProtected]
+    } else if (missingProtected.length > 0) {
+      const protectedCapped = missingProtected.slice(0, opts.maxTables)
+      const nonProtectedRanked = prunedTableIds.filter((t) => !protectedOrdered.includes(t))
+      const roomForNonProtected = Math.max(opts.maxTables - protectedCapped.length, 0)
+      finalTableIds = [...protectedCapped, ...nonProtectedRanked.slice(0, roomForNonProtected)]
+    }
+
+    const primaryRenderedIds = new Set([...recalledTableIds, ...finalTableIds.filter((t) => !bridgeNodes.has(t))])
 
     // 7. render within tokenBudget
     const renderedTables: RenderedTable[] = []
@@ -504,24 +831,37 @@ export class HybridRetriever implements Retriever {
     for (const tableId of finalTableIds) {
       const table = this.loader.getTable(tableId)
       if (!table) continue
+      const role: 'primary' | 'bridge' = bridgeNodes.has(tableId) && !primaryRenderedIds.has(tableId) ? 'bridge' : 'primary'
       // Only the original recall (not graph-expanded) columns get scoped
       // filtering; graph-expanded tables (join partners) render in full so
       // their join columns are always visible.
       const columnAllowlist = recalledTableIds.includes(tableId) ? recalledColumnIdSet : undefined
-      const rendered = this.renderTable(table, columnAllowlist)
+      const rendered = this.renderTable(table, columnAllowlist, role)
       const renderedTokens = estimateTokens(renderTableForEstimate(rendered))
-      if (renderedTables.length > 0 && runningTokens + renderedTokens > opts.tokenBudget) break
+      if (renderedTables.length > 0 && runningTokens + renderedTokens > opts.tokenBudget) {
+        // Bridge tables are protected from the token-budget cut too, as long
+        // as at least one non-bridge table already rendered.
+        if (role === 'bridge') {
+          renderedTables.push(rendered)
+          runningTokens += renderedTokens
+          continue
+        }
+        break
+      }
       renderedTables.push(rendered)
       runningTokens += renderedTokens
     }
 
+    const renderedTableIds = new Set(renderedTables.map((t) => t.tableId))
     const cardinalityWarnings = renderedTables.filter((t) => t.isLargeTimeSeries).map((t) => this.buildCardinalityWarning(t))
     const joinHints = this.buildJoinHints(renderedTables.map((t) => t.tableId))
+    const renderedJoinPaths = HybridRetriever.restrictJoinPathsToRendered(joinPaths, renderedTableIds)
     const exemplars = this.recallExemplars(question, exemplarK)
 
     return {
       tables: renderedTables,
       joinHints,
+      joinPaths: renderedJoinPaths,
       cardinalityWarnings,
       glossaryHits,
       exemplars,
