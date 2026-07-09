@@ -113,6 +113,23 @@ export interface SqlGenerateResponse {
   cached: boolean
   /** Out-of-clinical-scope (unchanged semantics from the legacy route). */
   error?: 'scope'
+  /**
+   * ADDITIVE (Phase 3, docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5): per-query LLM
+   * cost + token metering. Populated only when generation is served by the
+   * Python service (NL2SQL_GENERATE_RUNTIME=python) — the in-process TS path
+   * does not (yet) meter tokens, so this is optional and simply absent there.
+   * Summed across EVERY LLM call in the request (initial + each self-repair
+   * round); `estimatedCostUsd` is priced from the service's price table.
+   */
+  usage?: {
+    model: string
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+    llmCalls: number
+    estimatedCostUsd: number
+    latencyMs: number
+  }
 }
 
 // ── options ───────────────────────────────────────────────────────────────────

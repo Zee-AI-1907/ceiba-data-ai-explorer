@@ -48,7 +48,10 @@ async def test_schema_metadata_egress_class_always_allowed_even_when_gate_closed
     monkeypatch.delenv("OPENAI_BAA_SIGNED", raising=False)
     llm = StubLlmClient(["SELECT 1"])
     result = await call_llm(llm, "some schema-only prompt", "schema-metadata")
-    assert result == "SELECT 1"
+    # call_llm now returns an LlmCompletion (text + usage + model) so the
+    # pipeline can meter cost; the egress gate behavior is unchanged.
+    assert result.text == "SELECT 1"
+    assert result.usage.total_tokens > 0
 
 
 async def test_patient_derived_egress_class_blocked_when_gate_closed(monkeypatch: pytest.MonkeyPatch):
@@ -64,4 +67,4 @@ async def test_patient_derived_egress_class_allowed_when_gate_open(monkeypatch: 
     monkeypatch.setenv("OPENAI_BAA_SIGNED", "true")
     llm = StubLlmClient(["SELECT 1"])
     result = await call_llm(llm, "some patient-derived prompt", "patient-derived")
-    assert result == "SELECT 1"
+    assert result.text == "SELECT 1"

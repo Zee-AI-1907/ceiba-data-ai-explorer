@@ -57,8 +57,25 @@ class RepairInfoModel(BaseModel):
     lastError: str | None = None
 
 
+class UsageModel(BaseModel):
+    """Per-query LLM cost + token metering (Phase 3 KEY deliverable). Summed
+    across EVERY LLM call in the generate request (initial + each self-repair
+    round). `estimatedCostUsd` is priced from generation/pricing.py's table.
+    """
+
+    model: str
+    promptTokens: int
+    completionTokens: int
+    totalTokens: int
+    llmCalls: int
+    estimatedCostUsd: float
+    latencyMs: int
+
+
 class GenerateResponse(BaseModel):
-    """Mirrors `SqlGenerateResponse` in lib/rag/generate.ts verbatim."""
+    """Mirrors `SqlGenerateResponse` in lib/rag/generate.ts verbatim, plus an
+    additive `usage` block for per-query cost metering (Phase 3).
+    """
 
     sql: str
     description: str
@@ -67,6 +84,7 @@ class GenerateResponse(BaseModel):
     repair: RepairInfoModel | None = None
     cached: bool = False
     error: Literal["scope"] | None = None
+    usage: UsageModel | None = None
 
 
 # ── POST /nl2sql/execute (§2.2, §2.3) ────────────────────────────────────────

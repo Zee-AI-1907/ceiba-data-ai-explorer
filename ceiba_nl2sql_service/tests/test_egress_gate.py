@@ -65,4 +65,4 @@ async def test_patient_derived_egress_class_allowed_at_the_choke_point_when_gate
     monkeypatch.setenv("OPENAI_BAA_SIGNED", "true")
     llm = StubLlmClient(["ok"])
     result = await call_llm(llm, "some patient-row-derived prompt", "patient-derived")
-    assert result == "ok"
+    assert result.text == "ok"

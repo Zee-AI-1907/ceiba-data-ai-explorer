@@ -16,6 +16,7 @@ TS — this service is ONLY the NL->SQL runtime behind that boundary (§1.2).
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -44,6 +45,7 @@ from ceiba_nl2sql_service.models import (
     RepairInfoModel,
     ReadyzResponse,
     RetrievalSummaryModel,
+    UsageModel,
 )
 from ceiba_nl2sql_service.settings import get_settings
 
@@ -110,8 +112,57 @@ async def readyz(request: Request) -> ReadyzResponse:
 # ── POST /nl2sql/generate (§2.2) ─────────────────────────────────────────────
 
 
+def _usage_model(usage) -> UsageModel | None:
+    """Map the pipeline's `UsageSummary` dataclass onto the wire `UsageModel`.
+    None-safe: a response without metered usage (should not happen for a real
+    generate, but defensive) yields None.
+    """
+    if usage is None:
+        return None
+    return UsageModel(
+        model=usage.model,
+        promptTokens=usage.prompt_tokens,
+        completionTokens=usage.completion_tokens,
+        totalTokens=usage.total_tokens,
+        llmCalls=usage.llm_calls,
+        estimatedCostUsd=usage.estimated_cost_usd,
+        latencyMs=usage.latency_ms,
+    )
+
+
+def _log_usage(correlation_id: str, tenant_id: str | None, outcome: str, usage) -> None:
+    """Structured server-side per-request cost log, keyed by the correlation id
+    the TS caller forwarded (§7.7 "the service logs its own structured lines
+    keyed by the same request-id"). This is what lets us measure per-query cost
+    server-side independent of the response body.
+    """
+    if usage is None:
+        return
+    logger.info(
+        "nl2sql.generate.usage correlationId=%s tenantId=%s outcome=%s model=%s "
+        "promptTokens=%d completionTokens=%d totalTokens=%d llmCalls=%d estimatedCostUsd=%.6f latencyMs=%d priced=%s",
+        correlation_id,
+        tenant_id or "-",
+        outcome,
+        usage.model,
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.total_tokens,
+        usage.llm_calls,
+        usage.estimated_cost_usd,
+        usage.latency_ms,
+        usage.priced,
+    )
+
+
 @app.post("/nl2sql/generate", response_model=GenerateResponse, dependencies=[Depends(require_internal_token)])
-async def nl2sql_generate(payload: GenerateRequest, state: AppState = Depends(get_app_state)):
+async def nl2sql_generate(payload: GenerateRequest, request: Request, state: AppState = Depends(get_app_state)):
+    # Correlation id forwarded by the TS route (lib/nl2sqlServiceClient.ts) so a
+    # single NL->SQL request traces Next -> FastAPI (§7.7). Generated here if
+    # absent (e.g. a direct/manual call).
+    correlation_id = request.headers.get("x-correlation-id") or str(_uuid.uuid4())
+    tenant_id = payload.tenantId or (payload.context.activeOrgId if payload.context else None)
+
     options = payload.options
     generate_options = GenerateOptions(
         max_repair_rounds=options.maxRepairRounds if options and options.maxRepairRounds is not None else 2,
@@ -139,6 +190,8 @@ async def nl2sql_generate(payload: GenerateRequest, state: AppState = Depends(ge
     except EgressBlockedError as exc:
         return envelope_response("scope", str(exc))
     except GenerationError as exc:
+        # Even a failed generate burned tokens — log the cost it spent.
+        _log_usage(correlation_id, tenant_id, "generation_failed", exc.usage)
         return envelope_response(
             "generation",
             "Could not produce safe, executable SQL within the repair budget.",
@@ -149,7 +202,10 @@ async def nl2sql_generate(payload: GenerateRequest, state: AppState = Depends(ge
     except Exception as exc:  # noqa: BLE001 - any unexpected pipeline failure is scrubbed before returning
         return safe_error_response(exc, context="generate", kind="internal")
 
+    usage_model = _usage_model(response.usage)
+
     if response.error == "scope":
+        _log_usage(correlation_id, tenant_id, "scope", response.usage)
         return GenerateResponse(
             sql="",
             description="",
@@ -161,8 +217,10 @@ async def nl2sql_generate(payload: GenerateRequest, state: AppState = Depends(ge
             ),
             cached=response.cached,
             error="scope",
+            usage=usage_model,
         )
 
+    _log_usage(correlation_id, tenant_id, "success", response.usage)
     return GenerateResponse(
         sql=response.sql,
         description=response.description,
@@ -174,6 +232,7 @@ async def nl2sql_generate(payload: GenerateRequest, state: AppState = Depends(ge
         ),
         repair=RepairInfoModel(rounds=response.repair.rounds, lastError=response.repair.last_error) if response.repair else None,
         cached=response.cached,
+        usage=usage_model,
     )
 
 

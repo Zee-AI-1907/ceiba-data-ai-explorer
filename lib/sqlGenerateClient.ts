@@ -40,6 +40,18 @@ export interface SqlGenerateSuccess {
   }
   repair?: { rounds: number; lastError?: string }
   cached: boolean
+  /** ADDITIVE (Phase 3): per-query LLM cost/token metering, present when the
+   *  Python generation runtime served the request. Optional — the TS runtime
+   *  does not emit it, so existing callers/tests are unaffected. */
+  usage?: {
+    model: string
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+    llmCalls: number
+    estimatedCostUsd: number
+    latencyMs: number
+  }
 }
 
 /** Mirrors `lib/errors.ts`'s `ErrorEnvelope` — duplicated as a plain client-side type for the same reason. */

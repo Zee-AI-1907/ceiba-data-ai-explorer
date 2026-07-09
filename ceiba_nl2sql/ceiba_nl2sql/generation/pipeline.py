@@ -37,11 +37,13 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
 from ceiba_nl2sql.engine.base import EngineCapabilities, ExecuteOptions, PlanError, PlanOk, QueryEngine, SqlDialect
-from ceiba_nl2sql.generation.llm import LlmClient, call_llm
+from ceiba_nl2sql.generation.llm import DEFAULT_LLM_MODEL, LlmClient, TokenUsage, call_llm
+from ceiba_nl2sql.generation.pricing import estimate_cost_usd
 from ceiba_nl2sql.generation.prompt import assemble_prompt, assemble_repair_prompt
 from ceiba_nl2sql.guard.cardinality import cardinality_guard_from_context
 from ceiba_nl2sql.retrieval.retriever import HybridRetriever, RetrieveOptions, SchemaContext
@@ -61,10 +63,20 @@ class GenerationError(RuntimeError):
     SQL within the repair budget. Mirrors lib/rag/generate.ts `GenerationError`.
     """
 
-    def __init__(self, message: str, *, rounds: int, last_error: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        rounds: int,
+        last_error: str | None = None,
+        usage: "UsageSummary | None" = None,
+    ) -> None:
         super().__init__(message)
         self.rounds = rounds
         self.last_error = last_error
+        # Usage metered up to the point generation gave up — so even a failed
+        # generate request reports the tokens/cost it burned (Phase 3).
+        self.usage = usage
 
 
 @dataclass(frozen=True)
@@ -81,9 +93,30 @@ class RepairInfo:
 
 
 @dataclass(frozen=True)
+class UsageSummary:
+    """Per-request LLM cost/token metering (Phase 3 KEY deliverable). Sums the
+    token usage across EVERY LLM call in a generate request — the initial call
+    PLUS every self-repair round — and prices it in USD from the pricing table
+    (generation/pricing.py). `llm_calls` is the total number of LLM calls
+    (1 + repair rounds). `estimated_cost_usd` is 0.0 when the model has no
+    price in the table (`priced=False`), so the number is never fabricated.
+    """
+
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    llm_calls: int
+    estimated_cost_usd: float
+    latency_ms: int
+    priced: bool = True
+
+
+@dataclass(frozen=True)
 class SqlGenerateResponse:
     """Mirrors lib/rag/generate.ts `SqlGenerateResponse` verbatim — this is
-    the shape the FastAPI layer serializes back to the TS caller unchanged.
+    the shape the FastAPI layer serializes back to the TS caller unchanged,
+    plus an additive `usage` block (Phase 3 per-query cost metering).
     """
 
     sql: str
@@ -93,6 +126,7 @@ class SqlGenerateResponse:
     cached: bool
     repair: RepairInfo | None = None
     error: str | None = None  # 'scope' iff out-of-clinical-scope
+    usage: UsageSummary | None = None
 
 
 @dataclass
@@ -238,6 +272,30 @@ async def generate_sql(
     default_limit = options.default_limit
     max_repair_rounds = min(options.max_repair_rounds, 2)
 
+    # ── cost/token metering accumulators (Phase 3 KEY deliverable) ──────────
+    # Summed across EVERY LLM call in this request (initial + each repair
+    # round). `metering_model` is the model the LLM client reports (the real
+    # OpenAI client echoes the resolved snapshot; the stub reports its
+    # configured id) — used to price the summed tokens.
+    start_ns = time.monotonic_ns()
+    total_usage = TokenUsage()
+    llm_calls = 0
+    metering_model = DEFAULT_LLM_MODEL
+
+    def _build_usage() -> UsageSummary:
+        latency_ms = int((time.monotonic_ns() - start_ns) / 1_000_000)
+        estimate = estimate_cost_usd(metering_model, total_usage.prompt_tokens, total_usage.completion_tokens)
+        return UsageSummary(
+            model=metering_model,
+            prompt_tokens=total_usage.prompt_tokens,
+            completion_tokens=total_usage.completion_tokens,
+            total_tokens=total_usage.total_tokens,
+            llm_calls=llm_calls,
+            estimated_cost_usd=estimate.estimated_cost_usd,
+            latency_ms=latency_ms,
+            priced=estimate.priced,
+        )
+
     retrieve_options = RetrieveOptions(
         token_budget=options.token_budget,
         max_tables=options.max_tables,
@@ -254,7 +312,11 @@ async def generate_sql(
     initial_prompt = assemble_prompt(
         context.tables, context.cardinality_warnings, question, capabilities, resolved_dialect, default_limit=default_limit
     )
-    completion = await call_llm(llm, initial_prompt, "schema-metadata")
+    result = await call_llm(llm, initial_prompt, "schema-metadata")
+    llm_calls += 1
+    total_usage = total_usage + result.usage
+    metering_model = result.model
+    completion = result.text
 
     candidate_sql, description = extract_sql(completion)
 
@@ -266,6 +328,7 @@ async def generate_sql(
             retrieval=_retrieval_summary(context),
             cached=cached,
             error="scope",
+            usage=_build_usage(),
         )
 
     rounds = 0
@@ -296,7 +359,11 @@ async def generate_sql(
             hint=failure.hint,
             default_limit=default_limit,
         )
-        completion = await call_llm(llm, repair_prompt, "schema-metadata")
+        repair_result = await call_llm(llm, repair_prompt, "schema-metadata")
+        llm_calls += 1
+        total_usage = total_usage + repair_result.usage
+        metering_model = repair_result.model
+        completion = repair_result.text
         extracted_sql, extracted_description = extract_sql(completion)
         candidate_sql = extracted_sql
         if extracted_description:
@@ -318,6 +385,7 @@ async def generate_sql(
             f"Could not produce safe, executable SQL within {max_repair_rounds} repair round(s).",
             rounds=rounds,
             last_error=last_error,
+            usage=_build_usage(),
         )
 
     assert accepted_sql is not None
@@ -328,4 +396,5 @@ async def generate_sql(
         retrieval=_retrieval_summary(context),
         repair=RepairInfo(rounds=rounds, last_error=last_error) if rounds > 0 else None,
         cached=cached,
+        usage=_build_usage(),
     )

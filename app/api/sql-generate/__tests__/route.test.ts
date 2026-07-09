@@ -23,7 +23,12 @@ import { signSession } from '@/lib/session'
 import { resolvedDialect } from '@/lib/engine/provisioning'
 import { sqlCache } from '@/lib/cache'
 import { resetRateLimit, rateLimitKey } from '@/lib/rateLimiter'
-import { POST, __setGenerationDepsForTest, type GenerationDeps } from '../route'
+import {
+  POST,
+  __setGenerationDepsForTest,
+  __setServiceFetchForTest,
+  type GenerationDeps,
+} from '../route'
 
 beforeAll(() => {
   // requireAuthWithPermission -> verifySession needs a signing secret.
@@ -243,5 +248,190 @@ describe('POST /api/sql-generate — safe errors', () => {
     const res = await POST(makeReq({ body: { userMessage: 'what is the weather' } }))
     expect(res.status).toBe(422)
     expect((await res.json()).error.code).toBe('SCOPE')
+  })
+})
+
+// ── Phase 3: NL2SQL_GENERATE_RUNTIME=python cutover (mocked service fetch) ─────
+//
+// Asserts the flag-on path (a) keeps ALL the TS hardening, (b) sends the correct
+// request shape to the Python service (bearer token + correlation id + body),
+// (c) maps the service's success response back to the route's JSON contract and
+// surfaces the additive `usage` block, and (d) maps the error envelope onto the
+// existing status codes via safeError — all with a MOCKED fetch (no live
+// service, fully hermetic). The default 'ts' path is covered by every describe
+// above; those run with the flag unset.
+
+describe('POST /api/sql-generate — python runtime (NL2SQL_GENERATE_RUNTIME=python)', () => {
+  /** A service /nl2sql/generate success body (SqlGenerateResponse + usage). */
+  const SERVICE_SUCCESS = {
+    sql: `SELECT "patientRef" FROM mock.public."VisitMock" LIMIT 1000`,
+    description: 'patients admitted yesterday',
+    dialect: 'duckdb',
+    retrieval: {
+      tables: ['mock.public.VisitMock'],
+      exemplarsUsed: ['ex_admitted'],
+      cardinalityWarnings: ['VisitMock is large'],
+    },
+    cached: false,
+    usage: {
+      model: 'gpt-4o-mini',
+      promptTokens: 320,
+      completionTokens: 48,
+      totalTokens: 368,
+      llmCalls: 2,
+      estimatedCostUsd: 0.0000768,
+      latencyMs: 512,
+    },
+  }
+
+  /** Build a mocked fetch returning a chosen status + JSON body, capturing the call. */
+  function mockServiceFetch(status: number, body: unknown) {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const fetchImpl = (async (url: unknown, init: unknown) => {
+      calls.push({ url: String(url), init: init as RequestInit })
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      })
+    }) as unknown as typeof fetch
+    return { fetchImpl, calls }
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('NL2SQL_GENERATE_RUNTIME', 'python')
+    vi.stubEnv('NL2SQL_SERVICE_URL', 'http://nl2sql.test:8088')
+    vi.stubEnv('NL2SQL_SERVICE_TOKEN', 'test-service-token')
+  })
+
+  afterEach(() => {
+    __setServiceFetchForTest(null)
+  })
+
+  it('keeps the auth hardening (401 unauthenticated) before ever calling the service', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ authenticated: false }))
+    expect(res.status).toBe(401)
+    expect(calls).toHaveLength(0) // never reached the service
+  })
+
+  it('keeps the body-size hardening (413) before ever calling the service', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ contentLength: 5 * 1024 * 1024 }))
+    expect(res.status).toBe(413)
+    expect(calls).toHaveLength(0)
+  })
+
+  it('sends the correct request shape (bearer token, correlation id, tenantId, context) to the service', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(
+      makeReq({ orgId: 'orgX', userId: 'user-1', role: 'clinician', body: { userMessage: `py-shape ${Math.random()}` } })
+    )
+    expect(res.status).toBe(200)
+    expect(calls).toHaveLength(1)
+
+    const { url, init } = calls[0]
+    expect(url).toBe('http://nl2sql.test:8088/nl2sql/generate')
+    const headers = new Headers(init.headers)
+    expect(headers.get('authorization')).toBe('Bearer test-service-token')
+    expect(headers.get('x-correlation-id')).toBeTruthy()
+
+    const sent = JSON.parse(init.body as string)
+    expect(sent.question).toContain('py-shape')
+    expect(sent.tenantId).toBe('orgX')
+    expect(sent.context).toEqual({ userId: 'user-1', activeOrgId: 'orgX', role: 'clinician' })
+  })
+
+  it('maps the service success response back to the route JSON contract and surfaces usage', async () => {
+    const { fetchImpl } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ body: { userMessage: `py-success ${Math.random()}` } }))
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('application/json')
+
+    const json = await res.json()
+    expect(json.sql).toContain('VisitMock')
+    expect(json.dialect).toBe('duckdb')
+    expect(json.retrieval.tables).toContain('mock.public.VisitMock')
+    // The additive usage block is surfaced to the caller (per-query cost).
+    expect(json.usage).toBeDefined()
+    expect(json.usage.model).toBe('gpt-4o-mini')
+    expect(json.usage.totalTokens).toBe(368)
+    expect(json.usage.llmCalls).toBe(2)
+    expect(json.usage.estimatedCostUsd).toBeCloseTo(0.0000768)
+  })
+
+  it('honors a caller dialect override on the python path', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, { ...SERVICE_SUCCESS, dialect: 'duckdb' })
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(
+      makeReq({ body: { userMessage: `py-dialect ${Math.random()}`, dialect: 'postgres' } })
+    )
+    const json = await res.json()
+    expect(json.dialect).toBe('postgres')
+    // The override is forwarded to the service too.
+    expect(JSON.parse(calls[0].init.body as string).dialect).toBe('postgres')
+  })
+
+  it('maps a service scope decline (200 body error:scope) to 422 SCOPE', async () => {
+    const { fetchImpl } = mockServiceFetch(200, {
+      sql: '',
+      description: '',
+      dialect: 'duckdb',
+      retrieval: { tables: [], exemplarsUsed: [], cardinalityWarnings: [] },
+      cached: false,
+      error: 'scope',
+    })
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ body: { userMessage: `py-scope ${Math.random()}` } }))
+    expect(res.status).toBe(422)
+    expect((await res.json()).error.code).toBe('SCOPE')
+  })
+
+  it('maps a service "generation" error envelope (422) to 422 SCOPE', async () => {
+    const { fetchImpl } = mockServiceFetch(422, {
+      error: { kind: 'generation', message: 'repair budget exhausted', detail: { rounds: 2 } },
+    })
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ body: { userMessage: `py-gen ${Math.random()}` } }))
+    expect(res.status).toBe(422)
+    expect((await res.json()).error.code).toBe('SCOPE')
+  })
+
+  it('maps a service "engine" error envelope (502) to a safeError 502 with NO leaked detail', async () => {
+    const { fetchImpl } = mockServiceFetch(502, {
+      error: { kind: 'engine', message: 'DuckDB Binder Error: no such column secret_internal_detail' },
+    })
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ body: { userMessage: `py-engine ${Math.random()}` } }))
+    expect(res.status).toBe(502)
+    const json = await res.json()
+    expect(json.error.code).toBe('UPSTREAM')
+    // H20: the raw upstream message never reaches the client.
+    expect(json.error.message).not.toMatch(/DuckDB|secret_internal_detail|Binder/i)
+  })
+
+  it('maps a transport failure to a safeError 502', async () => {
+    const fetchImpl = (async () => {
+      throw new TypeError('fetch failed')
+    }) as unknown as typeof fetch
+    __setServiceFetchForTest(fetchImpl)
+    const res = await POST(makeReq({ body: { userMessage: `py-transport ${Math.random()}` } }))
+    expect(res.status).toBe(502)
+    expect((await res.json()).error.code).toBe('UPSTREAM')
+  })
+
+  it('a second identical request from the same org still hits the TS cache (cache is runtime-independent)', async () => {
+    const { fetchImpl, calls } = mockServiceFetch(200, SERVICE_SUCCESS)
+    __setServiceFetchForTest(fetchImpl)
+    const message = `py-cache ${Math.random()}`
+    const first = await POST(makeReq({ orgId: 'orgP', userId: 'user-1', body: { userMessage: message } }))
+    expect((await first.json()).cached).toBe(false)
+    const second = await POST(makeReq({ orgId: 'orgP', userId: 'user-2', body: { userMessage: message } }))
+    expect((await second.json()).cached).toBe(true)
+    // Only the first (cache-miss) request reached the service.
+    expect(calls).toHaveLength(1)
   })
 })

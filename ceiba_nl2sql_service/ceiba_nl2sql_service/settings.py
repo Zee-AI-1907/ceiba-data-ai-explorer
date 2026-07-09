@@ -15,6 +15,7 @@ Env vars this service formalizes (per plan §6):
 
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,7 +31,13 @@ class Settings(BaseSettings):
     # ── LLM + egress gate ────────────────────────────────────────────────────
     openai_api_key: str | None = None
     openai_baa_signed: bool = False
-    openai_model: str = "gpt-4o-mini"
+    # The driving model. Primary env is NL2SQL_LLM_MODEL (plan §6); OPENAI_MODEL
+    # is kept as a legacy alias so an existing config keeps working. Default is
+    # the current default driving model (kept in sync with llm.DEFAULT_LLM_MODEL).
+    openai_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("NL2SQL_LLM_MODEL", "OPENAI_MODEL", "openai_model"),
+    )
 
     # ── internal service auth (§2.1) ─────────────────────────────────────────
     nl2sql_service_token: str | None = None

@@ -108,3 +108,72 @@ async def test_generate_respects_dialect_override_field(client, app_state, auth_
     )
     assert response.status_code == 200
     assert response.json()["dialect"] == "duckdb"
+
+
+# ── Phase 3: per-query cost + token metering (the KEY deliverable) ───────────
+
+
+async def test_generate_response_includes_usage_block_with_cost(client, app_state, auth_headers):
+    app_state._llm = StubLlmClient([GOOD_HEART_RATE_SQL])
+    response = await client.post(
+        "/nl2sql/generate",
+        json={"question": "heart rate over 120 in the last 3 hours", "tenantId": "org_1"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage is not None
+    # Single (non-repaired) generation -> exactly one LLM call.
+    assert usage["llmCalls"] == 1
+    assert usage["model"] == "gpt-4o-mini"  # the stub's default (priced) model
+    assert usage["promptTokens"] > 0
+    assert usage["completionTokens"] > 0
+    assert usage["totalTokens"] == usage["promptTokens"] + usage["completionTokens"]
+    # gpt-4o-mini is in the default price table, so cost is a positive USD number.
+    assert usage["estimatedCostUsd"] > 0.0
+    assert usage["latencyMs"] >= 0
+
+
+async def test_generate_usage_sums_tokens_across_repair_rounds(client, app_state, auth_headers):
+    # First draft is unbounded (fails the cardinality guard) -> one self-repair
+    # round with a second LLM call. The usage block MUST reflect BOTH calls.
+    stub = StubLlmClient([UNBOUNDED_HEART_RATE_SQL, GOOD_HEART_RATE_SQL])
+    app_state._llm = stub
+    response = await client.post(
+        "/nl2sql/generate",
+        json={"question": "heart rate over 120 in the last 3 hours", "tenantId": "org_1"},
+        headers=auth_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["repair"]["rounds"] == 1
+    usage = body["usage"]
+    # 1 initial + 1 repair = 2 LLM calls summed.
+    assert usage["llmCalls"] == 2
+    # The stub reports synthetic tokens per call (~len//4). The summed total
+    # must equal the sum of both individual calls' synthetic counts, proving
+    # repair-round tokens are added, not overwritten.
+    from ceiba_nl2sql.generation.llm import _synthetic_usage
+
+    expected_completion = (
+        _synthetic_usage("", UNBOUNDED_HEART_RATE_SQL).completion_tokens
+        + _synthetic_usage("", GOOD_HEART_RATE_SQL).completion_tokens
+    )
+    assert usage["completionTokens"] == expected_completion
+    assert usage["totalTokens"] == usage["promptTokens"] + usage["completionTokens"]
+    assert usage["estimatedCostUsd"] > 0.0
+
+
+async def test_generate_usage_cost_matches_price_table(client, app_state, auth_headers):
+    # End-to-end: the returned estimatedCostUsd equals tokens x table price.
+    from ceiba_nl2sql.generation.pricing import estimate_cost_usd
+
+    app_state._llm = StubLlmClient([GOOD_HEART_RATE_SQL])
+    response = await client.post(
+        "/nl2sql/generate",
+        json={"question": "heart rate over 120 in the last 3 hours", "tenantId": "org_1"},
+        headers=auth_headers,
+    )
+    usage = response.json()["usage"]
+    expected = estimate_cost_usd(usage["model"], usage["promptTokens"], usage["completionTokens"])
+    assert usage["estimatedCostUsd"] == expected.estimated_cost_usd

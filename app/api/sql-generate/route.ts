@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { sqlCache, tenantCacheKey } from '@/lib/cache'
 import { requireAuthWithPermission } from '@/lib/apiAuth'
@@ -5,7 +6,7 @@ import { rateLimit } from '@/lib/rateLimiter'
 import { enforceBodySize, parseBody, SqlGenerateBodySchema } from '@/lib/validation'
 import { ErrorCodes, errorResponse, safeError } from '@/lib/errors'
 import type { QueryEngine, SqlDialect } from '@/lib/engine/QueryEngine'
-import { getQueryEngine } from '@/lib/engine/provisioning'
+import { getQueryEngine, resolvedDialect } from '@/lib/engine/provisioning'
 import { HybridRetriever } from '@/lib/rag/Retriever'
 import { createLocalQueryEmbedder } from '@/lib/rag/queryEmbedder'
 import {
@@ -14,6 +15,11 @@ import {
   type LlmClient,
   type SqlGenerateResponse,
 } from '@/lib/rag/generate'
+import {
+  generateSqlViaService,
+  Nl2sqlServiceError,
+  type Nl2sqlGenerateResult,
+} from '@/lib/nl2sqlServiceClient'
 
 /**
  * POST /api/sql-generate — NL→SQL generation (NL2SQL_SPEC.md §5, §5.6; §P5).
@@ -79,6 +85,59 @@ let cachedDepsPromise: Promise<GenerationDeps> | null = null
 export function __setGenerationDepsForTest(deps: GenerationDeps | null): void {
   cachedDeps = deps
   cachedDepsPromise = null
+}
+
+// ── runtime flag: TS (default) vs the Python NL→SQL service ───────────────────
+
+/**
+ * NL2SQL_GENERATE_RUNTIME selects WHICH runtime serves generation
+ * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 3):
+ *   'ts'      (default) — the in-process lib/rag `generateSql` path, unchanged.
+ *   'python'           — POST to the Python FastAPI service /nl2sql/generate.
+ *
+ * DEFAULT is 'ts', so nothing changes unless an operator opts in. Rollback is a
+ * single env flip back to 'ts' — no redeploy (plan §5 "Rollback"). All the TS
+ * hardening (auth → rate-limit → body-size → validate → org-scoped cache) runs
+ * IDENTICALLY on both paths; only the generation step differs.
+ */
+type GenerateRuntime = 'ts' | 'python'
+
+function generateRuntime(): GenerateRuntime {
+  return process.env.NL2SQL_GENERATE_RUNTIME === 'python' ? 'python' : 'ts'
+}
+
+/**
+ * TEST-ONLY fetch seam for the Python-runtime path. When set, the service
+ * client uses this instead of the global `fetch`, so the route test can assert
+ * the exact request shape sent to the service and map a mocked response back —
+ * fully hermetic (no live service). Mirrors the `__setGenerationDepsForTest`
+ * seam used by the TS path.
+ */
+let serviceFetchForTest: typeof fetch | null = null
+
+// eslint-disable-next-line no-underscore-dangle
+export function __setServiceFetchForTest(fetchImpl: typeof fetch | null): void {
+  serviceFetchForTest = fetchImpl
+}
+
+/**
+ * Map the Python service's typed result onto the route's existing
+ * `SqlGenerateResponse` shape (lib/sqlGenerateClient.ts stays UNCHANGED). The
+ * additive `usage` block is surfaced through so per-query cost is visible to
+ * the caller. `cached` is forced false: the service is cache-agnostic; the TS
+ * route owns the org-scoped cache and sets `cached:true` on its own hits.
+ */
+function mapServiceResultToResponse(result: Nl2sqlGenerateResult): SqlGenerateResponse {
+  return {
+    sql: result.sql,
+    description: result.description,
+    dialect: result.dialect,
+    retrieval: result.retrieval,
+    repair: result.repair,
+    cached: false,
+    error: result.error,
+    usage: result.usage,
+  }
 }
 
 /**
@@ -168,19 +227,30 @@ export async function POST(req: NextRequest) {
   if (parseErr) return parseErr
   const { userMessage, sourceScope, dialect: dialectOverride } = data
 
-  let deps: GenerationDeps
-  try {
-    deps = await getGenerationDeps()
-  } catch {
-    return errorResponse(500, ErrorCodes.INTERNAL, 'AI service is not configured.')
-  }
+  const runtime = generateRuntime()
 
-  const targetDialect: SqlDialect = dialectOverride ?? deps.engine.dialect()
+  // The TS path needs the in-process deps to label the response dialect from
+  // its engine. The Python path derives the dialect WITHOUT building a local
+  // engine (resolvedDialect() — no DSNs required), because the actual engine
+  // lives in the service; the override still wins when supplied.
+  let deps: GenerationDeps | null = null
+  let targetDialect: SqlDialect
+  if (runtime === 'ts') {
+    try {
+      deps = await getGenerationDeps()
+    } catch {
+      return errorResponse(500, ErrorCodes.INTERNAL, 'AI service is not configured.')
+    }
+    targetDialect = dialectOverride ?? deps.engine.dialect()
+  } else {
+    targetDialect = dialectOverride ?? resolvedDialect()
+  }
 
   // Tenant-scoped cache key (N4): include session.orgId (via tenantCacheKey) so
   // one org can never read another's cached SQL. Keyed on the question AND the
   // resolved dialect + source scope so a duckdb vs postgres (H11) request or a
-  // scoped request never collides with a differently-targeted one.
+  // scoped request never collides with a differently-targeted one. IDENTICAL on
+  // both runtimes — the cache is a TS concern in front of the service (§6).
   const cacheKey = tenantCacheKey(
     session,
     'sql-generate',
@@ -200,12 +270,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(cachedResponse)
   }
 
+  if (runtime === 'python') {
+    return generateViaPythonService({
+      req,
+      session,
+      userMessage,
+      sourceScope,
+      dialectOverride,
+      targetDialect,
+      cacheKey,
+    })
+  }
+
+  // ── in-process TS runtime (default) — UNCHANGED ─────────────────────────────
   try {
     const result = await generateSql({
       question: userMessage,
-      engine: deps.engine,
-      retriever: deps.retriever,
-      llm: deps.llm,
+      engine: deps!.engine,
+      retriever: deps!.retriever,
+      llm: deps!.llm,
       dialect: targetDialect,
       options: {
         retrieve: sourceScope ? { sourceScope } : undefined,
@@ -232,5 +315,81 @@ export async function POST(req: NextRequest) {
       )
     }
     return safeError(e, { context: 'sql-generate', status: 502 })
+  }
+}
+
+// ── Python-service generation path (NL2SQL_GENERATE_RUNTIME=python) ───────────
+
+interface PythonPathArgs {
+  req: NextRequest
+  session: { orgId: string; userId: string; role: string }
+  userMessage: string
+  sourceScope: string[] | undefined
+  dialectOverride: SqlDialect | undefined
+  targetDialect: SqlDialect
+  cacheKey: string
+}
+
+/**
+ * generateViaPythonService — the flag-on branch. All hardening + the org-scoped
+ * cache already ran in POST; this only performs the service call, maps the
+ * error envelope onto lib/errors.ts codes (plan §2.4), and — on success —
+ * caches the (untrusted) SQL and surfaces the additive `usage` block.
+ *
+ * Error mapping (§2.4):
+ *   scope / generation  → 422 SCOPE           (semantic decline / repair budget)
+ *   guard / engine / internal / auth / unavailable / timeout → 502 (safeError)
+ * NO raw service/upstream detail ever reaches the client (H20).
+ */
+async function generateViaPythonService(args: PythonPathArgs): Promise<NextResponse> {
+  const { req, session, userMessage, sourceScope, dialectOverride, targetDialect, cacheKey } = args
+
+  // Correlation id: forwarded to the service so one NL→SQL request traces
+  // Next → FastAPI (§7.7). Reuse an inbound id if the caller set one.
+  const correlationId = req.headers.get('x-correlation-id') ?? randomUUID()
+
+  try {
+    const result = await generateSqlViaService(
+      {
+        question: userMessage,
+        tenantId: session.orgId,
+        context: { userId: session.userId, activeOrgId: session.orgId, role: session.role },
+        dialect: dialectOverride,
+        sourceScope,
+        // options omitted → the service applies its own documented defaults.
+      },
+      { correlationId, fetchImpl: serviceFetchForTest ?? undefined }
+    )
+
+    // Out-of-clinical-scope — the model declined (in-band, 200 body error:'scope').
+    if (result.error === 'scope') {
+      return errorResponse(422, ErrorCodes.SCOPE, 'I can only generate clinical and healthcare SQL.')
+    }
+
+    // Cache the (untrusted) SQL for this org; re-guarded at /api/query on execute.
+    sqlCache.set(cacheKey, { sql: result.sql, description: result.description }, 30 * 60 * 1000)
+
+    // Ensure the response dialect reflects the request's resolved target even
+    // if the service echoed a different default (override wins), and surface
+    // the additive usage block for per-query cost visibility.
+    const response = mapServiceResultToResponse(result)
+    if (dialectOverride) response.dialect = dialectOverride
+    else response.dialect = result.dialect ?? targetDialect
+    return NextResponse.json(response satisfies SqlGenerateResponse)
+  } catch (e) {
+    if (e instanceof Nl2sqlServiceError) {
+      // scope / generation are semantic 422s (same as the TS GenerationError path).
+      if (e.kind === 'scope' || e.kind === 'generation') {
+        return errorResponse(
+          422,
+          ErrorCodes.SCOPE,
+          'Could not generate a safe, bounded SQL query for that request. Try rephrasing or narrowing it.'
+        )
+      }
+      // guard/engine/internal/auth/unavailable → generic 502; raw detail logged
+      // server-side only (H20), never returned to the client.
+      return safeError(e, { context: 'sql-generate:python', status: 502 })
+    }
+    return safeError(e, { context: 'sql-generate:python', status: 502 })
   }
 }
