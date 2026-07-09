@@ -60,6 +60,13 @@ function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[-\s]/g, '_')
 }
 
+// ── Additive named exports (NL2SQL P0 PHI bridge) ─────────────────────────────
+// Re-export the authoritative PHI column set and its key-normalization helper so
+// the prep toolchain / config bridge can reuse the SAME set (§2.5). These are the
+// existing module-private `PHI_COLUMNS` and `normalizeKey` — same references, no
+// behavioral change. Do NOT fork or redefine the set elsewhere; import from here.
+export { PHI_COLUMNS, normalizeKey }
+
 function isPhiColumn(key: string): boolean {
   return PHI_COLUMNS.has(normalizeKey(key))
 }

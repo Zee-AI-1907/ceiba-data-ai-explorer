@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "phi:sync": "node --experimental-strip-types scripts/gen-phi-columns.mjs",
     "qa": "node scripts/qa-agent.mjs",
     "qa:watch": "node scripts/qa-watch.mjs",
     "qa:fix": "node scripts/qa-fix.mjs"

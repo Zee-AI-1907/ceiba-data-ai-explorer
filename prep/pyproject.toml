@@ -1,0 +1,33 @@
+[project]
+name = "ceiba-nl2sql-prep"
+version = "0.0.0"
+description = "Ceiba NL->SQL DB-agnostic prep toolchain (build-time; emits language-neutral artifact bundle). NOT imported by the TS runtime."
+requires-python = ">=3.10"
+dependencies = [
+    "sqlalchemy>=2",
+    "duckdb",
+    "psycopg[binary]",
+    "pyyaml",
+    "fastembed",
+]
+
+[project.optional-dependencies]
+# Test deps kept separate so CI can install them explicitly.
+test = [
+    "pytest",
+]
+
+[project.scripts]
+# Populated in P3a when cli.py grows real entry points (build | verify | diff | introspect).
+ceiba-nl2sql-prep = "prep.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["prep*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

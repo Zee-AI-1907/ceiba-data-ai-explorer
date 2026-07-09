@@ -1,0 +1,75 @@
+name: nl2sql-ci
+
+# NL→SQL system CI (docs/NL2SQL_PLAN.md, docs/NL2SQL_SPEC.md §2.5, "CI integration").
+# Three blocking jobs: ts-tests (Vitest), py-tests (pytest + PHI gate), eval (synthetic).
+# P0 wires the skeleton: install deps + run the trivial tests. Later phases fill the TODOs.
+# No job requires the SSH tunnel; staging is opt-in only (existing secret-scan.yml stays).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ts-tests:
+    name: ts-tests (Vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install deps
+        run: npm ci
+      - name: Verify PHI bridge is in sync
+        # Regenerating must be a no-op; a diff means someone edited PHI_COLUMNS
+        # without running `npm run phi:sync` (SPEC §2.5 drift guard).
+        run: |
+          npm run phi:sync
+          git diff --exit-code config/phi_columns.json
+      - name: Run tests
+        run: npm test
+      # TODO(P2/M1): ensure lib/engine + lib/rag unit tests (incl. M1 thin slice) run here.
+      # TODO(P5): route-level tests for app/api/sql-generate once the Retriever is wired.
+
+  py-tests:
+    name: py-tests (pytest + PHI gate)
+    runs-on: ubuntu-latest
+    # TODO(P3a): add a Postgres service container seeded with the P1 init SQL so the
+    # introspection/profile/phi-gate build tests can run against a real (synthetic) source.
+    #   services:
+    #     postgres:
+    #       image: postgres:16
+    #       env: { POSTGRES_PASSWORD: postgres }
+    #       ports: ['5432:5432']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install prep toolchain + test deps
+        working-directory: prep
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Run pytest
+        working-directory: prep
+        run: pytest -q
+      # TODO(P3a/P3b): run the PHI gate build (`prep verify`) against the emitted bundle
+      # and assert phiGate.passed=true + phiColumnsetHash matches config/phi_columns.json.
+
+  eval:
+    name: eval (synthetic golden subset)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No-op (eval harness lands in P6)
+        run: echo "eval harness is a no-op stub until P6 (synthetic golden + adversarial, stub LLM)."
+      # TODO(P6): setup-node + npm ci, then run the synthetic-mode golden subset and the
+      # adversarial (prompt-injection) set with the recorded/stub driving LLM (0a decision #3).
+      # Retriever must be exercised against the full introspected schema even under synthetic
+      # execution. Staging mode stays gated off.
