@@ -255,3 +255,16 @@ def test_rejects_with_body_write_verb_in_string_literal(dialect):
     result = guard_sql("WITH x AS (SELECT 'DELETE' AS a) SELECT * FROM x", dialect=dialect)
     assert result.allowed is False
     assert result.statement_type == "WITH"
+
+
+def test_malformed_sql_unterminated_quote_fails_closed_no_crash():
+    """A truncated LLM completion with an unterminated quote raises sqlglot
+    TokenError during tokenization (before ParseError). The guard MUST catch it
+    and reject (fail closed), never propagate the exception and crash the request.
+    """
+    from ceiba_nl2sql.sqltools.guard import guard_sql
+
+    bad = 'SELECT * FROM x WHERE "a" >= 1 AND vm."Id < 90 LIMIT 100'  # unterminated "
+    result = guard_sql(bad, dialect="duckdb")
+    assert result.allowed is False
+    assert "parse" in (result.reason or "").lower()

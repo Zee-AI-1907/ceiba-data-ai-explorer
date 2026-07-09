@@ -52,7 +52,7 @@ from dataclasses import dataclass
 
 import sqlglot
 from sqlglot import expressions as exp
-from sqlglot.errors import ParseError
+from sqlglot.errors import ParseError, TokenError
 
 from ceiba_nl2sql.sqltools.dialect import normalize_dialect
 
@@ -439,8 +439,14 @@ def guard_sql(
 
     try:
         statements = sqlglot.parse(sql, read=resolved_dialect)
-    except ParseError as exc:
+    except (ParseError, TokenError) as exc:
+        # TokenError is raised during TOKENIZATION (e.g. an unterminated quote
+        # from a truncated LLM completion), before ParseError can fire. Both
+        # must fail CLOSED — a guard that raises on malformed model output would
+        # crash the request instead of rejecting the SQL and triggering repair.
         return GuardResult(allowed=False, reason=f"SQL failed to parse: {exc}")
+    except Exception as exc:  # noqa: BLE001 - defensive: any sqlglot internal error must fail closed, never crash the guard
+        return GuardResult(allowed=False, reason=f"SQL could not be validated: {type(exc).__name__}")
 
     # sqlglot returns `None` entries for empty statements (e.g. a trailing
     # `;` or a stray `;;`) and can also emit a bare `Semicolon` separator node

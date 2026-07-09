@@ -70,7 +70,7 @@ from typing import Literal
 
 import sqlglot
 from sqlglot import expressions as exp
-from sqlglot.errors import ParseError
+from sqlglot.errors import ParseError, TokenError
 
 from ceiba_nl2sql.sqltools.dialect import normalize_dialect
 
@@ -451,7 +451,7 @@ def cardinality_guard(
     resolved_dialect = normalize_dialect(dialect)
     try:
         root = sqlglot.parse_one(sql, read=resolved_dialect)
-    except ParseError as exc:
+    except (ParseError, TokenError) as exc:
         # Fail closed: an unparseable statement cannot be verified bounded,
         # so treat it as a reject rather than silently passing it through —
         # guard_sql runs first in the pipeline and would already have
