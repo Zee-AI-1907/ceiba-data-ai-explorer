@@ -193,3 +193,58 @@ def test_external_access_cannot_be_re_enabled_after_harden(seed_db_path: str):
         assert "locked" in str(excinfo.value).lower() or "cannot change" in str(excinfo.value).lower()
     finally:
         engine.dispose()
+
+
+# ── single-source native routing (docs/research/DUCKDB_PUSHDOWN.md §5.1) ──────
+
+
+def test_duckdb_catalog_query_is_not_passthrough_routed(seed_db_path: str):
+    """A query over a DuckDB-attached catalog is NOT rewritten to a
+    postgres_query() passthrough — the passthrough only applies to Postgres
+    remotes. The federated (native DuckDB) path stays in effect and the query
+    still returns correct rows.
+    """
+    engine = DuckDbEngine()
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        # decision: no passthrough for a duckdb catalog
+        assert engine._passthrough_sql('SELECT count(*) FROM mock.public."T"') is None
+        # and it still executes correctly via the normal path
+        res = engine.execute('SELECT count(*) AS n FROM mock.public."T"', ExecuteOptions(max_rows=10, deadline_ms=5000))
+        assert res.rows == [{"n": 3}]
+    finally:
+        engine.dispose()
+
+
+def test_passthrough_decision_gated_on_postgres_alias(seed_db_path: str):
+    """`_passthrough_sql` routes a single-catalog query ONLY when that catalog
+    was attached as a Postgres remote. We simulate the postgres-alias membership
+    (a real Postgres attach needs a live server) and assert the decision + the
+    generated postgres_query() wrapper shape.
+    """
+    engine = DuckDbEngine()
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        sql = 'SELECT count(*) FROM pg."Shared"."Monitors"'
+        # not a known postgres alias yet -> no routing
+        assert engine._passthrough_sql(sql) is None
+        # mark `pg` as a postgres remote (as a real postgres attach would)
+        engine._postgres_aliases.add("pg")
+        wrapped = engine._passthrough_sql(sql)
+        assert wrapped is not None
+        assert wrapped.startswith("SELECT * FROM postgres_query('pg', '")
+        assert "pg." not in wrapped.split("postgres_query('pg', '", 1)[1]  # catalog stripped in remote sql
+    finally:
+        engine.dispose()
+
+
+def test_native_single_source_flag_disables_routing(seed_db_path: str):
+    """Constructing with native_single_source=False forces the federated path
+    even for a single Postgres catalog (used to A/B the paths)."""
+    engine = DuckDbEngine(native_single_source=False)
+    try:
+        engine.attach([AttachSpec(source_id="mock", engine="duckdb", dsn=seed_db_path, read_only=True, alias="mock")])
+        engine._postgres_aliases.add("pg")
+        assert engine._passthrough_sql('SELECT count(*) FROM pg."Shared"."Monitors"') is None
+    finally:
+        engine.dispose()

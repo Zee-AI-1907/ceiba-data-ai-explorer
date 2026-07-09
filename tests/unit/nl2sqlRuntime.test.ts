@@ -20,27 +20,29 @@ describe('nl2sqlRuntime — flag resolution', () => {
     __resetDivergenceWarningForTest()
   })
 
-  it('defaults everything to ts when nothing is set', () => {
-    expect(umbrellaRuntime()).toBe('ts')
-    expect(generateRuntime()).toBe('ts')
-    expect(queryRuntime()).toBe('ts')
-  })
-
-  it('the umbrella NL2SQL_RUNTIME is inherited by both endpoints', () => {
-    vi.stubEnv('NL2SQL_RUNTIME', 'python')
+  it('defaults everything to python when nothing is set (2026-07 cutover)', () => {
+    // Python is the authoritative runtime — it carries the single-source native
+    // routing (docs/research/DUCKDB_PUSHDOWN.md §5.1) the TS engine cannot.
+    expect(umbrellaRuntime()).toBe('python')
     expect(generateRuntime()).toBe('python')
     expect(queryRuntime()).toBe('python')
   })
 
-  it('a per-endpoint flag overrides the umbrella', () => {
-    vi.stubEnv('NL2SQL_RUNTIME', 'python')
-    vi.stubEnv('NL2SQL_QUERY_RUNTIME', 'ts')
-    expect(generateRuntime()).toBe('python')
+  it('the umbrella NL2SQL_RUNTIME=ts rolls both endpoints back to TS', () => {
+    vi.stubEnv('NL2SQL_RUNTIME', 'ts')
+    expect(generateRuntime()).toBe('ts')
     expect(queryRuntime()).toBe('ts')
   })
 
+  it('a per-endpoint flag overrides the umbrella', () => {
+    vi.stubEnv('NL2SQL_RUNTIME', 'ts')
+    vi.stubEnv('NL2SQL_QUERY_RUNTIME', 'python')
+    expect(generateRuntime()).toBe('ts')
+    expect(queryRuntime()).toBe('python')
+  })
+
   it('warns exactly once when the two effective runtimes diverge', () => {
-    vi.stubEnv('NL2SQL_GENERATE_RUNTIME', 'python') // query stays ts
+    vi.stubEnv('NL2SQL_GENERATE_RUNTIME', 'ts') // query stays python (default)
     const logger = { warn: vi.fn() }
     expect(warnIfRuntimesDiverge(logger)).toBe(true)
     expect(warnIfRuntimesDiverge(logger)).toBe(true)
@@ -49,7 +51,7 @@ describe('nl2sqlRuntime — flag resolution', () => {
   })
 
   it('does NOT warn when the runtimes agree', () => {
-    vi.stubEnv('NL2SQL_RUNTIME', 'python')
+    vi.stubEnv('NL2SQL_RUNTIME', 'ts')
     const logger = { warn: vi.fn() }
     expect(warnIfRuntimesDiverge(logger)).toBe(false)
     expect(logger.warn).not.toHaveBeenCalled()

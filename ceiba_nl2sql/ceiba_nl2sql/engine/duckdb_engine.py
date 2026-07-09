@@ -38,6 +38,7 @@ from ceiba_nl2sql.engine.base import (
     SqlDialect,
     TableMeta,
 )
+from ceiba_nl2sql.sqltools.routing import analyze_single_source
 
 # Catalogs that are part of the DuckDB runtime itself, never a real attached source.
 _INTERNAL_CATALOGS = frozenset({"system", "temp"})
@@ -71,9 +72,18 @@ class DuckDbEngine:
     `DuckDbEngine` line-for-line.
     """
 
-    def __init__(self, *, local_path: str = ":memory:") -> None:
+    def __init__(self, *, local_path: str = ":memory:", native_single_source: bool = True) -> None:
         self._local_path = local_path
         self._attached_aliases: set[str] = set()
+        # Aliases attached as `TYPE postgres` — the only remotes that support the
+        # `postgres_query()` native passthrough used for single-source routing.
+        self._postgres_aliases: set[str] = set()
+        # When True (default), a query whose tables all live on ONE attached
+        # Postgres catalog is executed natively via postgres_query() rather than
+        # through DuckDB's federated scan path (docs/research/DUCKDB_PUSHDOWN.md
+        # §5.1 — fixes the multi-hop federation timeout). Set False to force the
+        # federated path (e.g. to A/B the two paths, or in a pure-DuckDB test).
+        self._native_single_source = native_single_source
         self._conn: duckdb.DuckDBPyConnection = duckdb.connect(local_path)
         # Extensions MUST be INSTALL/LOAD'd here, while external access is still
         # enabled — once `enable_external_access=false` is set (see _harden),
@@ -125,6 +135,8 @@ class DuckDbEngine:
                 )
 
             self._attached_aliases.add(spec.alias)
+            if spec.engine == "postgres":
+                self._postgres_aliases.add(spec.alias)
 
     def dispose(self) -> None:
         self._conn.close()
@@ -158,6 +170,33 @@ class DuckDbEngine:
         self._conn.execute("SET lock_configuration=true")
         self._hardened = True
 
+    # ── single-source native routing (docs/research/DUCKDB_PUSHDOWN.md §5.1) ──
+
+    def _passthrough_sql(self, sql: str) -> str | None:
+        """If `sql` references exactly ONE attached Postgres catalog, return an
+        equivalent DuckDB statement that ships the query VERBATIM to that remote
+        via `postgres_query(alias, '<remote sql>')` — so Postgres plans and runs
+        it natively (join reorder, index nested loops, aggregate pushdown) and
+        only the result crosses the wire. Returns None when the query is not
+        single-source, targets a non-Postgres catalog, or cannot be analyzed —
+        in which case the caller uses the normal (federated) path.
+
+        The routing signal comes from the SQL itself: the runtime qualifies every
+        table as `alias.schema.table`, and the alias IS the source, so a single
+        distinct catalog == single source. See sqltools/routing.py.
+        """
+        if not self._native_single_source:
+            return None
+        analysis = analyze_single_source(sql, dialect="duckdb")
+        if analysis is None:
+            return None
+        if analysis.alias not in self._postgres_aliases:
+            return None
+        # postgres_query(name, 'sql') takes the remote SQL as a single-quoted
+        # string literal — escape embedded single quotes by doubling them.
+        remote_literal = _quote_literal(analysis.remote_sql)
+        return f"SELECT * FROM postgres_query({_quote_literal(analysis.alias)}, {remote_literal})"
+
     # ── runtime (read path) ───────────────────────────────────────────────────
 
     def execute(self, sql: str, opts: ExecuteOptions) -> EngineResult:
@@ -169,6 +208,11 @@ class DuckDbEngine:
         # The two are deliberately asymmetric and kept at TS parity.
         max_rows = opts.max_rows if opts.max_rows and opts.max_rows > 0 else 1000
         deadline_ms = opts.deadline_ms if opts.deadline_ms and opts.deadline_ms > 0 else 55_000
+
+        # Route single-source queries natively (postgres_query passthrough) to
+        # avoid DuckDB's no-join/no-aggregate-pushdown federation penalty. Falls
+        # back to `sql` unchanged for cross-source (or unanalyzable) queries.
+        sql_to_run = self._passthrough_sql(sql) or sql
 
         deadline_hit = threading.Event()
         timer = threading.Timer(deadline_ms / 1000.0, self._on_deadline, args=(deadline_hit,))
@@ -182,7 +226,7 @@ class DuckDbEngine:
                 # Ask for one more row than the cap so a single extra row
                 # proves more data existed beyond max_rows, mirroring the TS
                 # engine's `runAndReadUntil(sql, maxRows + 1)`.
-                cursor = self._conn.execute(sql)
+                cursor = self._conn.execute(sql_to_run)
                 desc = cursor.description or []
                 col_names = [d[0] for d in desc]
                 engine_columns = [EngineColumn(name=d[0], type=str(d[1])) for d in desc]
@@ -211,6 +255,15 @@ class DuckDbEngine:
             pass
 
     def explain(self, sql: str, *, catalog: str | None = None, schema: str | None = None) -> PlanOrError:
+        # DELIBERATELY NOT routed through the postgres_query() passthrough. The
+        # single-source native routing in execute() is a PERFORMANCE optimization;
+        # explain() is the self-repair loop's VALIDATOR — its job is to bind the
+        # SQL against the real attached catalogs and surface a bad table/column
+        # name as a Binder Error. DuckDB does NOT bind the inner string of a
+        # postgres_query() (it's opaque to the binder), so wrapping it here would
+        # make explain() blind to name errors. Binding the federated form is fast
+        # (~1s, planning only — no rows executed) and validates correctly, so
+        # explain() runs the SQL as-given regardless of native_single_source.
         try:
             with self._lock:
                 self._harden()

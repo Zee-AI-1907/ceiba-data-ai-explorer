@@ -40,8 +40,10 @@ import path from 'path'
  * ── PHASE 4: EXECUTION-RUNTIME CUTOVER FLAG (NL2SQL_QUERY_RUNTIME) ─────────────
  * docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 4, §2.2/§2.3. A single flag selects
  * WHERE the SQL executes:
- *   'ts'     (default) — the in-process getQueryEngine().execute path, unchanged.
- *   'python'           — POST the (already-guarded) SQL to the Python FastAPI
+ *   'python' (default, 2026-07 cutover) — POST the (already-guarded) SQL to the
+ *                        Python FastAPI service; the ONLY path with single-source
+ *                        native routing (docs/research/DUCKDB_PUSHDOWN.md §5.1).
+ *   'ts'     (rollback) — the in-process getQueryEngine().execute path, unchanged.
  *                        service POST /nl2sql/execute.
  * CRITICAL: on BOTH paths steps 1–6 run IDENTICALLY in TS — in particular the
  * guardSql RE-GUARD (step 5) is the execution security boundary (§1.3) and runs
@@ -129,8 +131,9 @@ function writeAnomalyLog(line: string): void {
 /**
  * The query/execution runtime flag is resolved by lib/nl2sqlRuntime.ts:
  *   effective = NL2SQL_QUERY_RUNTIME ?? NL2SQL_RUNTIME (umbrella) ?? 'ts'
- * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 4, §7.3). DEFAULT is 'ts', so
- * nothing changes unless an operator opts in; rollback is a single env flip.
+ * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 4, §7.3). DEFAULT is 'python'
+ * (2026-07 cutover — the Python engine is the only one with single-source native
+ * routing); rollback to the in-process TS engine is a single env flip to 'ts'.
  * ALL the TS hardening (auth → rate-limit → body-size → validate →
  * catalog/schema allowlist → guardSql RE-GUARD) runs IDENTICALLY on both paths;
  * only the execute step differs. The guardSql re-guard is the execution

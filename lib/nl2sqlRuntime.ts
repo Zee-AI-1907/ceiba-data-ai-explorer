@@ -26,9 +26,26 @@ function normalize(value: string | undefined, fallback: Nl2sqlRuntime): Nl2sqlRu
   return value === 'python' ? 'python' : value === 'ts' ? 'ts' : fallback
 }
 
-/** The umbrella default both endpoints inherit (NL2SQL_RUNTIME; default 'ts'). */
+/**
+ * The umbrella default both endpoints inherit (NL2SQL_RUNTIME).
+ *
+ * DEFAULT IS 'python' (cutover, 2026-07): the Python runtime is now
+ * authoritative. It is the only runtime that carries the single-source native
+ * execution routing (docs/research/DUCKDB_PUSHDOWN.md §5.1 — postgres_query()
+ * passthrough), which turns the multi-hop federation timeout (>35s) into a
+ * ~1s native query. The TS engine deliberately has no SQL parser
+ * (lib/sqlGuard.ts documents why), so it CANNOT do the catalog-detection +
+ * DuckDB→Postgres rewrite the routing needs; keeping the TS path as the default
+ * would ship a runtime that still times out on the canonical query.
+ *
+ * ROLLBACK is unchanged and still a single env flip: set NL2SQL_RUNTIME=ts (or
+ * the per-endpoint NL2SQL_GENERATE_RUNTIME / NL2SQL_QUERY_RUNTIME) to fall back
+ * to the in-process TS engine. DEPLOY REQUIREMENT: with the default, the Python
+ * FastAPI service (ceiba_nl2sql_service) MUST be running and reachable — an
+ * unreachable service now fails the request instead of silently using TS.
+ */
 export function umbrellaRuntime(): Nl2sqlRuntime {
-  return normalize(process.env.NL2SQL_RUNTIME, 'ts')
+  return normalize(process.env.NL2SQL_RUNTIME, 'python')
 }
 
 /** Effective generation runtime: NL2SQL_GENERATE_RUNTIME, else the umbrella. */

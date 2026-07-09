@@ -93,7 +93,8 @@ export function __setGenerationDepsForTest(deps: GenerationDeps | null): void {
 /**
  * The generation runtime flag is resolved by lib/nl2sqlRuntime.ts:
  *   effective = NL2SQL_GENERATE_RUNTIME ?? NL2SQL_RUNTIME (umbrella) ?? 'ts'
- * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 3, §7.3). DEFAULT is 'ts', so
+ * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 3, §7.3). DEFAULT is 'python'
+ * (2026-07 cutover); rollback is a single env flip to 'ts', so
  * nothing changes unless an operator opts in; rollback is a single env flip.
  * All the TS hardening (auth → rate-limit → body-size → validate → org-scoped
  * cache) runs IDENTICALLY on both paths; only the generation step differs.
