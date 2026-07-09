@@ -600,3 +600,38 @@ def test_harvest_fields_absent_renders_identically_to_pre_harvest():
     assert "time range:" not in prompt
     assert "values:" not in prompt
     assert "NULL" not in prompt.split("CARDINALITY")[0].split("columns:")[1].split("---")[0]
+
+
+# ── P5 soft-delete rendering ─────────────────────────────────────────────────
+
+
+def _soft_delete_table(kind: str, column: str) -> RenderedTable:
+    return RenderedTable(
+        table_id="mock.public.Records",
+        quoted_ref='"public"."Records"',
+        grain="one row per record",
+        columns=[
+            RenderedColumn(name="Id", quoted_name='"Id"', data_type="BIGINT", unit=None, is_time_column=False),
+        ],
+        approx_row_count=10,
+        is_large_time_series=False,
+        soft_delete={"column": column, "kind": kind},
+    )
+
+
+def test_soft_delete_deleted_timestamp_rendered():
+    prompt = assemble_prompt([_soft_delete_table("deleted-timestamp", "DeletedAt")], [], "records", CAPS, "duckdb")
+    assert 'soft delete: rows with "DeletedAt" IS NOT NULL are logically DELETED' in prompt
+    assert '"DeletedAt" IS NULL unless deleted rows are explicitly requested' in prompt
+
+
+def test_soft_delete_flag_and_active_flag_rendered():
+    flag_prompt = assemble_prompt([_soft_delete_table("deleted-flag", "IsDeleted")], [], "records", CAPS, "duckdb")
+    assert '"IsDeleted" IS NOT TRUE' in flag_prompt
+    active_prompt = assemble_prompt([_soft_delete_table("active-flag", "IsActive")], [], "records", CAPS, "duckdb")
+    assert '"IsActive" = true unless inactive rows are explicitly requested' in active_prompt
+
+
+def test_no_soft_delete_renders_nothing():
+    prompt = assemble_prompt([_measurements_table()], [], "heart rate", CAPS, "duckdb")
+    assert "soft delete:" not in prompt

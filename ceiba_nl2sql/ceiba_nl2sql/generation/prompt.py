@@ -129,9 +129,43 @@ def _render_table(table: RenderedTable) -> str:
     time_range_line = _render_time_range(table.time_range)
     if time_range_line:
         lines.append(time_range_line)
+    soft_delete_line = _render_soft_delete(table.soft_delete)
+    if soft_delete_line:
+        lines.append(soft_delete_line)
     lines.append("  columns:")
     lines.extend(_render_column(c) for c in table.columns)
     return "\n".join(lines)
+
+
+def _render_soft_delete(soft_delete: dict | None) -> str | None:
+    """P5: one line stating the table's logical-deletion convention and the
+    exact filter to apply — silently including dead rows is a silent-wrong
+    answer class.
+    """
+    if not soft_delete:
+        return None
+    column = soft_delete.get("column")
+    kind = soft_delete.get("kind")
+    if not column or not kind:
+        return None
+    if kind == "deleted-timestamp":
+        rule = (
+            f'rows with "{column}" IS NOT NULL are logically DELETED — '
+            f'add "{column}" IS NULL unless deleted rows are explicitly requested'
+        )
+    elif kind == "deleted-flag":
+        rule = (
+            f'rows with "{column}" = true are logically DELETED — '
+            f'add "{column}" IS NOT TRUE unless deleted rows are explicitly requested'
+        )
+    elif kind == "active-flag":
+        rule = (
+            f'rows with "{column}" = false are INACTIVE (logically deleted) — '
+            f'add "{column}" = true unless inactive rows are explicitly requested'
+        )
+    else:
+        return None
+    return f"  soft delete: {rule}"
 
 
 def _render_time_range(time_range: dict | None) -> str | None:

@@ -145,6 +145,9 @@ class RenderedTable:
     # data horizon of the table's best time column (catalog.json `timeRange`).
     description: str | None = None
     time_range: dict | None = None
+    # P5: detected soft-delete convention ({"column", "kind"}) — the prompt
+    # tells the model to exclude logically deleted rows.
+    soft_delete: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -327,6 +330,8 @@ def _render_table_for_estimate(table: RenderedTable) -> str:
         lines.append(table.description)
     if table.time_range:
         lines.append(str(table.time_range))
+    if table.soft_delete:
+        lines.append(str(table.soft_delete) * 2)  # rendered rule text is ~2x the dict repr
     for c in table.columns:
         unit_part = f" unit={c.unit}" if c.unit else ""
         values_part = f" values={'|'.join(c.allowed_values)}" if c.allowed_values else ""
@@ -849,6 +854,7 @@ class HybridRetriever:
             time_via=time_via,
             description=table.get("description"),
             time_range=table.get("timeRange"),
+            soft_delete=table.get("softDelete"),
         )
 
     def _fk_from_columns_by_table(self, table_id: str) -> list[list[str]]:

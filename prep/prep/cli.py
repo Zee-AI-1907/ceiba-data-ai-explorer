@@ -675,6 +675,12 @@ def _run_build_pipeline_p3b(
     # written, so both the cardinality guard and the prompt's JOIN GRAPH
     # renderer see the hint.
     catalog = apply_time_via_hints(catalog, foreign_keys=keys["foreignKeys"])
+    # P5: stamp softDelete hints (deleted-flag / deleted-timestamp /
+    # active-flag conventions) so the prompt can tell the model to exclude
+    # logically deleted rows — silently including them is a silent-wrong class.
+    from prep.enrich.soft_delete import apply_soft_delete_hints
+
+    catalog = apply_soft_delete_hints(catalog)
     joingraph = build_join_graph(
         tables=catalog["tables"],
         primary_keys=keys["primaryKeys"],
