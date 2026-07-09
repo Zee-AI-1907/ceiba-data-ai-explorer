@@ -31,6 +31,7 @@ import fnmatch
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +51,22 @@ from prep.introspect.sqlalchemy_introspector import SqlAlchemyIntrospector
 from prep.phi_gate import run_gate, run_gate_from_bundle_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def duckdb_attach_dsn(dsn: str) -> str:
+    """Normalize a SQLAlchemy DSN to a form DuckDB's postgres extension accepts.
+
+    Prep introspection uses SQLAlchemy, so `STAGING_DSN` may carry a driver
+    suffix (`postgresql+psycopg://…`) — mandatory when only psycopg3 is
+    installed. DuckDB's postgres scanner, however, only recognizes bare
+    `postgresql://`/`postgres://` URLs (or libpq keyword strings); the
+    `+driver` suffix defeats its URL detection and it falls back to keyword
+    parsing, failing with `missing "=" …`. Strip the suffix from the scheme so
+    the SAME env var works for both the SQLAlchemy introspector and the P4
+    exemplar-factory DuckDB attach. Non-URL / suffix-free DSNs pass through
+    unchanged.
+    """
+    return re.sub(r"^(postgresql|postgres)\+[A-Za-z0-9_]+://", r"\1://", dsn, count=1)
 
 
 # ── shared introspection/profiling orchestration ────────────────────────────
@@ -424,8 +441,9 @@ def classify_source(model: dict, phi_columns: frozenset[str], phi_columnset_hash
                 estimate = _distinct_count_estimate(
                     stats.n_distinct if stats else None, approx_rows
                 )
+                null_frac = stats.null_frac if stats else None
                 triples.append(
-                    (_column_id(table_id, col.name), col.name, col.data_type, estimate)
+                    (_column_id(table_id, col.name), col.name, col.data_type, estimate, null_frac)
                 )
     return build_phi_json(triples, phi_columns, phi_columnset_hash)
 
@@ -810,7 +828,7 @@ def _run_build_pipeline_p3b(
                 _AttachSpec(
                     source_id=s.source_id,
                     engine="postgres",
-                    dsn=s.resolve_dsn(),
+                    dsn=duckdb_attach_dsn(s.resolve_dsn()),
                     read_only=True,
                     alias=s.source_id,
                 )

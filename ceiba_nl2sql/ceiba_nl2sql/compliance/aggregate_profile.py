@@ -110,6 +110,11 @@ class ProfileColumn:
     label: str
     type: str = "text"
     distinct_count_estimate: int | None = None
+    # WHOLE-TABLE null fraction (pg_stats null_frac), threaded into
+    # `classify_column` so the low-cardinality rescue is refused for a
+    # mostly-null column whose low distinct is a sparsity artifact rather than a
+    # closed vocabulary. None = no evidence.
+    null_frac: float | None = None
 
 
 def _is_finite_number(value: object) -> bool:
@@ -159,7 +164,11 @@ def sample_aggregate_from_rows(
     column_aggregates: list[ColumnAggregate] = []
     for col in columns:
         phi_class, _matched_rule = classify_column(
-            col.key, phi_columns, col.type, distinct_count_estimate=col.distinct_count_estimate
+            col.key,
+            phi_columns,
+            col.type,
+            distinct_count_estimate=col.distinct_count_estimate,
+            null_frac=col.null_frac,
         )
         phi = phi_class != "non-phi"
 

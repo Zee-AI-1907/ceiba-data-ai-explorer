@@ -74,6 +74,29 @@ violation anywhere, and a new catalog check rejects `allowedValues` on any
 non-`non-phi` column. Spec §2.3 updated. Pre-harvest bundles render
 byte-identically (asserted).
 
+> **2026-07 staging validation + P2 safety fix (`phi.py`).** Running the P2
+> rescue against the REAL staging schema (not the mock fixtures) surfaced a
+> confirmed leak: the "low whole-table distinct ⇒ coded vocabulary" assumption
+> also matched sparse identifiers — 678 of 1269 text columns rescued, including
+> `BreastMilkForms.MotherName`+`MotherIdNumber` (dense, 18 distinct → would
+> emit 8 real names paired with 8 national IDs into `topCategories`), plus
+> `FatherName`, `BirthPlace`, `RelativeTcNo`, `PassportNumber`,
+> `FamilyDoctorPhoneNumber`, provider names. Root cause: low distinct is often a
+> NULL-sparsity artifact, and the authoritative set / free-text hints miss
+> person-role & identifier tokens. Fix (layered, keeps every genuine
+> vocabulary): (a) a person/identifier NAME denylist (`_PHI_NAME_HINTS`)
+> suppresses before the rescue at any cardinality; (b) a `*Text` suffix →
+> free-text; (c) a `null_frac > 0.5` guard (`RESCUE_MAX_NULL_FRACTION`) refuses
+> the rescue for mostly-null columns (`null_frac` threaded from pg_stats through
+> `ProfileColumn`/`classify_columns`, so phi.json and profiles.json stay
+> consistent). Measured on staging: rescues 678 → 450, **all 19 confirmed-PHI
+> columns now suppressed, 0 genuine vocabulary lost** (`DeviceName`×33,
+> `RoleName`, `DrugName`, `SystemicDiseaseName`, `InsulineName` retained).
+> Regression tests are staging-shaped (the mock fixtures have none of these
+> columns, which is why the original slipped through green). Durable follow-up:
+> require positive coded-vocabulary evidence (FK/ENUM/CHECK) rather than mere
+> low distinct; exclude transient `*Temp<hash>` copy tables from introspection.
+
 ### P2 — Evidence-based categorical rescue from the PHI text heuristic (`509d33c`)
 **Axis: accuracy.** On Postgres every string column is `text`, so the
 type-based free-text heuristic suppressed the entire coded vocabulary of the
@@ -106,6 +129,14 @@ against the build's own read-only-attached topology ("validated" =
 proven-to-bind, never asserted). Every benchmark failure fixed into the
 golden set becomes a retrievable few-shot example on the next build —
 exemplar embedding + BM25 top-3 recall already existed.
+
+> **2026-07 staging fix (`cli.py` `duckdb_attach_dsn`).** The exemplar factory
+> attaches the source DSN to DuckDB for EXPLAIN validation, but prep
+> introspection uses a SQLAlchemy DSN (`postgresql+psycopg://…`, mandatory in a
+> psycopg3-only venv) that DuckDB's postgres scanner cannot parse — so P4
+> silently skipped (`goldenExemplars: 0`) against any real Postgres. Now the
+> `+driver` suffix is stripped before the DuckDB attach so the SAME `STAGING_DSN`
+> serves both consumers; golden exemplars actually validate against staging.
 
 ### P5 — Soft-delete detection + prompt exclusion rule (`aebb08f`)
 **Axis: accuracy (silent-wrong class).** Detects the three common

@@ -505,9 +505,17 @@ class SqlAlchemyIntrospector:
                 return None
             return int(round(-stat.n_distinct * approx_rows))
 
+        def _null_frac(name: str) -> float | None:
+            stat = stats.get(name)
+            return stat.null_frac if stat is not None else None
+
         return [
             ProfileColumn(
-                key=c.name, label=c.name, type=c.data_type, distinct_count_estimate=_estimate(c.name)
+                key=c.name,
+                label=c.name,
+                type=c.data_type,
+                distinct_count_estimate=_estimate(c.name),
+                null_frac=_null_frac(c.name),
             )
             for c in columns
         ]

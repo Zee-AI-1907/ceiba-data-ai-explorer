@@ -185,17 +185,20 @@ def test_rescue_never_applies_to_authoritative_phi_columns(phi_columns):
 
 
 def test_no_evidence_or_high_cardinality_stays_suppressed(phi_columns):
-    assert classify_column("SomethingText", phi_columns, "text")[0] == "free-text"
+    # `Gizmo` is a neutral placeholder that reaches the rescue branch (no PHI /
+    # free-text / phi-name / trailing-text signal), so these assertions exercise
+    # the DISTINCT-count threshold itself rather than an earlier short-circuit.
+    assert classify_column("Gizmo", phi_columns, "text")[0] == "free-text"
     assert (
-        classify_column("SomethingText", phi_columns, "text", distinct_count_estimate=None)[0]
+        classify_column("Gizmo", phi_columns, "text", distinct_count_estimate=None)[0]
         == "free-text"
     )
     assert (
-        classify_column("SomethingText", phi_columns, "text", distinct_count_estimate=51)[0]
+        classify_column("Gizmo", phi_columns, "text", distinct_count_estimate=51)[0]
         == "free-text"
     )
     assert (
-        classify_column("SomethingText", phi_columns, "text", distinct_count_estimate=0)[0]
+        classify_column("Gizmo", phi_columns, "text", distinct_count_estimate=0)[0]
         == "free-text"
     )
 
@@ -204,7 +207,7 @@ def test_rescue_boundary_at_max(phi_columns):
     from ceiba_nl2sql.compliance.phi import LOW_CARDINALITY_CODED_TEXT_MAX
 
     at_max = classify_column(
-        "SomethingText", phi_columns, "text", distinct_count_estimate=LOW_CARDINALITY_CODED_TEXT_MAX
+        "Gizmo", phi_columns, "text", distinct_count_estimate=LOW_CARDINALITY_CODED_TEXT_MAX
     )
     assert at_max[0] == "non-phi"
 
@@ -214,3 +217,77 @@ def test_classify_columns_accepts_four_tuples(phi_columns):
         [("src.public.T.TriageLevel", "TriageLevel", "text", 4)], phi_columns
     )
     assert results[0].phi_class == "non-phi"
+
+
+# ── P2 rescue safety (staging-shaped regressions) ────────────────────────────
+# These columns exist on the real staging schema but NOT in the mock fixtures,
+# which is why the original P2 rescue leaked them while the suite stayed green.
+# Each is a person/identifier stored as low-distinct text; the rescue used to
+# reclassify it non-phi (→ example values emitted into prompts). Both a DENSE
+# (null_frac=0.0, the value-emitting worst case) and a SPARSE (null_frac=0.99)
+# variant are asserted — the fix must suppress regardless of cardinality/null.
+
+_STAGING_PHI_NAMES = [
+    "MotherName",
+    "MotherIdNumber",
+    "FatherName",
+    "BirthPlace",
+    "PassportNumber",
+    "RelativeTcNo",
+    "ConsentPersonnelTcNo",
+    "InformingPhysicianTcNo",
+    "RelativePhone",
+    "FamilyDoctorName",
+    "FamilyDoctorPhoneNumber",
+    "RequesterName",
+    "RequestingDoctor",
+    "CheckingNurse",
+    "DoctorFullName",
+    "HeadPhysicianFullName",
+    "ContactNo",
+]
+
+
+@pytest.mark.parametrize("column", _STAGING_PHI_NAMES)
+@pytest.mark.parametrize("null_frac", [0.0, 0.99])
+def test_phi_names_never_rescued(phi_columns, column, null_frac):
+    phi_class, rule = classify_column(
+        column, phi_columns, "text", distinct_count_estimate=18, null_frac=null_frac
+    )
+    assert phi_class != "non-phi", f"{column} (null_frac={null_frac}) leaked as non-phi via {rule}"
+
+
+# The genuine coded vocabularies P2 exists to surface — the fix must KEEP these.
+_STAGING_GOOD_VOCAB = [
+    "DeviceName",
+    "RoleName",
+    "SystemicDiseaseName",
+    "InsulineName",
+    "DrugName",
+    "OralAntidiabeticName",
+]
+
+
+@pytest.mark.parametrize("column", _STAGING_GOOD_VOCAB)
+def test_good_vocabulary_still_rescued(phi_columns, column):
+    phi_class, rule = classify_column(
+        column, phi_columns, "text", distinct_count_estimate=18, null_frac=0.0
+    )
+    assert phi_class == "non-phi", f"{column} lost its rescue ({phi_class} via {rule})"
+    assert rule == f"heuristic:low-cardinality-coded-text:{normalize_key(column)}"
+
+
+def test_null_fraction_guard_blocks_sparse_rescue(phi_columns):
+    # A neutral coded name that WOULD rescue on cardinality alone is refused
+    # once it is mostly NULL — sparsity is not a closed vocabulary.
+    dense = classify_column("Widget", phi_columns, "text", distinct_count_estimate=5, null_frac=0.10)
+    sparse = classify_column("Widget", phi_columns, "text", distinct_count_estimate=5, null_frac=0.95)
+    assert dense[0] == "non-phi"
+    assert sparse[0] == "free-text"
+
+
+def test_specify_text_suffix_is_free_text(phi_columns):
+    # An "other, specify" *Text field is unbounded clinician entry, not coded.
+    for name in ("DirectCoombsText", "ChestTubeText", "AreaOtherText"):
+        phi_class, _ = classify_column(name, phi_columns, "text", distinct_count_estimate=3)
+        assert phi_class == "free-text", name

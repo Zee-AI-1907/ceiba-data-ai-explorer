@@ -60,6 +60,41 @@ def test_phi_column_is_suppressed_never_a_value():
     assert set(serialized.keys()) == {"key", "label", "type", "kind", "nonNullCount", "distinctCount"}
 
 
+def test_low_cardinality_identifier_is_suppressed_not_emitted():
+    """Regression for the P2 staging leak (classify→emit seam).
+
+    `MotherName`/`MotherIdNumber` on the real schema are dense (0% null) and
+    low-distinct — the OLD rescue reclassified them non-phi, so the reducer
+    emitted up to 8 real names + national IDs as `topCategories`. The whole
+    reason this went unnoticed is the mock fixtures have no such column. Feed
+    the reducer that exact shape (with the whole-table evidence that used to
+    trigger the rescue) and assert it is phi-suppressed with NO values emitted.
+    """
+    rows = [
+        {"MotherName": "Ayşe Yılmaz", "MotherIdNumber": "12345678901"},
+        {"MotherName": "Fatma Demir", "MotherIdNumber": "23456789012"},
+        {"MotherName": "Zeynep Kaya", "MotherIdNumber": "34567890123"},
+    ]
+    columns = [
+        # distinct_count_estimate + null_frac are exactly the whole-table
+        # evidence that used to flip these to non-phi via the rescue.
+        ProfileColumn(key="MotherName", label="MotherName", type="text",
+                      distinct_count_estimate=18, null_frac=0.0),
+        ProfileColumn(key="MotherIdNumber", label="MotherIdNumber", type="text",
+                      distinct_count_estimate=18, null_frac=0.0),
+    ]
+    profile = sample_aggregate_from_rows(rows, columns, PHI_COLUMNS)
+
+    for key in ("MotherName", "MotherIdNumber"):
+        col = _column_by_key(profile, key)
+        assert col.kind == "phi-suppressed", f"{key} was not suppressed"
+        assert col.top_categories is None, f"{key} emitted topCategories"
+    # No raw name or ID string may appear anywhere in the serialized profile.
+    blob = str(profile.to_json())
+    for leaked in ("Ayşe", "Yılmaz", "Fatma", "12345678901", "23456789012"):
+        assert leaked not in blob, f"leaked {leaked!r}"
+
+
 def test_numeric_column_emits_min_max_mean_only():
     rows = [{"HeartRate": v} for v in (60, 70, 80, 90, 100)]
     columns = [ProfileColumn(key="HeartRate", label="HeartRate", type="int4")]

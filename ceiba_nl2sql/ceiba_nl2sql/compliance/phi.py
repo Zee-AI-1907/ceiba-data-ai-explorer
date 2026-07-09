@@ -123,6 +123,61 @@ _FREE_TEXT_NAME_HINTS = (
     "medicationtext",
 )
 
+# Person-role / direct-&-quasi-identifier NAME tokens that must NEVER be
+# rescued as a coded vocabulary, at ANY cardinality. Each denotes a person
+# (father/mother/relative/doctor/nurse/…) or a direct identifier stored as
+# low-distinct text (a national ID, passport, phone, e-mail). On the real
+# staging schema these are exactly the columns the P2 low-cardinality rescue
+# was leaking: low distinct only because they are mostly NULL (sparsity), not
+# because the value space is closed. Matched as SUBSTRINGS of the normalized
+# key so compound names are covered (`MotherName`, `RequestingDoctor`,
+# `ConsentPersonnelTcNo`, `FamilyDoctorPhoneNumber`). Deliberately does NOT
+# include a bare "name" — `DeviceName`/`DiseaseName`/`RoleName` are genuine
+# coded vocabularies that must survive. Turkish spellings included: the staging
+# schema is bilingual (hekim=doctor, hemşire=nurse, doğumyeri=birthplace,
+# pasaport=passport, kimlik=identity, imza=signature).
+_PHI_NAME_HINTS = (
+    "father",
+    "mother",
+    "parent",
+    "relative",
+    "spouse",
+    "guardian",
+    "caregiver",
+    "requester",
+    "requesting",
+    "physician",
+    "doctor",
+    "hekim",
+    "nurse",
+    "hemsire",
+    "birthplace",
+    "birth_place",
+    "dogumyeri",
+    "passport",
+    "pasaport",
+    "tckn",
+    "tcno",
+    "tc_kimlik",
+    "tckimlik",
+    "kimlik",
+    "national_id",
+    "nationalid",
+    "contactno",
+    "contact_no",
+    "phone",
+    "telefon",
+    "gsm",
+    "fax",
+    "faks",
+    "email",
+    "eposta",
+    "consent",
+    "signature",
+    "imza",
+    "sicil",
+)
+
 # Unbounded string SQL types that MUST default to free-text suppression unless
 # the column name is explicitly known-safe (see `_KNOWN_SAFE_TEXT_NAME_HINTS`)
 # — a `text`/`varchar` column is exactly the shape a clinician's free-text
@@ -196,6 +251,12 @@ def _looks_like_free_text(normalized_key: str) -> bool:
     return any(hint in normalized_key for hint in _FREE_TEXT_NAME_HINTS)
 
 
+def _looks_like_phi_name(normalized_key: str) -> bool:
+    """True if the column name denotes a person or a direct identifier that must
+    never be treated as a coded vocabulary (see `_PHI_NAME_HINTS`)."""
+    return any(hint in normalized_key for hint in _PHI_NAME_HINTS)
+
+
 def _looks_like_known_safe_text(normalized_key: str) -> bool:
     return any(hint in normalized_key for hint in _KNOWN_SAFE_TEXT_NAME_HINTS)
 
@@ -215,6 +276,16 @@ def _is_unbounded_text_type(data_type: str | None) -> bool:
 # name-based free-text hints always win.
 LOW_CARDINALITY_CODED_TEXT_MAX = 50
 
+# A rescue's entire purpose is to EMIT example values; a mostly-null column has
+# almost none to emit AND its low distinct count is a sparsity artifact, not a
+# closed vocabulary. Above this whole-table null fraction the low-cardinality
+# rescue is refused — this is what stops the sparse-identifier leaks (e.g.
+# `IcuMonitoringRecords.RelativeTcNo` at 99.99% null, `Patients.FatherName` at
+# 98.5% null) even for names the denylist does not enumerate. `null_frac=None`
+# (no evidence) does not by itself block a rescue that otherwise has positive
+# distinct evidence — fail-closed still comes from the name/type checks above.
+RESCUE_MAX_NULL_FRACTION = 0.5
+
 
 def classify_column(
     column_name: str,
@@ -222,6 +293,7 @@ def classify_column(
     data_type: str | None = None,
     *,
     distinct_count_estimate: int | None = None,
+    null_frac: float | None = None,
 ) -> tuple[PhiClass, str | None]:
     """Classify a single column name (+ optional declared SQL type) into a
     SPEC §1.7 `phiClass`.
@@ -251,6 +323,18 @@ def classify_column(
     set and the name-based free-text hints always suppress regardless of
     cardinality (a `Gender` or `Notes` column stays suppressed at any
     distinct count).
+
+    Three additional guards keep the rescue from leaking identifiers whose low
+    distinct count is a SPARSITY artifact rather than a closed vocabulary
+    (validated against the real staging schema, which the mock fixtures do not
+    exercise): (1) a person/direct-identifier NAME denylist (`_PHI_NAME_HINTS`
+    — father/mother/doctor/tcno/passport/phone/…) suppresses before the rescue
+    at any cardinality; (2) a `*Text` suffix (`OtherText`, `DirectCoombsText`)
+    is treated as "other, specify" free text; (3) `null_frac` (whole-table,
+    pg_stats) above `RESCUE_MAX_NULL_FRACTION` refuses the rescue — a
+    mostly-null column has almost no values to emit and its low distinct is an
+    artifact of the NULLs. `null_frac=None` leaves the rescue to the
+    name/type/cardinality checks (still fail-closed).
     """
     normalized = normalize_key(column_name)
 
@@ -267,10 +351,25 @@ def classify_column(
     if _looks_like_free_text(normalized):
         return "free-text", f"heuristic:free-text:{normalized}"
 
+    # A person-role / direct-identifier name (father/mother/doctor/tcno/phone/…)
+    # can never be a coded vocabulary — suppress it BEFORE the low-cardinality
+    # rescue can fire, at any cardinality. Closes the confirmed staging leak
+    # (MotherName+MotherIdNumber, RelativeTcNo, FamilyDoctorPhoneNumber, …)
+    # that the flat authoritative set misses. See `_PHI_NAME_HINTS`.
+    if _looks_like_phi_name(normalized):
+        return "quasi-identifier", f"heuristic:phi-name:{normalized}"
+
+    # "Other, specify" free-text: a `*Text` column (OtherText, ChestTubeText,
+    # DirectCoombsText) is an unbounded clinician entry that happens to be
+    # sparsely used, not a coded set — treat as free-text regardless of type.
+    if normalized.endswith("text"):
+        return "free-text", f"heuristic:specify-text:{normalized}"
+
     if _is_unbounded_text_type(data_type) and not _looks_like_known_safe_text(normalized):
         if (
             distinct_count_estimate is not None
             and 0 < distinct_count_estimate <= LOW_CARDINALITY_CODED_TEXT_MAX
+            and (null_frac is None or null_frac <= RESCUE_MAX_NULL_FRACTION)
         ):
             return "non-phi", f"heuristic:low-cardinality-coded-text:{normalized}"
         return "free-text", f"heuristic:unbounded-text-type:{normalized}"
@@ -314,7 +413,7 @@ def classify_columns(
     phi_columns: frozenset[str],
 ) -> list[ColumnPhiClassification]:
     """Classify a batch of (columnId, columnName[, dataType[,
-    distinctCountEstimate]]) tuples.
+    distinctCountEstimate[, nullFrac]]]) tuples.
 
     `columnId` is the canonical bundle key (e.g.
     "staging.Shared.Patients.IdentificationNumber"); `columnName` is the bare
@@ -323,15 +422,22 @@ def classify_columns(
     key). An optional third element, `dataType`, sharpens the free-text
     heuristic for unbounded string columns; an optional fourth,
     `distinctCountEstimate` (whole-table, pg_stats), enables the P2
-    low-cardinality coded-text rescue (see `classify_column`).
+    low-cardinality coded-text rescue; an optional fifth, `nullFrac`
+    (whole-table, pg_stats), refuses that rescue for mostly-null columns
+    whose low distinct is a sparsity artifact (see `classify_column`).
     """
     results: list[ColumnPhiClassification] = []
     for entry in column_ids_and_names:
         column_id, column_name = entry[0], entry[1]
         data_type = entry[2] if len(entry) > 2 else None
         distinct_estimate = entry[3] if len(entry) > 3 else None
+        null_frac = entry[4] if len(entry) > 4 else None
         phi_class, matched_rule = classify_column(
-            column_name, phi_columns, data_type, distinct_count_estimate=distinct_estimate
+            column_name,
+            phi_columns,
+            data_type,
+            distinct_count_estimate=distinct_estimate,
+            null_frac=null_frac,
         )
         results.append(
             ColumnPhiClassification(
