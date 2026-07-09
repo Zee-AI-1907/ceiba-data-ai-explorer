@@ -10,6 +10,7 @@ prep/.venv/
 prep/*.egg-info/
 ceiba_nl2sql/*.egg-info/
 ceiba_nl2sql_service/*.egg-info/
+ceiba_nl2sql_eval/*.egg-info/
 .pytest_cache/
 
 # NL2SQL generated artifact bundles (build output — regenerable via prep toolchain)

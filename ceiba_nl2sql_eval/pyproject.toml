@@ -1,0 +1,30 @@
+[project]
+name = "ceiba-nl2sql-eval"
+version = "0.0.0"
+description = "Ceiba NL->SQL Python eval harness (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §4.1, Phase 5): ports eval/score.ts, eval/runEval.ts, eval/synthetic/loadSynthetic.ts, and eval/fixtures/recordedLlm.ts onto the ceiba_nl2sql runtime, adding per-query/aggregate cost reporting from the Phase 3 usage metering. Becomes the authoritative eval, replacing the TS eval in CI; the TS eval (eval/**) stays in place, unmodified, pending retirement in a later phase."
+requires-python = ">=3.10"
+dependencies = [
+    "ceiba-nl2sql",
+]
+
+[project.optional-dependencies]
+# Test deps kept separate so CI can install them explicitly.
+test = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.scripts]
+ceiba-nl2sql-eval = "ceiba_nl2sql_eval.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ceiba_nl2sql_eval*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

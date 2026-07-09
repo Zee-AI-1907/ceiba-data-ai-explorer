@@ -1,7 +1,9 @@
 name: nl2sql-ci
 
-# NL→SQL system CI (docs/NL2SQL_PLAN.md, docs/NL2SQL_SPEC.md §2.5, "CI integration").
-# Three blocking jobs: ts-tests (Vitest), py-tests (pytest + PHI gate), eval (synthetic).
+# NL→SQL system CI (docs/NL2SQL_PLAN.md, docs/NL2SQL_SPEC.md §2.5, "CI integration";
+# docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5/§6 for the Python migration).
+# Three blocking jobs: ts-tests (Vitest), py-tests (pytest + PHI gate), eval (Python, synthetic;
+# authoritative as of Phase 5 — see the eval job's own comment for the TS-eval retirement note).
 # P0 wires the skeleton: install deps + run the trivial tests. Later phases fill the TODOs.
 # No job requires the SSH tunnel; staging is opt-in only (existing secret-scan.yml stays).
 
@@ -75,27 +77,45 @@ jobs:
       # and assert phiGate.passed=true + phiColumnsetHash matches config/phi_columns.json.
 
   eval:
-    name: eval (synthetic golden subset)
+    name: eval (Python, synthetic golden subset — authoritative)
     runs-on: ubuntu-latest
-    # P6: runs eval/**/*.test.ts (eval/__tests__/eval.test.ts) in SYNTHETIC mode only — the
-    # hermetic DuckDB topology (eval/synthetic/loadSynthetic.ts) + the recorded/stub driving
-    # LLM (eval/fixtures/recordedLlm.ts, NL2SQL_PLAN.md §0a decision #3). No network, no
-    # mock/staging DB, no model download (SPEC §6.3(a)). STAGING_DSN is deliberately left
-    # UNSET in this job's environment so gated-staging mode (§6.3(b)) can never accidentally
-    # activate in CI — runEval()/runAdversarial() fall back to synthetic when it's absent.
-    # Retriever is exercised against the committed P4 fixture bundle's real catalog (a stand-
-    # in for the full ~1,200-table schema in this context), not a hand-authored stub.
+    # Phase 5 (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §4.1, §5, §9): the eval harness has been
+    # ported to Python (ceiba_nl2sql_eval/) and is now AUTHORITATIVE — this job runs the
+    # Python eval, not the TS one. Runs ceiba_nl2sql_eval's pytest suite (mirrors
+    # eval/__tests__/eval.test.ts's assertions) in SYNTHETIC mode only — the hermetic DuckDB
+    # topology (ceiba_nl2sql_eval/synthetic.py) + the recorded/stub driving LLM
+    # (ceiba_nl2sql_eval/recorded_llm.py). No network, no mock/staging DB, no model download.
+    # STAGING_DSN is deliberately left UNSET in this job's environment so gated-staging mode
+    # can never accidentally activate in CI — run_eval()/run_adversarial() fall back to
+    # synthetic when it's absent. Retriever is exercised against the committed P4 fixture
+    # bundle's real catalog (a stand-in for the full ~1,200-table schema in this context),
+    # not a hand-authored stub.
+    #
+    # The TS eval (eval/**, eval/__tests__/eval.test.ts) is PENDING RETIREMENT in a later
+    # phase (Phase 6, after a bake period) — it is NOT deleted yet and stays covered by
+    # `npm test` in the ts-tests job above; this job does not touch eval/**.
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: '22'
-          cache: 'npm'
-      - name: Install deps
-        run: npm ci
-      - name: Run eval (synthetic mode, stub/recorded LLM)
+          python-version: '3.11'
+      - name: Install shared ceiba_nl2sql library
+        working-directory: ceiba_nl2sql
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Install ceiba_nl2sql_eval + test deps
+        working-directory: ceiba_nl2sql_eval
+        run: pip install -e ".[test]"
+      - name: Run ceiba_nl2sql_eval pytest (golden set, adversarial set, cost aggregation)
+        working-directory: ceiba_nl2sql_eval
         # Explicitly unset STAGING_DSN (defense in depth beyond "just don't set it in the
         # workflow env") so a stray runner-level env var can never gate staging mode on.
         env:
           STAGING_DSN: ''
-        run: npx vitest run eval
+        run: pytest -q
+      - name: Run the eval CLI once and print the EvalReport (so eval numbers show up in CI logs)
+        working-directory: ceiba_nl2sql_eval
+        env:
+          STAGING_DSN: ''
+        run: python -m ceiba_nl2sql_eval.cli
