@@ -1,0 +1,306 @@
+{
+  "abbreviations": {
+    "adm": "admission",
+    "bp": "blood pressure",
+    "dc": "discharge",
+    "dx": "diagnosis",
+    "ed": "emergency department",
+    "hr": "heart rate",
+    "hx": "history",
+    "icd": "icd10 diagnosis code",
+    "icu": "intensive care unit",
+    "los": "length of stay",
+    "news": "national early warning score",
+    "nicu": "neonatal intensive care unit",
+    "o2": "oxygen saturation",
+    "picu": "pediatric intensive care unit",
+    "pt": "patient",
+    "pts": "patients",
+    "rr": "respiratory rate",
+    "saps": "simplified acute physiology score",
+    "sofa": "sequential organ failure assessment",
+    "spo2": "oxygen saturation",
+    "temp": "temperature",
+    "vem": "ventilator/emergency monitoring"
+  },
+  "codeSystems": [],
+  "synonyms": [
+    {
+      "aliases": [
+        "hr",
+        "pulse"
+      ],
+      "maps": [
+        {
+          "codeColumnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+          "codeRefColumnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+          "codeRefTableId": "mock.public.MeasurementTypeRef",
+          "codeValue": "Heart Rate",
+          "kind": "coded-measurement",
+          "timeColumnId": "mock.public.MeasurementsMock.RecordedAt",
+          "unit": "bpm",
+          "valueColumnId": "mock.public.MeasurementsMock.Value"
+        }
+      ],
+      "term": "heart rate"
+    },
+    {
+      "aliases": [
+        "obs",
+        "observations"
+      ],
+      "maps": [],
+      "term": "vitals"
+    },
+    {
+      "aliases": [
+        "o2",
+        "spo2",
+        "sats"
+      ],
+      "maps": [
+        {
+          "codeColumnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+          "codeRefColumnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+          "codeRefTableId": "mock.public.MeasurementTypeRef",
+          "codeValue": "SpO2",
+          "kind": "coded-measurement",
+          "timeColumnId": "mock.public.MeasurementsMock.RecordedAt",
+          "unit": "%",
+          "valueColumnId": "mock.public.MeasurementsMock.Value"
+        }
+      ],
+      "term": "oxygen saturation"
+    },
+    {
+      "aliases": [
+        "rr",
+        "resp rate"
+      ],
+      "maps": [
+        {
+          "codeColumnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+          "codeRefColumnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+          "codeRefTableId": "mock.public.MeasurementTypeRef",
+          "codeValue": "Respiratory Rate",
+          "kind": "coded-measurement",
+          "timeColumnId": "mock.public.MeasurementsMock.RecordedAt",
+          "unit": "breaths/min",
+          "valueColumnId": "mock.public.MeasurementsMock.Value"
+        }
+      ],
+      "term": "respiratory rate"
+    },
+    {
+      "aliases": [
+        "temp"
+      ],
+      "maps": [
+        {
+          "codeColumnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+          "codeRefColumnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+          "codeRefTableId": "mock.public.MeasurementTypeRef",
+          "codeValue": "Temperature",
+          "kind": "coded-measurement",
+          "timeColumnId": "mock.public.MeasurementsMock.RecordedAt",
+          "unit": "degC",
+          "valueColumnId": "mock.public.MeasurementsMock.Value"
+        }
+      ],
+      "term": "temperature"
+    },
+    {
+      "aliases": [
+        "bp"
+      ],
+      "maps": [
+        {
+          "codeColumnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+          "codeRefColumnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+          "codeRefTableId": "mock.public.MeasurementTypeRef",
+          "codeValue": "Mean Arterial Pressure",
+          "kind": "coded-measurement",
+          "timeColumnId": "mock.public.MeasurementsMock.RecordedAt",
+          "unit": "mmHg",
+          "valueColumnId": "mock.public.MeasurementsMock.Value"
+        }
+      ],
+      "term": "blood pressure"
+    },
+    {
+      "aliases": [
+        "admission",
+        "admit",
+        "arrived"
+      ],
+      "maps": [
+        {
+          "columnId": "mock.public.VisitMock.admittedAt",
+          "kind": "temporal-column"
+        }
+      ],
+      "term": "admitted"
+    },
+    {
+      "aliases": [
+        "discharge"
+      ],
+      "maps": [
+        {
+          "columnId": "mock.public.VisitMock.dischargedAt",
+          "kind": "temporal-column"
+        }
+      ],
+      "term": "discharged"
+    },
+    {
+      "aliases": [
+        "pt",
+        "pts",
+        "patients"
+      ],
+      "maps": [
+        {
+          "kind": "table",
+          "tableId": "mock.public.PatientMock"
+        }
+      ],
+      "term": "patient"
+    },
+    {
+      "aliases": [
+        "facility",
+        "site"
+      ],
+      "maps": [
+        {
+          "kind": "table",
+          "tableId": "mock.public.HospitalRef"
+        }
+      ],
+      "term": "hospital"
+    },
+    {
+      "aliases": [
+        "unit"
+      ],
+      "maps": [
+        {
+          "kind": "table",
+          "tableId": "mock.public.WardRef"
+        }
+      ],
+      "term": "ward"
+    },
+    {
+      "aliases": [
+        "los"
+      ],
+      "maps": [
+        {
+          "fromColumnId": "mock.public.VisitMock.admittedAt",
+          "kind": "derived",
+          "toColumnId": "mock.public.VisitMock.dischargedAt"
+        }
+      ],
+      "term": "length of stay"
+    },
+    {
+      "aliases": [
+        "dx"
+      ],
+      "maps": [],
+      "term": "diagnosis"
+    }
+  ],
+  "temporal": [
+    {
+      "intervalIso": "PT1H",
+      "kind": "relative-to-now",
+      "phrase": "last hour"
+    },
+    {
+      "intervalIso": "PT3H",
+      "kind": "relative-to-now",
+      "phrase": "last 3 hours"
+    },
+    {
+      "intervalIso": "PT6H",
+      "kind": "relative-to-now",
+      "phrase": "last 6 hours"
+    },
+    {
+      "intervalIso": "PT12H",
+      "kind": "relative-to-now",
+      "phrase": "last 12 hours"
+    },
+    {
+      "intervalIso": "PT24H",
+      "kind": "relative-to-now",
+      "phrase": "last 24 hours"
+    },
+    {
+      "intervalIso": "P1D",
+      "kind": "relative-to-now",
+      "phrase": "today"
+    },
+    {
+      "anchor": "previous-day",
+      "intervalIso": "P1D",
+      "kind": "relative-to-now",
+      "phrase": "yesterday"
+    },
+    {
+      "intervalIso": "P7D",
+      "kind": "relative-to-now",
+      "phrase": "this week"
+    },
+    {
+      "intervalIso": "P7D",
+      "kind": "relative-to-now",
+      "phrase": "last 7 days"
+    },
+    {
+      "intervalIso": "P30D",
+      "kind": "relative-to-now",
+      "phrase": "last 30 days"
+    },
+    {
+      "intervalIso": "P90D",
+      "kind": "relative-to-now",
+      "phrase": "last 90 days"
+    },
+    {
+      "intervalIso": "P1M",
+      "kind": "relative-to-now",
+      "phrase": "this month"
+    },
+    {
+      "intervalIso": "P1Y",
+      "kind": "relative-to-now",
+      "phrase": "last year"
+    },
+    {
+      "anchor": "year-to-date",
+      "intervalIso": "P1Y",
+      "kind": "relative-to-now",
+      "phrase": "ytd"
+    },
+    {
+      "eventColumnId": "mock.public.VisitMock.admittedAt",
+      "intervalIso": null,
+      "kind": "relative-to-event",
+      "phrase": "since admission"
+    }
+  ],
+  "units": [
+    {
+      "columnId": "mock.public.MeasurementsMock.Value",
+      "unit": "contextual"
+    },
+    {
+      "columnId": "mock.public.MeasurementTypeRef.unit",
+      "unit": "label"
+    }
+  ]
+}

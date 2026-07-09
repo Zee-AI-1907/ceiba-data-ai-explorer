@@ -1,0 +1,348 @@
+{
+  "tables": [
+    {
+      "approxRowCount": 40,
+      "columns": [
+        {
+          "columnId": "mock.public.PatientMock.patientRef",
+          "distinctCount": 40,
+          "kind": "numeric",
+          "max": 40.0,
+          "mean": 20.5,
+          "min": 1.0,
+          "nonNullCount": 40,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.PatientMock.patientCode",
+          "distinctCount": 40,
+          "kind": "categorical",
+          "nonNullCount": 40,
+          "type": "TEXT"
+        },
+        {
+          "columnId": "mock.public.PatientMock.hospitalId",
+          "distinctCount": 2,
+          "kind": "numeric",
+          "max": 2.0,
+          "mean": 1.5,
+          "min": 1.0,
+          "nonNullCount": 40,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.PatientMock.wardId",
+          "distinctCount": 4,
+          "kind": "numeric",
+          "max": 21.0,
+          "mean": 15.5,
+          "min": 10.0,
+          "nonNullCount": 40,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.PatientMock.ageBand",
+          "distinctCount": 4,
+          "kind": "phi-suppressed",
+          "nonNullCount": 40,
+          "type": "TEXT"
+        }
+      ],
+      "rowCountSource": "pg_class.reltuples",
+      "tableId": "mock.public.PatientMock"
+    },
+    {
+      "approxRowCount": 483,
+      "columns": [
+        {
+          "columnId": "mock.public.MeasurementsMock.Id",
+          "distinctCount": 483,
+          "kind": "numeric",
+          "max": 900003.0,
+          "mean": 5829.081,
+          "min": 1.0,
+          "nonNullCount": 483,
+          "type": "BIGINT"
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.DeviceId",
+          "distinctCount": 40,
+          "kind": "numeric",
+          "max": 1040.0,
+          "mean": 1020.385,
+          "min": 1001.0,
+          "nonNullCount": 483,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+          "distinctCount": 5,
+          "kind": "numeric",
+          "max": 5.0,
+          "mean": 2.988,
+          "min": 1.0,
+          "nonNullCount": 483,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.Value",
+          "distinctCount": 25,
+          "kind": "numeric",
+          "max": 158.0,
+          "mean": 70.02,
+          "min": 16.0,
+          "nonNullCount": 483,
+          "type": "DOUBLE PRECISION"
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.RecordedAt",
+          "distinctCount": 483,
+          "kind": "categorical",
+          "nonNullCount": 483,
+          "type": "TIMESTAMP"
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.patientRef",
+          "distinctCount": 40,
+          "kind": "numeric",
+          "max": 40.0,
+          "mean": 20.385,
+          "min": 1.0,
+          "nonNullCount": 483,
+          "type": "INTEGER"
+        }
+      ],
+      "rowCountSource": "pg_class.reltuples",
+      "tableId": "mock.public.MeasurementsMock"
+    },
+    {
+      "approxRowCount": 40,
+      "columns": [
+        {
+          "columnId": "mock.public.VisitMock.visitRef",
+          "distinctCount": 40,
+          "kind": "numeric",
+          "max": 40.0,
+          "mean": 20.5,
+          "min": 1.0,
+          "nonNullCount": 40,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.VisitMock.patientRef",
+          "distinctCount": 40,
+          "kind": "numeric",
+          "max": 40.0,
+          "mean": 20.5,
+          "min": 1.0,
+          "nonNullCount": 40,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.VisitMock.wardId",
+          "distinctCount": 4,
+          "kind": "numeric",
+          "max": 21.0,
+          "mean": 15.5,
+          "min": 10.0,
+          "nonNullCount": 40,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.VisitMock.admittedAt",
+          "distinctCount": 7,
+          "kind": "categorical",
+          "nonNullCount": 40,
+          "topCategories": [
+            {
+              "count": 6,
+              "value": "2026-07-08 04:59:50.704726+00:00"
+            },
+            {
+              "count": 6,
+              "value": "2026-07-07 04:59:50.704726+00:00"
+            },
+            {
+              "count": 6,
+              "value": "2026-07-06 04:59:50.704726+00:00"
+            },
+            {
+              "count": 6,
+              "value": "2026-07-05 04:59:50.704726+00:00"
+            },
+            {
+              "count": 6,
+              "value": "2026-07-04 04:59:50.704726+00:00"
+            },
+            {
+              "count": 5,
+              "value": "2026-07-03 04:59:50.704726+00:00"
+            },
+            {
+              "count": 5,
+              "value": "2026-07-09 04:59:50.704726+00:00"
+            }
+          ],
+          "type": "TIMESTAMP"
+        },
+        {
+          "columnId": "mock.public.VisitMock.dischargedAt",
+          "distinctCount": 7,
+          "kind": "categorical",
+          "nonNullCount": 13,
+          "topCategories": [
+            {
+              "count": 2,
+              "value": "2026-07-06 16:59:50.704726+00:00"
+            },
+            {
+              "count": 2,
+              "value": "2026-07-03 16:59:50.704726+00:00"
+            },
+            {
+              "count": 2,
+              "value": "2026-07-07 16:59:50.704726+00:00"
+            },
+            {
+              "count": 2,
+              "value": "2026-07-04 16:59:50.704726+00:00"
+            },
+            {
+              "count": 2,
+              "value": "2026-07-08 16:59:50.704726+00:00"
+            },
+            {
+              "count": 2,
+              "value": "2026-07-05 16:59:50.704726+00:00"
+            },
+            {
+              "count": 1,
+              "value": "2026-07-09 16:59:50.704726+00:00"
+            }
+          ],
+          "type": "TIMESTAMP"
+        }
+      ],
+      "rowCountSource": "pg_class.reltuples",
+      "tableId": "mock.public.VisitMock"
+    },
+    {
+      "approxRowCount": 0,
+      "columns": [
+        {
+          "columnId": "mock.public.WardRef.WardId",
+          "distinctCount": 4,
+          "kind": "numeric",
+          "max": 21.0,
+          "mean": 15.5,
+          "min": 10.0,
+          "nonNullCount": 4,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.WardRef.name",
+          "distinctCount": 4,
+          "kind": "phi-suppressed",
+          "nonNullCount": 4,
+          "type": "TEXT"
+        },
+        {
+          "columnId": "mock.public.WardRef.hospitalId",
+          "distinctCount": 2,
+          "kind": "numeric",
+          "max": 2.0,
+          "mean": 1.5,
+          "min": 1.0,
+          "nonNullCount": 4,
+          "type": "INTEGER"
+        }
+      ],
+      "rowCountSource": "pg_class.reltuples",
+      "tableId": "mock.public.WardRef"
+    },
+    {
+      "approxRowCount": 0,
+      "columns": [
+        {
+          "columnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+          "distinctCount": 5,
+          "kind": "numeric",
+          "max": 5.0,
+          "mean": 3.0,
+          "min": 1.0,
+          "nonNullCount": 5,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.MeasurementTypeRef.name",
+          "distinctCount": 5,
+          "kind": "phi-suppressed",
+          "nonNullCount": 5,
+          "type": "TEXT"
+        },
+        {
+          "columnId": "mock.public.MeasurementTypeRef.unit",
+          "distinctCount": 5,
+          "kind": "categorical",
+          "nonNullCount": 5,
+          "topCategories": [
+            {
+              "count": 1,
+              "value": "bpm"
+            },
+            {
+              "count": 1,
+              "value": "%"
+            },
+            {
+              "count": 1,
+              "value": "breaths/min"
+            },
+            {
+              "count": 1,
+              "value": "degC"
+            },
+            {
+              "count": 1,
+              "value": "mmHg"
+            }
+          ],
+          "type": "TEXT"
+        }
+      ],
+      "rowCountSource": "pg_class.reltuples",
+      "tableId": "mock.public.MeasurementTypeRef"
+    },
+    {
+      "approxRowCount": 0,
+      "columns": [
+        {
+          "columnId": "mock.public.HospitalRef.HospitalId",
+          "distinctCount": 2,
+          "kind": "numeric",
+          "max": 2.0,
+          "mean": 1.5,
+          "min": 1.0,
+          "nonNullCount": 2,
+          "type": "INTEGER"
+        },
+        {
+          "columnId": "mock.public.HospitalRef.name",
+          "distinctCount": 2,
+          "kind": "phi-suppressed",
+          "nonNullCount": 2,
+          "type": "TEXT"
+        },
+        {
+          "columnId": "mock.public.HospitalRef.region",
+          "distinctCount": 2,
+          "kind": "phi-suppressed",
+          "nonNullCount": 2,
+          "type": "TEXT"
+        }
+      ],
+      "rowCountSource": "pg_class.reltuples",
+      "tableId": "mock.public.HospitalRef"
+    }
+  ]
+}

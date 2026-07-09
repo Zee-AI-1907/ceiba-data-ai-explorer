@@ -1,0 +1,133 @@
+{
+  "foreignKeys": [
+    {
+      "constraintName": "PatientMock_hospitalId_fkey",
+      "fkId": "mock.public.PatientMock.hospitalId->mock.public.HospitalRef.HospitalId",
+      "fromColumns": [
+        "hospitalId"
+      ],
+      "fromTable": "mock.public.PatientMock",
+      "origin": "declared",
+      "toColumns": [
+        "HospitalId"
+      ],
+      "toTable": "mock.public.HospitalRef"
+    },
+    {
+      "constraintName": "PatientMock_wardId_fkey",
+      "fkId": "mock.public.PatientMock.wardId->mock.public.WardRef.WardId",
+      "fromColumns": [
+        "wardId"
+      ],
+      "fromTable": "mock.public.PatientMock",
+      "origin": "declared",
+      "toColumns": [
+        "WardId"
+      ],
+      "toTable": "mock.public.WardRef"
+    },
+    {
+      "constraintName": "MeasurementsMock_MeasurementTypeId_fkey",
+      "fkId": "mock.public.MeasurementsMock.MeasurementTypeId->mock.public.MeasurementTypeRef.MeasurementTypeId",
+      "fromColumns": [
+        "MeasurementTypeId"
+      ],
+      "fromTable": "mock.public.MeasurementsMock",
+      "origin": "declared",
+      "toColumns": [
+        "MeasurementTypeId"
+      ],
+      "toTable": "mock.public.MeasurementTypeRef"
+    },
+    {
+      "constraintName": "MeasurementsMock_patientRef_fkey",
+      "fkId": "mock.public.MeasurementsMock.patientRef->mock.public.PatientMock.patientRef",
+      "fromColumns": [
+        "patientRef"
+      ],
+      "fromTable": "mock.public.MeasurementsMock",
+      "origin": "declared",
+      "toColumns": [
+        "patientRef"
+      ],
+      "toTable": "mock.public.PatientMock"
+    },
+    {
+      "constraintName": "VisitMock_patientRef_fkey",
+      "fkId": "mock.public.VisitMock.patientRef->mock.public.PatientMock.patientRef",
+      "fromColumns": [
+        "patientRef"
+      ],
+      "fromTable": "mock.public.VisitMock",
+      "origin": "declared",
+      "toColumns": [
+        "patientRef"
+      ],
+      "toTable": "mock.public.PatientMock"
+    },
+    {
+      "constraintName": "VisitMock_wardId_fkey",
+      "fkId": "mock.public.VisitMock.wardId->mock.public.WardRef.WardId",
+      "fromColumns": [
+        "wardId"
+      ],
+      "fromTable": "mock.public.VisitMock",
+      "origin": "declared",
+      "toColumns": [
+        "WardId"
+      ],
+      "toTable": "mock.public.WardRef"
+    },
+    {
+      "constraintName": "WardRef_hospitalId_fkey",
+      "fkId": "mock.public.WardRef.hospitalId->mock.public.HospitalRef.HospitalId",
+      "fromColumns": [
+        "hospitalId"
+      ],
+      "fromTable": "mock.public.WardRef",
+      "origin": "declared",
+      "toColumns": [
+        "HospitalId"
+      ],
+      "toTable": "mock.public.HospitalRef"
+    }
+  ],
+  "primaryKeys": [
+    {
+      "columns": [
+        "patientRef"
+      ],
+      "tableId": "mock.public.PatientMock"
+    },
+    {
+      "columns": [
+        "Id"
+      ],
+      "tableId": "mock.public.MeasurementsMock"
+    },
+    {
+      "columns": [
+        "visitRef"
+      ],
+      "tableId": "mock.public.VisitMock"
+    },
+    {
+      "columns": [
+        "WardId"
+      ],
+      "tableId": "mock.public.WardRef"
+    },
+    {
+      "columns": [
+        "MeasurementTypeId"
+      ],
+      "tableId": "mock.public.MeasurementTypeRef"
+    },
+    {
+      "columns": [
+        "HospitalId"
+      ],
+      "tableId": "mock.public.HospitalRef"
+    }
+  ]
+}

@@ -1,0 +1,180 @@
+{
+  "columns": [
+    {
+      "columnId": "mock.public.PatientMock.patientRef",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "patientref",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.PatientMock.patientCode",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "patientcode",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.PatientMock.hospitalId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "hospitalid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.PatientMock.wardId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "wardid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.PatientMock.ageBand",
+      "egressPolicy": "suppress",
+      "matchedRule": "heuristic:unbounded-text-type:ageband",
+      "normalizedKey": "ageband",
+      "phiClass": "free-text"
+    },
+    {
+      "columnId": "mock.public.MeasurementsMock.Id",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "id",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.MeasurementsMock.DeviceId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "deviceid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "measurementtypeid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.MeasurementsMock.Value",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "value",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.MeasurementsMock.RecordedAt",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "recordedat",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.MeasurementsMock.patientRef",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "patientref",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.VisitMock.visitRef",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "visitref",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.VisitMock.patientRef",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "patientref",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.VisitMock.wardId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "wardid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.VisitMock.admittedAt",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "admittedat",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.VisitMock.dischargedAt",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "dischargedat",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.WardRef.WardId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "wardid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.WardRef.name",
+      "egressPolicy": "suppress",
+      "matchedRule": "PHI_COLUMNS:name",
+      "normalizedKey": "name",
+      "phiClass": "direct-identifier"
+    },
+    {
+      "columnId": "mock.public.WardRef.hospitalId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "hospitalid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "measurementtypeid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.MeasurementTypeRef.name",
+      "egressPolicy": "suppress",
+      "matchedRule": "PHI_COLUMNS:name",
+      "normalizedKey": "name",
+      "phiClass": "direct-identifier"
+    },
+    {
+      "columnId": "mock.public.MeasurementTypeRef.unit",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "unit",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.HospitalRef.HospitalId",
+      "egressPolicy": "aggregate-only",
+      "matchedRule": null,
+      "normalizedKey": "hospitalid",
+      "phiClass": "non-phi"
+    },
+    {
+      "columnId": "mock.public.HospitalRef.name",
+      "egressPolicy": "suppress",
+      "matchedRule": "PHI_COLUMNS:name",
+      "normalizedKey": "name",
+      "phiClass": "direct-identifier"
+    },
+    {
+      "columnId": "mock.public.HospitalRef.region",
+      "egressPolicy": "suppress",
+      "matchedRule": "heuristic:unbounded-text-type:region",
+      "normalizedKey": "region",
+      "phiClass": "free-text"
+    }
+  ],
+  "phiColumnsetHash": "5ae714624c229cb2d30921b466254b7b79122f7be71d15e6c5d3353d183e5080"
+}

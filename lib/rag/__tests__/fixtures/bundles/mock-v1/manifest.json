@@ -1,0 +1,54 @@
+{
+  "builder": {
+    "gitSha": "3f6c267",
+    "name": "ceiba-nl2sql-prep",
+    "version": "0.1.0"
+  },
+  "bundleFormatVersion": "1.0.0",
+  "bundleVersion": "v20260709T061308Z_c314b8",
+  "counts": {
+    "columns": 25,
+    "exemplars": 2,
+    "foreignKeys": 7,
+    "glossaryTerms": 13,
+    "inferredJoinEdges": 0,
+    "schemas": 1,
+    "tables": 6,
+    "vectors": 41
+  },
+  "createdAt": "2026-07-09T06:13:09Z",
+  "embeddingModel": {
+    "dimension": 384,
+    "id": "test-deterministic-hash-v1",
+    "lib": "test-fallback",
+    "normalization": "l2",
+    "revision": "sha256:test-only-no-real-weights"
+  },
+  "files": {
+    "catalog.json": "7ce7d9db3548ebfa5f5e2bcd07994f4a7cbba2bf69c5ba7e7f74b02e233038a0",
+    "exemplars.json": "280a1b36787ed827df3aa764615cf3ae6b35b6899c51b287f6adaeb2b666a9f2",
+    "glossary.json": "56db95eeb4b2bc39f4f8fd721a65f52db796daff2f2e98c2cbe762bf030d96e3",
+    "joingraph.json": "f1f4e9037f6def2a592838c9f059065ed05668cea3deea463bd7442c700aa79d",
+    "keys.json": "fa0f95517939bf6d8e2ce756eaabdb559ef6eaacd346ba58bf1789db1859b3db",
+    "phi.json": "536be701c2140a3201fa2d5bf6369ba675fc5242cf823f04ae650a0373a8fafd",
+    "profiles.json": "8e6bb4220897abc2b2288fbcc323f3e56f3244bc08f84ea4a54f614d1d1f0420",
+    "vectors.duckdb": "cb5669d99fa28e5389a1d962f49e51f108a244fbf8e0cd42d70e5f72a7ead30a"
+  },
+  "phiGate": {
+    "checkedFiles": 5,
+    "gateVersion": "1.0.0",
+    "passed": true,
+    "violations": []
+  },
+  "sources": [
+    {
+      "database": "mock",
+      "engine": "postgres",
+      "engineVersion": "unknown",
+      "introspectedAt": "2026-07-09T06:13:09Z",
+      "readOnly": true,
+      "schemaFingerprint": "sha256:c6d6543163a30783d8cffa7aab51c0847bcaf8def3faced3d78028bea28a18fe",
+      "sourceId": "mock"
+    }
+  ]
+}

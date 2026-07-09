@@ -1,0 +1,429 @@
+{
+  "schemas": [
+    {
+      "domain": null,
+      "schema": "public",
+      "sourceId": "mock",
+      "tableCount": 6
+    }
+  ],
+  "tables": [
+    {
+      "approxRowCount": 40,
+      "columns": [
+        {
+          "columnId": "mock.public.PatientMock.patientRef",
+          "dataType": "INTEGER",
+          "isIndexed": true,
+          "isPrimaryKey": true,
+          "isTimeColumn": false,
+          "name": "patientRef",
+          "nullable": false,
+          "ordinalPosition": 1,
+          "quotedName": "\"patientRef\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.PatientMock.patientCode",
+          "dataType": "TEXT",
+          "isIndexed": true,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "patientCode",
+          "nullable": false,
+          "ordinalPosition": 2,
+          "quotedName": "\"patientCode\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.PatientMock.hospitalId",
+          "dataType": "INTEGER",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "hospitalId",
+          "nullable": false,
+          "ordinalPosition": 3,
+          "quotedName": "\"hospitalId\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.PatientMock.wardId",
+          "dataType": "INTEGER",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "wardId",
+          "nullable": true,
+          "ordinalPosition": 4,
+          "quotedName": "\"wardId\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.PatientMock.ageBand",
+          "dataType": "TEXT",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "ageBand",
+          "nullable": false,
+          "ordinalPosition": 5,
+          "quotedName": "\"ageBand\"",
+          "unit": null
+        }
+      ],
+      "domain": null,
+      "grain": null,
+      "importanceScore": 0.8602,
+      "indexes": [
+        {
+          "columns": [
+            "patientCode"
+          ],
+          "method": "btree",
+          "name": "PatientMock_patientCode_key",
+          "unique": true
+        }
+      ],
+      "isLargeTimeSeries": false,
+      "name": "PatientMock",
+      "quotedRef": "\"public\".\"PatientMock\"",
+      "schema": "public",
+      "sourceId": "mock",
+      "tableId": "mock.public.PatientMock"
+    },
+    {
+      "approxRowCount": 483,
+      "columns": [
+        {
+          "columnId": "mock.public.MeasurementsMock.Id",
+          "dataType": "BIGINT",
+          "isIndexed": true,
+          "isPrimaryKey": true,
+          "isTimeColumn": false,
+          "name": "Id",
+          "nullable": false,
+          "ordinalPosition": 1,
+          "quotedName": "\"Id\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.DeviceId",
+          "dataType": "INTEGER",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "DeviceId",
+          "nullable": false,
+          "ordinalPosition": 2,
+          "quotedName": "\"DeviceId\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.MeasurementTypeId",
+          "dataType": "INTEGER",
+          "isIndexed": true,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "MeasurementTypeId",
+          "nullable": false,
+          "ordinalPosition": 3,
+          "quotedName": "\"MeasurementTypeId\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.Value",
+          "dataType": "DOUBLE PRECISION",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "Value",
+          "nullable": false,
+          "ordinalPosition": 4,
+          "quotedName": "\"Value\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.RecordedAt",
+          "dataType": "TIMESTAMP",
+          "isIndexed": true,
+          "isPrimaryKey": false,
+          "isTimeColumn": true,
+          "name": "RecordedAt",
+          "nullable": false,
+          "ordinalPosition": 5,
+          "quotedName": "\"RecordedAt\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.MeasurementsMock.patientRef",
+          "dataType": "INTEGER",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "patientRef",
+          "nullable": false,
+          "ordinalPosition": 6,
+          "quotedName": "\"patientRef\"",
+          "unit": null
+        }
+      ],
+      "domain": null,
+      "grain": null,
+      "importanceScore": 0.55,
+      "indexes": [
+        {
+          "columns": [
+            "RecordedAt"
+          ],
+          "method": "btree",
+          "name": "IX_MeasurementsMock_RecordedAt",
+          "unique": false
+        },
+        {
+          "columns": [
+            "MeasurementTypeId",
+            "RecordedAt"
+          ],
+          "method": "btree",
+          "name": "IX_MeasurementsMock_Type_RecordedAt",
+          "unique": false
+        }
+      ],
+      "isLargeTimeSeries": true,
+      "name": "MeasurementsMock",
+      "quotedRef": "\"public\".\"MeasurementsMock\"",
+      "schema": "public",
+      "sourceId": "mock",
+      "tableId": "mock.public.MeasurementsMock"
+    },
+    {
+      "approxRowCount": 40,
+      "columns": [
+        {
+          "columnId": "mock.public.VisitMock.visitRef",
+          "dataType": "INTEGER",
+          "isIndexed": true,
+          "isPrimaryKey": true,
+          "isTimeColumn": false,
+          "name": "visitRef",
+          "nullable": false,
+          "ordinalPosition": 1,
+          "quotedName": "\"visitRef\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.VisitMock.patientRef",
+          "dataType": "INTEGER",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "patientRef",
+          "nullable": false,
+          "ordinalPosition": 2,
+          "quotedName": "\"patientRef\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.VisitMock.wardId",
+          "dataType": "INTEGER",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "wardId",
+          "nullable": true,
+          "ordinalPosition": 3,
+          "quotedName": "\"wardId\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.VisitMock.admittedAt",
+          "dataType": "TIMESTAMP",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": true,
+          "name": "admittedAt",
+          "nullable": false,
+          "ordinalPosition": 4,
+          "quotedName": "\"admittedAt\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.VisitMock.dischargedAt",
+          "dataType": "TIMESTAMP",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": true,
+          "name": "dischargedAt",
+          "nullable": true,
+          "ordinalPosition": 5,
+          "quotedName": "\"dischargedAt\"",
+          "unit": null
+        }
+      ],
+      "domain": null,
+      "grain": null,
+      "importanceScore": 0.4102,
+      "indexes": [],
+      "isLargeTimeSeries": false,
+      "name": "VisitMock",
+      "quotedRef": "\"public\".\"VisitMock\"",
+      "schema": "public",
+      "sourceId": "mock",
+      "tableId": "mock.public.VisitMock"
+    },
+    {
+      "approxRowCount": 0,
+      "columns": [
+        {
+          "columnId": "mock.public.WardRef.WardId",
+          "dataType": "INTEGER",
+          "isIndexed": true,
+          "isPrimaryKey": true,
+          "isTimeColumn": false,
+          "name": "WardId",
+          "nullable": false,
+          "ordinalPosition": 1,
+          "quotedName": "\"WardId\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.WardRef.name",
+          "dataType": "TEXT",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "name",
+          "nullable": false,
+          "ordinalPosition": 2,
+          "quotedName": "\"name\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.WardRef.hospitalId",
+          "dataType": "INTEGER",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "hospitalId",
+          "nullable": false,
+          "ordinalPosition": 3,
+          "quotedName": "\"hospitalId\"",
+          "unit": null
+        }
+      ],
+      "domain": null,
+      "grain": null,
+      "importanceScore": 0.45,
+      "indexes": [],
+      "isLargeTimeSeries": false,
+      "name": "WardRef",
+      "quotedRef": "\"public\".\"WardRef\"",
+      "schema": "public",
+      "sourceId": "mock",
+      "tableId": "mock.public.WardRef"
+    },
+    {
+      "approxRowCount": 0,
+      "columns": [
+        {
+          "columnId": "mock.public.MeasurementTypeRef.MeasurementTypeId",
+          "dataType": "INTEGER",
+          "isIndexed": true,
+          "isPrimaryKey": true,
+          "isTimeColumn": false,
+          "name": "MeasurementTypeId",
+          "nullable": false,
+          "ordinalPosition": 1,
+          "quotedName": "\"MeasurementTypeId\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.MeasurementTypeRef.name",
+          "dataType": "TEXT",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "name",
+          "nullable": false,
+          "ordinalPosition": 2,
+          "quotedName": "\"name\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.MeasurementTypeRef.unit",
+          "dataType": "TEXT",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "unit",
+          "nullable": false,
+          "ordinalPosition": 3,
+          "quotedName": "\"unit\"",
+          "unit": null
+        }
+      ],
+      "domain": null,
+      "grain": null,
+      "importanceScore": 0.425,
+      "indexes": [],
+      "isLargeTimeSeries": false,
+      "name": "MeasurementTypeRef",
+      "quotedRef": "\"public\".\"MeasurementTypeRef\"",
+      "schema": "public",
+      "sourceId": "mock",
+      "tableId": "mock.public.MeasurementTypeRef"
+    },
+    {
+      "approxRowCount": 0,
+      "columns": [
+        {
+          "columnId": "mock.public.HospitalRef.HospitalId",
+          "dataType": "INTEGER",
+          "isIndexed": true,
+          "isPrimaryKey": true,
+          "isTimeColumn": false,
+          "name": "HospitalId",
+          "nullable": false,
+          "ordinalPosition": 1,
+          "quotedName": "\"HospitalId\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.HospitalRef.name",
+          "dataType": "TEXT",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "name",
+          "nullable": false,
+          "ordinalPosition": 2,
+          "quotedName": "\"name\"",
+          "unit": null
+        },
+        {
+          "columnId": "mock.public.HospitalRef.region",
+          "dataType": "TEXT",
+          "isIndexed": false,
+          "isPrimaryKey": false,
+          "isTimeColumn": false,
+          "name": "region",
+          "nullable": false,
+          "ordinalPosition": 3,
+          "quotedName": "\"region\"",
+          "unit": null
+        }
+      ],
+      "domain": null,
+      "grain": null,
+      "importanceScore": 0.45,
+      "indexes": [],
+      "isLargeTimeSeries": false,
+      "name": "HospitalRef",
+      "quotedRef": "\"public\".\"HospitalRef\"",
+      "schema": "public",
+      "sourceId": "mock",
+      "tableId": "mock.public.HospitalRef"
+    }
+  ]
+}

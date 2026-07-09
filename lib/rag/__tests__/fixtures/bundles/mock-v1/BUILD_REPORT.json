@@ -1,0 +1,43 @@
+{
+  "bundleVersion": "v20260709T061308Z_c314b8",
+  "phiGate": {
+    "checkedFiles": 5,
+    "passed": true,
+    "violations": []
+  },
+  "stages": [
+    {
+      "columns": 25,
+      "durationMs": 254,
+      "ok": true,
+      "sources": 1,
+      "stage": "connect_introspect_profile_classify",
+      "tables": 6
+    },
+    {
+      "durationMs": 8,
+      "glossaryTerms": 13,
+      "inferredJoinEdges": 0,
+      "ok": true,
+      "stage": "enrich"
+    },
+    {
+      "durationMs": 5,
+      "model": "test-deterministic-hash-v1",
+      "ok": true,
+      "stage": "embed",
+      "vectors": 41
+    },
+    {
+      "durationMs": 906,
+      "hnsw": true,
+      "ok": true,
+      "stage": "index"
+    },
+    {
+      "durationMs": 976,
+      "ok": true,
+      "stage": "emit"
+    }
+  ]
+}

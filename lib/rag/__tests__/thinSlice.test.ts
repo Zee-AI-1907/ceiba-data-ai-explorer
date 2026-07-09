@@ -31,7 +31,7 @@ import { DuckDBInstance } from '@duckdb/node-api'
 import { DuckDbEngine } from '../../engine/DuckDbEngine'
 import type { AttachSpec, EngineCapabilities, QueryEngine, SqlDialect } from '../../engine/QueryEngine'
 import { guardSql } from '../../sqlGuard'
-import { assemblePrompt, USER_REQUEST_CLOSE, USER_REQUEST_OPEN, type SchemaContext } from '../promptAssembly'
+import { assemblePrompt, USER_REQUEST_CLOSE, USER_REQUEST_OPEN, type PromptSchemaContext } from '../promptAssembly'
 import { cardinalityGuard, type CardinalityGuardOptions } from '../cardinalityGuard'
 
 const MOCK_DSN = process.env.MOCK_DSN ?? 'postgresql://ceiba_ro:ceiba_ro_pw@localhost:55433/mockdb'
@@ -49,7 +49,7 @@ const DUCKDB_CAPABILITIES: EngineCapabilities = {
 const DIALECT: SqlDialect = 'duckdb'
 
 // ── Hand-authored SchemaContext (SPEC §4 shape; M1 owns no retriever) ─────────
-const schemaContext: SchemaContext = {
+const schemaContext: PromptSchemaContext = {
   tables: [
     {
       tableId: 'mock.public.MeasurementsMock',

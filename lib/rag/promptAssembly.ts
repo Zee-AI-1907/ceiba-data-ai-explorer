@@ -26,55 +26,34 @@
  * on the table's `requiredTimeColumn` AND a LIMIT. `lib/rag/cardinalityGuard.ts`
  * is the enforcement backstop if the model ignores this.
  *
- * ── Minimal-type decision (TODO for P4) ───────────────────────────────────────
- * `lib/rag/Retriever.ts` (P4) does not exist yet. This file defines a LOCAL,
- * MINIMAL `SchemaContext`/`RenderedTable`/`CardinalityWarning` shape — a subset of
- * NL2SQL_SPEC.md §4's full `SchemaContext` sufficient for one hand-authored table
- * pair. P4 MUST unify these with the full `Retriever.ts` shapes (joinHints,
- * glossaryHits, exemplars, tokenEstimate, RetrieveOptions-driven construction) —
- * do not fork independently; this file's exports should be re-pointed at
- * `Retriever.ts`'s types once that lands, not duplicated.
+ * ── Unification (P4) ───────────────────────────────────────────────────────────
+ * `lib/rag/Retriever.ts` (P4) is now the CANONICAL home for `SchemaContext` /
+ * `RenderedTable` / `RenderedColumn` / `CardinalityWarning` (NL2SQL_SPEC.md §4).
+ * This file re-exports those types (imported, never redefined — NL2SQL_PLAN.md
+ * §0 rule 6) instead of the LOCAL, MINIMAL shapes it used to define during the
+ * M1 thin slice.
+ *
+ * `assemblePrompt` itself only ever READS `tables` and `cardinalityWarnings`
+ * off its context argument (it does not touch `joinHints`/`glossaryHits`/
+ * `exemplars`/`tokenEstimate`/`dialect`). Its parameter is therefore typed as
+ * `PromptSchemaContext`, a structural subset of the canonical `SchemaContext`
+ * (an interface `SchemaContext` is assignable to, by TS structural typing) —
+ * this keeps the M1 thin-slice test's hand-authored `{ tables,
+ * cardinalityWarnings }` literal valid (SPEC's own M1 DoD: "hand-authored
+ * context", no retriever involved yet) while a real `Retriever.retrieve()`
+ * result (the full `SchemaContext`) is ALSO always a valid argument, with zero
+ * cast needed either way — no behavior change, this file's exports are just
+ * re-pointed at Retriever.ts's canonical field shapes instead of duplicating
+ * them.
  */
 
 import type { EngineCapabilities, SqlDialect } from '../engine/QueryEngine'
+import type { CardinalityWarning, RenderedColumn, RenderedTable, SchemaContext } from './Retriever'
 
-/** TODO(P4): unify with NL2SQL_SPEC.md §4 RenderedTable / lib/rag/Retriever.ts. */
-export interface RenderedColumn {
-  name: string
-  quotedName: string
-  dataType: string
-  unit?: string
-  isTimeColumn: boolean
-}
+export type { CardinalityWarning, RenderedColumn, RenderedTable, SchemaContext }
 
-/** TODO(P4): unify with NL2SQL_SPEC.md §4 RenderedTable / lib/rag/Retriever.ts. */
-export interface RenderedTable {
-  tableId: string
-  quotedRef: string
-  grain: string
-  columns: RenderedColumn[]
-  approxRowCount: number
-  isLargeTimeSeries: boolean
-  /** The indexed time column to bound on when isLargeTimeSeries=true. */
-  requiredTimeColumn?: string
-}
-
-/** TODO(P4): unify with NL2SQL_SPEC.md §4 CardinalityWarning / lib/rag/Retriever.ts. */
-export interface CardinalityWarning {
-  tableId: string
-  approxRowCount: number
-  requiredTimeColumn: string | null
-  message: string
-}
-
-/**
- * Minimal local SchemaContext (TODO(P4): unify with NL2SQL_SPEC.md §4's full
- * `SchemaContext` in lib/rag/Retriever.ts — that shape additionally carries
- * `joinHints`, `glossaryHits`, `exemplars`, `tokenEstimate`, and `dialect`; this
- * thin-slice subset only needs `tables` + `cardinalityWarnings` because the
- * context is hand-authored rather than retrieved).
- */
-export interface SchemaContext {
+/** Structural subset of SchemaContext that assemblePrompt actually reads — see file docstring "Unification (P4)". */
+export interface PromptSchemaContext {
   tables: RenderedTable[]
   cardinalityWarnings: CardinalityWarning[]
 }
@@ -153,7 +132,7 @@ export interface PromptAssemblyOptions {
  * cardinalityGuard + engine.explain before it is ever executed (§5.1 [D]-[F]).
  */
 export function assemblePrompt(
-  context: SchemaContext,
+  context: PromptSchemaContext,
   question: string,
   capabilities: EngineCapabilities,
   dialect: SqlDialect,

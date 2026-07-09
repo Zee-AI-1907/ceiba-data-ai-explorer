@@ -1,0 +1,110 @@
+{
+  "edges": [
+    {
+      "confidence": 1.0,
+      "crossSource": false,
+      "from": "mock.public.MeasurementsMock",
+      "fromColumns": [
+        "MeasurementTypeId"
+      ],
+      "joinCardinality": "many-to-one",
+      "origin": "declared",
+      "to": "mock.public.MeasurementTypeRef",
+      "toColumns": [
+        "MeasurementTypeId"
+      ]
+    },
+    {
+      "confidence": 1.0,
+      "crossSource": false,
+      "from": "mock.public.MeasurementsMock",
+      "fromColumns": [
+        "patientRef"
+      ],
+      "joinCardinality": "many-to-one",
+      "origin": "declared",
+      "to": "mock.public.PatientMock",
+      "toColumns": [
+        "patientRef"
+      ]
+    },
+    {
+      "confidence": 1.0,
+      "crossSource": false,
+      "from": "mock.public.PatientMock",
+      "fromColumns": [
+        "hospitalId"
+      ],
+      "joinCardinality": "many-to-one",
+      "origin": "declared",
+      "to": "mock.public.HospitalRef",
+      "toColumns": [
+        "HospitalId"
+      ]
+    },
+    {
+      "confidence": 1.0,
+      "crossSource": false,
+      "from": "mock.public.PatientMock",
+      "fromColumns": [
+        "wardId"
+      ],
+      "joinCardinality": "many-to-one",
+      "origin": "declared",
+      "to": "mock.public.WardRef",
+      "toColumns": [
+        "WardId"
+      ]
+    },
+    {
+      "confidence": 1.0,
+      "crossSource": false,
+      "from": "mock.public.VisitMock",
+      "fromColumns": [
+        "patientRef"
+      ],
+      "joinCardinality": "many-to-one",
+      "origin": "declared",
+      "to": "mock.public.PatientMock",
+      "toColumns": [
+        "patientRef"
+      ]
+    },
+    {
+      "confidence": 1.0,
+      "crossSource": false,
+      "from": "mock.public.VisitMock",
+      "fromColumns": [
+        "wardId"
+      ],
+      "joinCardinality": "many-to-one",
+      "origin": "declared",
+      "to": "mock.public.WardRef",
+      "toColumns": [
+        "WardId"
+      ]
+    },
+    {
+      "confidence": 1.0,
+      "crossSource": false,
+      "from": "mock.public.WardRef",
+      "fromColumns": [
+        "hospitalId"
+      ],
+      "joinCardinality": "many-to-one",
+      "origin": "declared",
+      "to": "mock.public.HospitalRef",
+      "toColumns": [
+        "HospitalId"
+      ]
+    }
+  ],
+  "nodes": [
+    "mock.public.HospitalRef",
+    "mock.public.MeasurementTypeRef",
+    "mock.public.MeasurementsMock",
+    "mock.public.PatientMock",
+    "mock.public.VisitMock",
+    "mock.public.WardRef"
+  ]
+}

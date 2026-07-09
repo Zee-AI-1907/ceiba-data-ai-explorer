@@ -1,0 +1,33 @@
+{
+  "exemplars": [
+    {
+      "dialect": "postgres",
+      "id": "ex_heart_rate_over_120_last_3h",
+      "question": "heart rate > 120 in the last 3 hours",
+      "sql": "SELECT DISTINCT m.\"patientRef\" FROM public.\"MeasurementsMock\" m WHERE m.\"MeasurementTypeId\" = 1 AND m.\"Value\" > 120 AND m.\"RecordedAt\" >= now() - INTERVAL '3 hours' LIMIT 1000",
+      "tables": [
+        "mock.public.MeasurementsMock"
+      ],
+      "tags": [
+        "temporal",
+        "aggregate:false",
+        "coded-measurement"
+      ],
+      "validated": true
+    },
+    {
+      "dialect": "postgres",
+      "id": "ex_patients_admitted_yesterday",
+      "question": "patients admitted yesterday",
+      "sql": "SELECT v.\"visitRef\", v.\"patientRef\", v.\"admittedAt\" FROM public.\"VisitMock\" v WHERE v.\"admittedAt\" >= CURRENT_DATE - INTERVAL '1 day' AND v.\"admittedAt\" < CURRENT_DATE LIMIT 1000",
+      "tables": [
+        "mock.public.VisitMock"
+      ],
+      "tags": [
+        "temporal",
+        "aggregate:false"
+      ],
+      "validated": true
+    }
+  ]
+}
