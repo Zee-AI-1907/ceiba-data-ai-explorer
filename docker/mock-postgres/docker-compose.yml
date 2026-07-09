@@ -1,0 +1,53 @@
+# =============================================================================
+# Ceiba NL->SQL — Local synthetic companion Postgres (Phase P1)
+# =============================================================================
+# A NO-PHI synthetic Postgres that provides the "mock" side of the federation
+# topology (docs/mock-topology.md). It correlates with staging CeibaHospitalDB
+# via a SHARED ID SPACE (HospitalId, MeasurementTypeId, WardId) but contains
+# only deterministic synthetic rows.
+#
+# Runs on OrbStack or plain Docker. Init SQL is intentionally portable (no
+# OrbStack-specific features) so CI can seed a Postgres service container with
+# the SAME docker/mock-postgres/init/*.sql files.
+#
+#   Bring up:   bash scripts/mock-db-up.sh
+#   Tear down:  bash scripts/mock-db-down.sh          (keeps data volume)
+#   Reset:      bash scripts/mock-db-down.sh --volumes (wipes data volume)
+#
+# Local port is 55433 to avoid colliding with the 55432 staging SSH tunnel.
+# =============================================================================
+
+services:
+  mock-postgres:
+    image: postgres:16
+    container_name: ceiba-mock-postgres
+    restart: unless-stopped
+    environment:
+      # Superuser used ONLY for bootstrap/init. Engines connect as the
+      # genuinely read-only role created in 03_readonly_role.sql (ceiba_ro).
+      POSTGRES_USER: mock_admin
+      POSTGRES_PASSWORD: mock_admin_pw
+      POSTGRES_DB: mockdb
+      # Deterministic collation/encoding so seeded ordering is stable across
+      # hosts and CI runners.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # host:container — fixed host port 55433 (see header note).
+      - "55433:5432"
+    volumes:
+      # Named volume for durable data between up/down (not --volumes).
+      - mock_pgdata:/var/lib/postgresql/data
+      # Init scripts run in lexical order on FIRST init of an empty data dir.
+      # Mounted read-only; portable across OrbStack and CI service containers.
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # pg_isready against our DB + user; scripts/mock-db-up.sh waits on this.
+      test: ["CMD-SHELL", "pg_isready -U mock_admin -d mockdb -h 127.0.0.1"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  mock_pgdata:
+    name: ceiba_mock_pgdata
