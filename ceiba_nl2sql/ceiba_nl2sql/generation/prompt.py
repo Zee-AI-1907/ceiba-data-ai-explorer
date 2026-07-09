@@ -17,6 +17,8 @@ pulled from the target engine's capabilities()/dialect().
 
 from __future__ import annotations
 
+import re
+
 from ceiba_nl2sql.engine.base import EngineCapabilities, SqlDialect
 from ceiba_nl2sql.retrieval.retriever import (
     CardinalityWarning,
@@ -139,13 +141,42 @@ def _edge_endpoint_ref(ref: str, ref_to_source_qualified: dict[str, str]) -> str
     return ref_to_source_qualified.get(ref, ref)
 
 
+def _bare_ref_tail(ref: str) -> str:
+    """Last quoted segment of a (possibly source-qualified) ref, unquoted —
+    e.g. `staging."Shared"."Monitors"` -> `Monitors`. Used to phrase the
+    per-edge join instruction in plain table names.
+    """
+    segments = re.findall(r'"([^"]+)"', ref)
+    if segments:
+        return segments[-1]
+    return ref.split(".")[-1]
+
+
 def _render_join_edge_line(hint: JoinHint, ref_to_source_qualified: dict[str, str]) -> str:
+    """Renders one join edge. Prompt-accuracy fix (wrong join column): a
+    diagnosed staging benchmark showed the model default to `mm."Id" = m."Id"`
+    instead of the correct FK `mm."DeviceId" = m."Id"`. Each edge now spells out
+    the EXACT FK-side column and warns against the `Id = Id` default whenever the
+    FK column is not itself named `Id`, so there is no room to guess.
+    """
     tag = _CARDINALITY_TAG.get(hint.join_cardinality, hint.join_cardinality)
     from_cols = ", ".join(hint.from_columns)
     to_cols = ", ".join(hint.to_columns)
     from_ref = _edge_endpoint_ref(hint.from_ref, ref_to_source_qualified)
     to_ref = _edge_endpoint_ref(hint.to_ref, ref_to_source_qualified)
-    return f'  {from_ref}."{from_cols}" = {to_ref}."{to_cols}" [{tag}]'
+    line = f'  {from_ref}."{from_cols}" = {to_ref}."{to_cols}" [{tag}]'
+
+    from_table = _bare_ref_tail(from_ref)
+    to_table = _bare_ref_tail(to_ref)
+    # Anti-Id=Id guidance: fire whenever the FK-side column(s) differ from the
+    # PK-side column(s) — i.e. a NAMED foreign key exists — so the model does
+    # not collapse the join onto matching `Id` columns.
+    if [c.lower() for c in hint.from_columns] != [c.lower() for c in hint.to_columns]:
+        line += (
+            f'  -- join {from_table} to {to_table} ON {from_table}."{from_cols}" = {to_table}."{to_cols}" '
+            f'(use the FK column "{from_cols}", NOT {from_table}."Id" = {to_table}."Id")'
+        )
+    return line
 
 
 def _render_join_path_line(path: JoinPath, ref_by_table_id: dict[str, RenderedTable]) -> str:
@@ -219,6 +250,8 @@ def _render_join_graph(
 
     lines: list[str] = [
         "JOIN GRAPH (use these exact join predicates; direction is FK-side -> PK-side, [card] is row multiplicity):",
+        "Use the EXACT FK column named on each edge below. When a named FK exists (e.g. DeviceId),",
+        "join on it — do NOT default to matching Id = Id.",
     ]
     running = _estimate_tokens("\n".join(lines))
 
@@ -283,9 +316,18 @@ def _render_semantic_hint(hit: GlossaryHit, ref_by_table_id: dict[str, RenderedT
     hosting_table = ref_by_table_id.get(hit.hosting_table_id) if hit.hosting_table_id else None
     hosting_table_ref = hosting_table.quoted_ref if hosting_table else None
 
+    code_col_bare: str | None = None
     if hit.code_value is not None and hit.code_column_id:
         # Prefer the literal code filter form (SEMANTIC_HINTS.md §5.3): avoids
         # an extra lookup-table join when the code is stable.
+        # Prompt-accuracy fix (type-vs-value): a diagnosed staging benchmark
+        # showed the model put a numeric THRESHOLD in the type column
+        # (`MeasurementTypeId = 120`) instead of selecting the metric by its
+        # type id and comparing the reading against Value. The code column
+        # SELECTS WHICH metric (an equality on a fixed id); it is NOT where a
+        # numeric reading/threshold goes — that belongs on the value column
+        # below. Spell this out on the filter line so the two cannot be
+        # conflated.
         code_col_bare = hit.code_column_id.split(".")[-1]
         code_table_ref = hosting_table_ref or "<table>"
         code_label_comment = (
@@ -293,6 +335,10 @@ def _render_semantic_hint(hit: GlossaryHit, ref_by_table_id: dict[str, RenderedT
         )
         code_value_literal = hit.code_value if isinstance(hit.code_value, (int, float)) else f"'{hit.code_value}'"
         lines.append(f'    filter:  {code_table_ref}."{code_col_bare}" = {code_value_literal}{code_label_comment}')
+        lines.append(
+            f'             ("{code_col_bare}" SELECTS WHICH metric — always this exact equality; '
+            "it is NOT a reading. Never put a numeric threshold in it.)"
+        )
 
     if hit.resolved_column_id:
         value_col_bare = hit.resolved_column_id.split(".")[-1]
@@ -301,6 +347,14 @@ def _render_semantic_hint(hit: GlossaryHit, ref_by_table_id: dict[str, RenderedT
         value_table_ref = value_table.quoted_ref if value_table else hosting_table_ref or "<table>"
         unit_part = f" (unit={hit.unit})" if hit.unit else ""
         lines.append(f'    value:   {value_table_ref}."{value_col_bare}"{unit_part}')
+        # Prompt-accuracy fix (type-vs-value): make the target of a numeric
+        # comparison explicit — a threshold like ">120" applies to the VALUE
+        # column, never to the type/code column above.
+        if code_col_bare:
+            lines.append(
+                f'             (apply numeric comparisons like ">120" to "{value_col_bare}", '
+                f'NOT to "{code_col_bare}".)'
+            )
 
     if hit.time_column_id:
         time_col_bare = hit.time_column_id.split(".")[-1]
@@ -310,8 +364,16 @@ def _render_semantic_hint(hit: GlossaryHit, ref_by_table_id: dict[str, RenderedT
         lines.append(f'    time:    {time_table_ref}."{time_col_bare}"')
 
     if hit.hosting_table_id:
+        # Prompt-accuracy fix (wrong subsystem): a diagnosed staging benchmark
+        # showed a model answer a HEART RATE query off Ventilators/
+        # VentilatorMeasurements. Name the hosting table as the ONLY correct
+        # home for this term's readings so a sibling subsystem
+        # (Monitors/Ventilators) that also got retrieved cannot be substituted.
+        hosting_bare = hit.hosting_table_id.split(".")[-1]
         lines.append(
-            f"    hosted on {hit.hosting_table_id}; to reach other selected tables, follow the JOIN GRAPH below."
+            f'    hosted on {hit.hosting_table_id} — read "{hit.term}" ONLY from {hosting_bare}; '
+            "do NOT substitute a similarly-named table from another subsystem. "
+            "To reach other selected tables, follow the JOIN GRAPH below."
         )
 
     return "\n".join(lines)

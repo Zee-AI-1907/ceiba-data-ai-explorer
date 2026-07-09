@@ -367,6 +367,139 @@ def test_cardinality_warning_own_time_column_case_unchanged():
     assert 'you MUST include a time-bound predicate on "RecordedAt"' in message
 
 
+# ── prompt-accuracy fixes (live SQL evaluation of "HR above 120 in last 3h") ──
+
+
+def _hr_monitor_measurements_table() -> RenderedTable:
+    return RenderedTable(
+        table_id="staging.Shared.MonitorMeasurements",
+        quoted_ref='"Shared"."MonitorMeasurements"',
+        grain="one row per MonitorMeasurements reading",
+        columns=[
+            RenderedColumn(name="DeviceId", quoted_name='"DeviceId"', data_type="INTEGER", unit=None, is_time_column=False, is_indexed=True, is_foreign_key_or_primary_key=True),
+            RenderedColumn(name="MeasurementTypeId", quoted_name='"MeasurementTypeId"', data_type="INTEGER", unit=None, is_time_column=False, is_indexed=True),
+            RenderedColumn(name="Value", quoted_name='"Value"', data_type="DOUBLE PRECISION", unit=None, is_time_column=False),
+            RenderedColumn(name="Id", quoted_name='"Id"', data_type="BIGINT", unit=None, is_time_column=False, is_foreign_key_or_primary_key=True),
+        ],
+        approx_row_count=337_000_000,
+        is_large_time_series=True,
+        required_time_column=None,
+    )
+
+
+def _monitors_parent_table() -> RenderedTable:
+    return RenderedTable(
+        table_id="staging.Shared.Monitors",
+        quoted_ref='"Shared"."Monitors"',
+        grain="one row per Monitors record",
+        columns=[
+            RenderedColumn(name="Id", quoted_name='"Id"', data_type="INTEGER", unit=None, is_time_column=False, is_foreign_key_or_primary_key=True),
+            RenderedColumn(name="MeasuredDate", quoted_name='"MeasuredDate"', data_type="TIMESTAMP", unit=None, is_time_column=True, is_indexed=True),
+        ],
+        approx_row_count=60_000_000,
+        is_large_time_series=False,
+    )
+
+
+def _hr_glossary_hit() -> GlossaryHit:
+    return GlossaryHit(
+        term="heart rate",
+        resolved_column_id="staging.Shared.MonitorMeasurements.Value",
+        time_column_id=None,
+        unit="bpm",
+        hosting_table_id="staging.Shared.MonitorMeasurements",
+        confidence=1.0,
+        code_value=2,
+        code_label="HR",
+        code_column_id="staging.Shared.MonitorMeasurements.MeasurementTypeId",
+    )
+
+
+def _monitor_to_monitors_edge() -> JoinHint:
+    return JoinHint(
+        from_ref='"Shared"."MonitorMeasurements"',
+        from_columns=["DeviceId"],
+        to_ref='"Shared"."Monitors"',
+        to_columns=["Id"],
+        join_cardinality="many-to-one",
+        cross_source=False,
+    )
+
+
+# Fix 1: WRONG JOIN COLUMN — the edge must name the exact FK column + warn against Id=Id.
+
+
+def test_join_edge_names_exact_fk_column_and_warns_against_id_equals_id():
+    rendered = _render_join_graph(
+        [_monitor_to_monitors_edge()], [], [_hr_monitor_measurements_table(), _monitors_parent_table()]
+    )
+    # The exact FK predicate is present (source-qualified).
+    assert 'staging."Shared"."MonitorMeasurements"."DeviceId" = staging."Shared"."Monitors"."Id"' in rendered
+    # And an explicit anti-Id=Id instruction naming the FK column.
+    assert 'NOT MonitorMeasurements."Id" = Monitors."Id"' in rendered
+    assert 'use the FK column "DeviceId"' in rendered
+
+
+def test_join_graph_header_warns_against_id_equals_id():
+    rendered = _render_join_graph(
+        [_monitor_to_monitors_edge()], [], [_hr_monitor_measurements_table(), _monitors_parent_table()]
+    )
+    assert "do NOT default to matching Id = Id" in rendered
+
+
+def test_join_edge_no_anti_id_warning_when_fk_and_pk_columns_share_a_name():
+    # patientRef=patientRef: no NAMED distinct FK column, so no Id=Id trap to warn about.
+    edge = JoinHint(
+        from_ref='"public"."MeasurementsMock"', from_columns=["patientRef"],
+        to_ref='"public"."PatientMock"', to_columns=["patientRef"],
+        join_cardinality="many-to-one", cross_source=False,
+    )
+    rendered = _render_join_graph([edge], [], [_measurements_table(), _patients_table()])
+    assert "NOT" not in rendered.split("Edges among selected tables:")[1]
+
+
+# Fix 2: TYPE-vs-VALUE — TypeId equality SEPARATE from Value comparison.
+
+
+def test_semantic_hint_separates_type_id_equality_from_value_comparison():
+    rendered = _render_semantic_hints([_hr_glossary_hit()], [_hr_monitor_measurements_table()])
+    # The type filter is a fixed equality selecting the metric.
+    assert '"MeasurementTypeId" = 2' in rendered
+    assert "SELECTS WHICH metric" in rendered
+    assert "NOT a reading" in rendered
+    # The numeric comparison target is the Value column, explicitly NOT the type column.
+    assert 'apply numeric comparisons like ">120" to "Value"' in rendered
+    assert 'NOT to "MeasurementTypeId"' in rendered
+
+
+# Fix 3: WRONG SUBSYSTEM — HR must be read only from MonitorMeasurements.
+
+
+def test_semantic_hint_pins_hosting_table_against_sibling_subsystem():
+    rendered = _render_semantic_hints([_hr_glossary_hit()], [_hr_monitor_measurements_table()])
+    assert 'read "heart rate" ONLY from MonitorMeasurements' in rendered
+    assert "do NOT substitute a similarly-named table from another subsystem" in rendered
+
+
+def test_assemble_prompt_hr_query_end_to_end_carries_all_three_fixes():
+    prompt = assemble_prompt(
+        [_hr_monitor_measurements_table(), _monitors_parent_table()],
+        [],
+        "patients with heart rate above 120 in the last 3 hours",
+        CAPS,
+        "duckdb",
+        join_hints=[_monitor_to_monitors_edge()],
+        glossary_hits=[_hr_glossary_hit()],
+        token_budget=2500,
+    )
+    # Fix 1
+    assert 'use the FK column "DeviceId"' in prompt
+    # Fix 2
+    assert 'apply numeric comparisons like ">120" to "Value"' in prompt
+    # Fix 3
+    assert 'read "heart rate" ONLY from MonitorMeasurements' in prompt
+
+
 def test_assemble_prompt_hr_query_cardinality_warning_end_to_end():
     """End-to-end: assembling the full prompt for a table with time_via set
     surfaces the parent-join guidance in the CARDINALITY WARNINGS section."""

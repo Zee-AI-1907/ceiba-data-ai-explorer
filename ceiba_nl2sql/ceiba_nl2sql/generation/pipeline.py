@@ -57,6 +57,12 @@ from ceiba_nl2sql.generation.llm import DEFAULT_LLM_MODEL, LlmClient, TokenUsage
 from ceiba_nl2sql.generation.pricing import estimate_cost_usd
 from ceiba_nl2sql.generation.prompt import assemble_prompt, assemble_repair_prompt
 from ceiba_nl2sql.guard.cardinality import cardinality_guard_from_context
+from ceiba_nl2sql.guard.explain_estimate import (
+    ExplainRunner,
+    LargeTableStat,
+    evaluate_plan_estimate,
+    pg_explain_estimate,
+)
 from ceiba_nl2sql.retrieval.retriever import HybridRetriever, RetrieveOptions, SchemaContext
 from ceiba_nl2sql.sqltools.guard import TableAllowlistCheck, guard_sql
 
@@ -151,6 +157,16 @@ class GenerateOptions:
     recall_columns: int | None = None
     exemplar_k: int | None = None
     table_allowlist: TableAllowlistCheck | None = None
+    # Postgres-side EXPLAIN cardinality guard (docs/research/EXPLAIN_CARDINALITY_GUARD.md).
+    # AUGMENTS the syntactic cardinality guard: when a probe is available it is the
+    # AUTHORITATIVE selectivity signal; when it is not (no DSN/runner, transpile or
+    # probe failure, timeout) the pipeline falls back to the syntactic verdict, which
+    # fails closed on the large tables. Provide EITHER an injected `pg_explain_runner`
+    # (hermetic tests / custom transport) OR `source_dsn` (a psycopg runner is built
+    # for you). Leaving both None disables the EXPLAIN stage entirely (syntactic guard
+    # remains the gate), so existing callers/tests are unaffected.
+    source_dsn: str | None = None
+    pg_explain_runner: ExplainRunner | None = None
 
 
 def extract_sql(raw: str) -> tuple[str, str]:
@@ -185,6 +201,23 @@ class _AttemptFailure:
     hint: str | None = None
 
 
+def _large_table_stats(context: SchemaContext) -> list[LargeTableStat]:
+    """Derives the EXPLAIN guard's large-table set from the retrieved context:
+    every `is_large_time_series` survivor, keyed by its BARE table name (the
+    form Postgres reports as `Relation Name` in the plan) with its
+    `approx_row_count` as `reltuples` for the relative reject threshold. Reuses
+    the SAME table set the syntactic guard already recognizes, so the two guards
+    share configuration rather than duplicating it (research §7).
+    """
+    stats: list[LargeTableStat] = []
+    for table in context.tables:
+        if not table.is_large_time_series:
+            continue
+        bare_name = table.quoted_ref.split(".")[-1].strip('"') or table.table_id.split(".")[-1]
+        stats.append(LargeTableStat(bare_name=bare_name, reltuples=float(table.approx_row_count)))
+    return stats
+
+
 def _validate_candidate(
     candidate_sql: str,
     context: SchemaContext,
@@ -193,11 +226,15 @@ def _validate_candidate(
     default_limit: int,
     table_allowlist: TableAllowlistCheck | None,
     dialect: SqlDialect,
+    source_dsn: str | None = None,
+    pg_explain_runner: ExplainRunner | None = None,
 ) -> tuple[bool, str | None, _AttemptFailure | None]:
-    """Runs the guard_sql -> cardinality_guard -> explain chain on one
-    candidate SQL. Returns `(ok, accepted_sql, failure)`. Mirrors
-    lib/rag/generate.ts `validateCandidate`. CRITICAL: uses `engine.explain`
-    (NOT execute) — zero rows egress.
+    """Runs the guard_sql -> cardinality_guard -> EXPLAIN-estimate -> explain
+    chain on one candidate SQL. Returns `(ok, accepted_sql, failure)`. Mirrors
+    lib/rag/generate.ts `validateCandidate` plus the Postgres-side EXPLAIN
+    cardinality guard (docs/research/EXPLAIN_CARDINALITY_GUARD.md). CRITICAL:
+    uses `engine.explain` (NOT execute) — zero rows egress; the EXPLAIN-estimate
+    probe likewise NEVER runs ANALYZE.
     """
     guard_verdict = guard_sql(candidate_sql, dialect=dialect, table_allowlist=table_allowlist)
     if not guard_verdict.allowed:
@@ -259,6 +296,46 @@ def _validate_candidate(
         )
     if card_verdict.action == "repair" and card_verdict.repaired_sql:
         sql_for_explain = card_verdict.repaired_sql
+
+    # ── Postgres-side EXPLAIN-estimate guard (AUTHORITATIVE when available) ──
+    # AUGMENTS the syntactic guard above (which already passed/repaired this
+    # candidate). Run only when a probe is configured AND the query touches a
+    # large table — otherwise there is nothing for it to gate. The probe reads
+    # the large-table SCAN node's `Plan Rows` from Postgres `pg_statistic`
+    # (filter-aware, unlike DuckDB's page-count estimate) and can OVERTURN a
+    # syntactic pass whose "selective" predicate turns out non-selective, or
+    # catch a join fan-out the syntactic guard is blind to. If the probe is
+    # UNAVAILABLE (no DSN/runner, transpile/probe failure, timeout) it returns
+    # `action='defer'` and we KEEP the syntactic verdict — i.e. fail closed on
+    # large tables via the syntactic guard that already ran. NEVER runs ANALYZE.
+    large_stats = _large_table_stats(context)
+    if (source_dsn or pg_explain_runner) and large_stats:
+        estimate = pg_explain_estimate(
+            sql_for_explain,
+            large_stats,
+            dsn=source_dsn,
+            runner=pg_explain_runner,
+            source_dialect=dialect,
+        )
+        explain_estimate_verdict = evaluate_plan_estimate(estimate, large_stats)
+        if explain_estimate_verdict.action in ("reject", "repair"):
+            # A huge estimate is confidently huge (research §2, Leis 2016) — a
+            # reject is safe; a 'repair' here is not silently fixable (the guard
+            # cannot fabricate a tighter window), so both feed the self-repair
+            # loop as a failure with the estimate-derived hint.
+            return (
+                False,
+                None,
+                _AttemptFailure(
+                    error=explain_estimate_verdict.reason or "Query is estimated to scan a large table unbounded.",
+                    hint=explain_estimate_verdict.repair_hint,
+                    failed_sql=sql_for_explain,
+                ),
+            )
+        # action in ('pass', 'defer'): 'pass' means the estimate is bounded
+        # (authoritative OK); 'defer' means unavailable -> we already have the
+        # syntactic guard's pass/repair verdict, which fails closed on large
+        # tables, so proceed with it.
 
     explain_verdict = engine.explain(sql_for_explain)
     if isinstance(explain_verdict, PlanError) or not explain_verdict.ok:
@@ -389,6 +466,8 @@ async def generate_sql(
         default_limit=default_limit,
         table_allowlist=options.table_allowlist,
         dialect=resolved_dialect,
+        source_dsn=options.source_dsn,
+        pg_explain_runner=options.pg_explain_runner,
     )
 
     while not ok and rounds < max_repair_rounds:

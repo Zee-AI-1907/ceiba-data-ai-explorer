@@ -132,13 +132,37 @@ function edgeEndpointRef(ref: string, refToSourceQualified: Map<string, string>)
   return refToSourceQualified.get(ref) ?? ref
 }
 
+function bareRefTail(ref: string): string {
+  // Last quoted segment of a (possibly source-qualified) ref, unquoted —
+  // e.g. `staging."Shared"."Monitors"` -> `Monitors`.
+  const matches = ref.match(/"([^"]+)"/g)
+  if (matches && matches.length > 0) return matches[matches.length - 1]!.replace(/"/g, '')
+  return ref.split('.').at(-1) ?? ref
+}
+
 function renderJoinEdgeLine(hint: JoinHint, refToSourceQualified: Map<string, string>): string {
+  // Prompt-accuracy fix (wrong join column): a diagnosed staging benchmark
+  // showed the model default to `mm."Id" = m."Id"` instead of the correct FK
+  // `mm."DeviceId" = m."Id"`. Each edge spells out the EXACT FK-side column and
+  // warns against the `Id = Id` default whenever a NAMED foreign key exists.
   const tag = CARDINALITY_TAG[hint.joinCardinality] ?? hint.joinCardinality
   const fromCols = hint.fromColumns.join(', ')
   const toCols = hint.toColumns.join(', ')
   const fromRef = edgeEndpointRef(hint.fromRef, refToSourceQualified)
   const toRef = edgeEndpointRef(hint.toRef, refToSourceQualified)
-  return `  ${fromRef}."${fromCols}" = ${toRef}."${toCols}" [${tag}]`
+  let line = `  ${fromRef}."${fromCols}" = ${toRef}."${toCols}" [${tag}]`
+
+  const fromTable = bareRefTail(fromRef)
+  const toTable = bareRefTail(toRef)
+  const fromLower = hint.fromColumns.map((c) => c.toLowerCase())
+  const toLower = hint.toColumns.map((c) => c.toLowerCase())
+  const sameNames = fromLower.length === toLower.length && fromLower.every((c, i) => c === toLower[i])
+  if (!sameNames) {
+    line +=
+      `  -- join ${fromTable} to ${toTable} ON ${fromTable}."${fromCols}" = ${toTable}."${toCols}" ` +
+      `(use the FK column "${fromCols}", NOT ${fromTable}."Id" = ${toTable}."Id")`
+  }
+  return line
 }
 
 function renderJoinPathLine(path: JoinPath, refByTableId: Map<string, RenderedTable>): string {
@@ -173,7 +197,11 @@ function renderJoinGraph(joinHints: JoinHint[], joinPaths: JoinPath[], tables: R
   const bridgeTableIds = new Set(tables.filter((t) => t.role === 'bridge').map((t) => t.tableId))
   const bridgeTablesById = new Map(tables.filter((t) => t.role === 'bridge').map((t) => [t.tableId, t] as const))
 
-  const lines: string[] = ['JOIN GRAPH (use these exact join predicates; direction is FK-side -> PK-side, [card] is row multiplicity):']
+  const lines: string[] = [
+    'JOIN GRAPH (use these exact join predicates; direction is FK-side -> PK-side, [card] is row multiplicity):',
+    'Use the EXACT FK column named on each edge below. When a named FK exists (e.g. DeviceId),',
+    'join on it — do NOT default to matching Id = Id.',
+  ]
   let running = estimateTokens(lines.join('\n'))
 
   const withinBudget = (candidateLines: string[]): boolean => {
@@ -237,12 +265,22 @@ function renderSemanticHint(hit: GlossaryHit, refByTableId: Map<string, Rendered
   const hostingTable = hit.hostingTableId ? refByTableId.get(hit.hostingTableId) : undefined
   const hostingTableRef = hostingTable?.quotedRef
 
+  let codeColBare: string | undefined
   if (hit.codeValue !== undefined && hit.codeColumnId) {
-    const codeColBare = hit.codeColumnId.split('.').at(-1)!
+    // Prompt-accuracy fix (type-vs-value): a diagnosed staging benchmark showed
+    // the model put a numeric THRESHOLD in the type column (`MeasurementTypeId =
+    // 120`) instead of selecting the metric by its type id and comparing the
+    // reading against Value. Spell out that the code column SELECTS WHICH metric
+    // (a fixed equality) and is NOT where a numeric reading/threshold goes.
+    codeColBare = hit.codeColumnId.split('.').at(-1)!
     const codeTableRef = hostingTableRef ?? '<table>'
     const codeLabelComment = hit.codeLabel ? ` -- code ${JSON.stringify(hit.codeValue)} = ${JSON.stringify(hit.codeLabel)}` : ` -- code ${JSON.stringify(hit.codeValue)}`
     const codeValueLiteral = typeof hit.codeValue === 'number' ? String(hit.codeValue) : `'${hit.codeValue}'`
     lines.push(`    filter:  ${codeTableRef}."${codeColBare}" = ${codeValueLiteral}${codeLabelComment}`)
+    lines.push(
+      `             ("${codeColBare}" SELECTS WHICH metric — always this exact equality; ` +
+        'it is NOT a reading. Never put a numeric threshold in it.)',
+    )
   }
 
   if (hit.resolvedColumnId) {
@@ -252,6 +290,10 @@ function renderSemanticHint(hit: GlossaryHit, refByTableId: Map<string, Rendered
     const valueTableRef = valueTable?.quotedRef ?? hostingTableRef ?? '<table>'
     const unitPart = hit.unit ? ` (unit=${hit.unit})` : ''
     lines.push(`    value:   ${valueTableRef}."${valueColBare}"${unitPart}`)
+    // A threshold like ">120" applies to the VALUE column, never the type column.
+    if (codeColBare) {
+      lines.push(`             (apply numeric comparisons like ">120" to "${valueColBare}", NOT to "${codeColBare}".)`)
+    }
   }
 
   if (hit.timeColumnId) {
@@ -263,7 +305,16 @@ function renderSemanticHint(hit: GlossaryHit, refByTableId: Map<string, Rendered
   }
 
   if (hit.hostingTableId) {
-    lines.push(`    hosted on ${hit.hostingTableId}; to reach other selected tables, follow the JOIN GRAPH below.`)
+    // Prompt-accuracy fix (wrong subsystem): a diagnosed staging benchmark
+    // showed a model answer a HEART RATE query off Ventilators/
+    // VentilatorMeasurements. Name the hosting table as the ONLY correct home
+    // for this term so a sibling subsystem cannot be substituted.
+    const hostingBare = hit.hostingTableId.split('.').at(-1)!
+    lines.push(
+      `    hosted on ${hit.hostingTableId} — read "${hit.term}" ONLY from ${hostingBare}; ` +
+        'do NOT substitute a similarly-named table from another subsystem. ' +
+        'To reach other selected tables, follow the JOIN GRAPH below.',
+    )
   }
 
   return lines.join('\n')

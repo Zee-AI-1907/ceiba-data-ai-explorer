@@ -176,6 +176,82 @@ describe('Fix D — SEMANTIC HINTS rendering', () => {
   })
 })
 
+describe('prompt-accuracy fixes (live "HR above 120 in last 3h" evaluation)', () => {
+  const hrMonitorMeasurements: RenderedTable = {
+    tableId: 'staging.Shared.MonitorMeasurements',
+    quotedRef: '"Shared"."MonitorMeasurements"',
+    grain: 'one row per MonitorMeasurements reading',
+    columns: [],
+    approxRowCount: 337_000_000,
+    isLargeTimeSeries: true,
+    role: 'primary',
+  }
+  const monitorsParent: RenderedTable = {
+    tableId: 'staging.Shared.Monitors',
+    quotedRef: '"Shared"."Monitors"',
+    grain: 'one row per Monitors record',
+    columns: [],
+    approxRowCount: 60_000_000,
+    isLargeTimeSeries: false,
+    role: 'primary',
+  }
+  const hrHint: GlossaryHit = {
+    term: 'heart rate',
+    resolvedColumnId: 'staging.Shared.MonitorMeasurements.Value',
+    unit: 'bpm',
+    hostingTableId: 'staging.Shared.MonitorMeasurements',
+    confidence: 1.0,
+    codeValue: 2,
+    codeLabel: 'HR',
+    codeColumnId: 'staging.Shared.MonitorMeasurements.MeasurementTypeId',
+  }
+  const mmEdge: JoinHint = {
+    fromRef: '"Shared"."MonitorMeasurements"',
+    fromColumns: ['DeviceId'],
+    toRef: '"Shared"."Monitors"',
+    toColumns: ['Id'],
+    joinCardinality: 'many-to-one',
+    crossSource: false,
+  }
+
+  it('Fix 1: join edge names the exact FK column and warns against Id = Id', () => {
+    const prompt = assemblePrompt(
+      { tables: [hrMonitorMeasurements, monitorsParent], cardinalityWarnings: [], joinHints: [mmEdge] },
+      'q',
+      CAPS,
+      'duckdb',
+    )
+    expect(prompt).toContain('staging."Shared"."MonitorMeasurements"."DeviceId" = staging."Shared"."Monitors"."Id"')
+    expect(prompt).toContain('use the FK column "DeviceId"')
+    expect(prompt).toContain('NOT MonitorMeasurements."Id" = Monitors."Id"')
+    expect(prompt).toContain('do NOT default to matching Id = Id')
+  })
+
+  it('Fix 2: semantic hint separates TypeId equality from Value comparison', () => {
+    const prompt = assemblePrompt(
+      { tables: [hrMonitorMeasurements], cardinalityWarnings: [], glossaryHits: [hrHint] },
+      'q',
+      CAPS,
+      'duckdb',
+    )
+    expect(prompt).toContain('"MeasurementTypeId" = 2')
+    expect(prompt).toContain('SELECTS WHICH metric')
+    expect(prompt).toContain('apply numeric comparisons like ">120" to "Value"')
+    expect(prompt).toContain('NOT to "MeasurementTypeId"')
+  })
+
+  it('Fix 3: semantic hint pins the hosting table against a sibling subsystem', () => {
+    const prompt = assemblePrompt(
+      { tables: [hrMonitorMeasurements], cardinalityWarnings: [], glossaryHits: [hrHint] },
+      'q',
+      CAPS,
+      'duckdb',
+    )
+    expect(prompt).toContain('read "heart rate" ONLY from MonitorMeasurements')
+    expect(prompt).toContain('do NOT substitute a similarly-named table from another subsystem')
+  })
+})
+
 describe('assemblePrompt — section ordering: SCHEMA -> SEMANTIC HINTS -> JOIN GRAPH -> CARDINALITY', () => {
   it('orders sections correctly when all are present', () => {
     const hit: GlossaryHit = {

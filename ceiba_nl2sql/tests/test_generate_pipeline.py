@@ -164,6 +164,80 @@ WHERE m."RecordedAt" >= now() - INTERVAL '3 hours' LIMIT 1000"""
             retriever.dispose()
 
 
+class TestExplainEstimateGuardComposition:
+    """The Postgres-side EXPLAIN cardinality guard AUGMENTS the syntactic guard
+    (docs/research/EXPLAIN_CARDINALITY_GUARD.md). Injects an `ExplainRunner` so
+    the composition is exercised hermetically (no live DB): a huge scan estimate
+    OVERTURNS a syntactically-bounded candidate into a repair, and an unavailable
+    probe DEFERS to the syntactic verdict (which already passed the good SQL).
+    """
+
+    @staticmethod
+    def _plan(scan_rows: int) -> list:
+        # A Limit over a Seq Scan of MeasurementsMock: top-level LIMIT is small,
+        # the inner SCAN estimate is what the guard reads.
+        return [
+            {
+                "Plan": {
+                    "Node Type": "Limit",
+                    "Plan Rows": 1000,
+                    "Plans": [
+                        {"Node Type": "Seq Scan", "Relation Name": "MeasurementsMock", "Plan Rows": scan_rows}
+                    ],
+                }
+            }
+        ]
+
+    async def test_huge_scan_estimate_overturns_syntactic_pass_and_repairs(self, engine):
+        from ceiba_nl2sql.generation.pipeline import GenerateOptions
+
+        retriever = _build_retriever()
+        try:
+            calls: list[str] = []
+
+            def runner(probe_sql: str, timeout_ms: int):
+                calls.append(probe_sql)
+                # First candidate estimated huge (reject/repair); second bounded.
+                return self._plan(500_000_000) if len(calls) == 1 else self._plan(42)
+
+            # Both candidates are SYNTACTICALLY bounded (time predicate + LIMIT),
+            # so only the EXPLAIN estimate can distinguish them.
+            llm = StubLlmClient([GOOD_HEART_RATE_SQL, GOOD_HEART_RATE_SQL])
+            options = GenerateOptions(pg_explain_runner=runner)
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+            )
+            # The huge estimate forced a repair round even though the syntactic
+            # guard passed the first candidate.
+            assert response.repair is not None
+            assert response.repair.rounds == 1
+            assert "500,000,000" in (response.repair.last_error or "") or "scan" in (response.repair.last_error or "").lower()
+            # The probe received native-Postgres SQL (no `mock.` catalog alias).
+            assert all("mock." not in p for p in calls)
+        finally:
+            retriever.dispose()
+
+    async def test_unavailable_probe_defers_to_syntactic_and_passes_good_sql(self, engine):
+        from ceiba_nl2sql.generation.pipeline import GenerateOptions
+
+        retriever = _build_retriever()
+        try:
+            def runner(_probe_sql: str, _timeout_ms: int):
+                raise RuntimeError("staging unreachable")
+
+            llm = StubLlmClient([GOOD_HEART_RATE_SQL])
+            options = GenerateOptions(pg_explain_runner=runner)
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+            )
+            # Probe unavailable -> deferred to the syntactic guard, which had
+            # already passed this bounded+limited SQL. No repair needed.
+            assert response.repair is None
+            assert "MeasurementsMock" in response.sql
+        finally:
+            retriever.dispose()
+
+
 class TestPromptInjectionRejectedByGuard:
     async def test_write_statement_exhausts_repair_and_raises(self, engine):
         retriever = _build_retriever()
