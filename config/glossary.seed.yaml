@@ -1,13 +1,262 @@
 # glossary.seed.yaml — hand-authored clinical glossary seed (SPEC §1.9, §2.4).
 #
-# Empty seed for P3a. The prep tool's enrich stage (P3b, prep/prep/enrich/glossary.py)
-# reads this file and extends it programmatically from the introspected catalog
-# (table/column names, code-system columns, units). Left empty here — P3a owns only
-# the file's existence/shape contract, not its content; P3b is the consumer/extender.
+# Extended in P3b: the prep tool's enrich stage (prep/prep/enrich/glossary.py)
+# reads this file as a STARTING point and programmatically extends it from the
+# introspected catalog (e.g. resolving a `columnId`/`timeColumnId` reference
+# below against the actual bundle catalog; entries whose referenced table/
+# column does not exist in the current build are dropped, never fabricated —
+# same discipline as joingraph.py's curated cross-source correlations).
 #
-# Shape (mirrors glossary.json §1.9 — populated by P3b):
-synonyms: []
-abbreviations: {}
-codeSystems: []
-units: []
-temporal: []
+# This generalizes lib/clinicalContext.ts (CLINICAL_ABBREVIATIONS,
+# TIME_RANGE_HINTS) from hardcoded TS into versioned, source-agnostic data
+# (research §2.4, R8) — the two canonical NL2SQL_PLAN questions ("heart rate >
+# 120 in the last 3 hours", "patients admitted yesterday") both resolve
+# end-to-end through the entries below.
+#
+# Shape mirrors glossary.json §1.9. `maps[].tableId`/`columnId`/`timeColumnId`
+# are BARE hints here (schema.table / schema.table.column, no sourceId prefix)
+# — glossary.py's `resolve_against_catalog` qualifies them with the actual
+# sourceId(s) present in the current build (a term like "heart rate" should
+# resolve against BOTH mock.public.MeasurementsMock.Value and, when staging is
+# introspected, staging.Shared.MonitorMeasurements.HeartRate).
+
+synonyms:
+  - term: heart rate
+    aliases: [hr, pulse]
+    maps:
+      # Mock topology (docker/mock-postgres/init/02_seed.sql): heart rate is a
+      # MeasurementTypeRef row (MeasurementTypeId=1), not a dedicated column —
+      # the "value" column is generic, discriminated by MeasurementTypeId.
+      - kind: coded-measurement
+        tableRef: public.MeasurementsMock
+        valueColumn: public.MeasurementsMock.Value
+        timeColumn: public.MeasurementsMock.RecordedAt
+        codeColumn: public.MeasurementsMock.MeasurementTypeId
+        codeRefTable: public.MeasurementTypeRef
+        codeRefColumn: public.MeasurementTypeRef.MeasurementTypeId
+        codeValue: "Heart Rate"
+        unit: bpm
+      # Real staging schema: a dedicated HeartRate column on the big
+      # time-series table (docs/NL2SQL_SPEC.md §1.9 example) — present only
+      # when `staging` is introspected in the current build.
+      - kind: column
+        columnRef: Shared.MonitorMeasurements.HeartRate
+        timeColumnRef: Shared.MonitorMeasurements.RecordedAt
+        unit: bpm
+
+  - term: vitals
+    aliases: [obs, observations]
+    maps:
+      - kind: table
+        tableRef: Shared.VitalSigns
+
+  - term: oxygen saturation
+    aliases: [o2, spo2, sats]
+    maps:
+      - kind: coded-measurement
+        tableRef: public.MeasurementsMock
+        valueColumn: public.MeasurementsMock.Value
+        timeColumn: public.MeasurementsMock.RecordedAt
+        codeColumn: public.MeasurementsMock.MeasurementTypeId
+        codeRefTable: public.MeasurementTypeRef
+        codeRefColumn: public.MeasurementTypeRef.MeasurementTypeId
+        codeValue: "SpO2"
+        unit: "%"
+
+  - term: respiratory rate
+    aliases: [rr, resp rate]
+    maps:
+      - kind: coded-measurement
+        tableRef: public.MeasurementsMock
+        valueColumn: public.MeasurementsMock.Value
+        timeColumn: public.MeasurementsMock.RecordedAt
+        codeColumn: public.MeasurementsMock.MeasurementTypeId
+        codeRefTable: public.MeasurementTypeRef
+        codeRefColumn: public.MeasurementTypeRef.MeasurementTypeId
+        codeValue: "Respiratory Rate"
+        unit: breaths/min
+
+  - term: temperature
+    aliases: [temp]
+    maps:
+      - kind: coded-measurement
+        tableRef: public.MeasurementsMock
+        valueColumn: public.MeasurementsMock.Value
+        timeColumn: public.MeasurementsMock.RecordedAt
+        codeColumn: public.MeasurementsMock.MeasurementTypeId
+        codeRefTable: public.MeasurementTypeRef
+        codeRefColumn: public.MeasurementTypeRef.MeasurementTypeId
+        codeValue: "Temperature"
+        unit: degC
+
+  - term: blood pressure
+    aliases: [bp]
+    maps:
+      - kind: coded-measurement
+        tableRef: public.MeasurementsMock
+        valueColumn: public.MeasurementsMock.Value
+        timeColumn: public.MeasurementsMock.RecordedAt
+        codeColumn: public.MeasurementsMock.MeasurementTypeId
+        codeRefTable: public.MeasurementTypeRef
+        codeRefColumn: public.MeasurementTypeRef.MeasurementTypeId
+        codeValue: "Mean Arterial Pressure"
+        unit: mmHg
+
+  - term: admitted
+    aliases: [admission, admit, arrived]
+    maps:
+      - kind: temporal-column
+        columnRef: Shared.Acceptances.AcceptanceDate
+      - kind: temporal-column
+        columnRef: public.VisitMock.admittedAt
+
+  - term: discharged
+    aliases: [discharge]
+    maps:
+      - kind: temporal-column
+        columnRef: public.VisitMock.dischargedAt
+
+  - term: patient
+    aliases: [pt, pts, patients]
+    maps:
+      - kind: table
+        tableRef: Shared.Patients
+      - kind: table
+        tableRef: public.PatientMock
+
+  - term: hospital
+    aliases: [facility, site]
+    maps:
+      - kind: table
+        tableRef: public.HospitalRef
+
+  - term: ward
+    aliases: [unit]
+    maps:
+      - kind: table
+        tableRef: public.WardRef
+
+  - term: length of stay
+    aliases: [los]
+    maps:
+      - kind: derived
+        fromColumnRef: public.VisitMock.admittedAt
+        toColumnRef: public.VisitMock.dischargedAt
+
+  - term: diagnosis
+    aliases: [dx]
+    maps:
+      - kind: code-system
+        columnRef: Shared.Diagnoses.ICD10Code
+
+abbreviations:
+  icu: intensive care unit
+  ed: emergency department
+  nicu: neonatal intensive care unit
+  picu: pediatric intensive care unit
+  los: length of stay
+  bp: blood pressure
+  hr: heart rate
+  rr: respiratory rate
+  o2: oxygen saturation
+  spo2: oxygen saturation
+  temp: temperature
+  pt: patient
+  pts: patients
+  dx: diagnosis
+  hx: history
+  adm: admission
+  dc: discharge
+  icd: icd10 diagnosis code
+  vem: ventilator/emergency monitoring
+  news: national early warning score
+  sofa: sequential organ failure assessment
+  saps: simplified acute physiology score
+
+codeSystems:
+  - system: ICD-10
+    columnRef: Shared.Diagnoses.ICD10Code
+    conceptMap:
+      - concept: diabetes
+        codes: ["E10", "E11", "E13"]
+      - concept: pneumonia
+        codes: ["J12", "J13", "J14", "J15", "J16", "J17", "J18"]
+      - concept: sepsis
+        codes: ["A40", "A41"]
+      - concept: heart failure
+        codes: ["I50"]
+  - system: LOINC
+    columnRef: Shared.Laboratories.LoincCode
+    conceptMap: []
+
+units:
+  - columnRef: Shared.MonitorMeasurements.HeartRate
+    unit: bpm
+  - columnRef: public.MeasurementsMock.Value
+    unit: contextual # discriminated by MeasurementTypeRef.unit per MeasurementTypeId — see "heart rate" et al above
+  - columnRef: public.MeasurementTypeRef.unit
+    unit: label # this column IS the unit label for the coded measurement, not itself measured in a unit
+
+temporal:
+  # Relative-to-now phrases (SPEC §1.9): resolved against "now" at query time,
+  # independent of any specific event column.
+  - phrase: last hour
+    kind: relative-to-now
+    intervalIso: PT1H
+  - phrase: last 3 hours
+    kind: relative-to-now
+    intervalIso: PT3H
+  - phrase: last 6 hours
+    kind: relative-to-now
+    intervalIso: PT6H
+  - phrase: last 12 hours
+    kind: relative-to-now
+    intervalIso: PT12H
+  - phrase: last 24 hours
+    kind: relative-to-now
+    intervalIso: PT24H
+  - phrase: today
+    kind: relative-to-now
+    intervalIso: P1D
+  - phrase: yesterday
+    kind: relative-to-now
+    intervalIso: P1D
+    anchor: previous-day
+  - phrase: this week
+    kind: relative-to-now
+    intervalIso: P7D
+  - phrase: last 7 days
+    kind: relative-to-now
+    intervalIso: P7D
+  - phrase: last 30 days
+    kind: relative-to-now
+    intervalIso: P30D
+  - phrase: last 90 days
+    kind: relative-to-now
+    intervalIso: P90D
+  - phrase: this month
+    kind: relative-to-now
+    intervalIso: P1M
+  - phrase: last year
+    kind: relative-to-now
+    intervalIso: P1Y
+  - phrase: ytd
+    kind: relative-to-now
+    intervalIso: P1Y
+    anchor: year-to-date
+  # Relative-to-event phrases (SPEC §1.9): the window anchors to a specific
+  # event column (e.g. admission), NOT to "now" — this is the fix for the
+  # TIME_RANGE_HINTS bug class where every phrase silently anchored to
+  # AcceptanceDate regardless of what the question was actually about.
+  - phrase: within 24h of admission
+    kind: relative-to-event
+    eventColumnRef: Shared.Acceptances.AcceptanceDate
+    intervalIso: PT24H
+  - phrase: within 1 hour of admission
+    kind: relative-to-event
+    eventColumnRef: Shared.Acceptances.AcceptanceDate
+    intervalIso: PT1H
+  - phrase: since admission
+    kind: relative-to-event
+    eventColumnRef: public.VisitMock.admittedAt
+    intervalIso: null

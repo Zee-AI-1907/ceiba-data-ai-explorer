@@ -10,6 +10,9 @@ prep/.venv/
 prep/*.egg-info/
 .pytest_cache/
 
+# NL2SQL generated artifact bundles (build output — regenerable via prep toolchain)
+artifacts/bundles/
+
 # Next.js
 .next/
 out/

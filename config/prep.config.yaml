@@ -33,7 +33,16 @@ sources:
       excludeSchemas: []
     profile:
       sampleRowsPerTable: 5000
-      largeTableRowThreshold: 10000000
+      # Mock topology (docs/mock-topology.md) seeds ~483 MeasurementsMock rows
+      # — a shape-preserving, scaled-down ANALOG of staging's real ~337M-row
+      # Shared.MonitorMeasurements, never the real cardinality (SPEC §8.1 "no
+      # 337M-row synthetic data"). A 10M threshold (staging's value) would
+      # never flag it, defeating the point of the analog: MeasurementsMock
+      # exists specifically so `isLargeTimeSeries`/the cardinality guard have
+      # something to exercise in CI without staging. 100 sits below the seed's
+      # 483 rows so the flag fires structurally, same as the real table does
+      # at real scale — see prep/prep/enrich/importance.py.
+      largeTableRowThreshold: 100
       timeWindowedSampleFor: []
 
 enrich:
