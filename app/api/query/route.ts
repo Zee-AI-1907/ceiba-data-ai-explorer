@@ -117,25 +117,9 @@ function writeAnomalyLog(line: string): void {
   }
 }
 
-// ── runtime flag: TS (default) vs the Python NL→SQL service ───────────────────
-
 /**
- * The query/execution runtime flag is resolved by lib/nl2sqlRuntime.ts:
- *   effective = NL2SQL_QUERY_RUNTIME ?? NL2SQL_RUNTIME (umbrella) ?? 'ts'
- * (docs/PYTHON_NL2SQL_SERVICE_PLAN.md §5 Phase 4, §7.3). DEFAULT is 'python'
- * (2026-07 cutover — the Python engine is the only one with single-source native
- * routing); rollback to the in-process TS engine is a single env flip to 'ts'.
- * ALL the TS hardening (auth → rate-limit → body-size → validate →
- * catalog/schema allowlist → guardSql RE-GUARD) runs IDENTICALLY on both paths;
- * only the execute step differs. The guardSql re-guard is the execution
- * boundary and always runs in TS before any dispatch (§1.3).
- * `warnIfRuntimesDiverge` emits a one-time boot warning if generate and query
- * runtimes disagree (mismatched flags reopen the dialect-mismatch window).
- */
-
-/**
- * TEST-ONLY fetch seam for the Python-runtime path. When set, the service client
- * uses this instead of the global `fetch`, so the route test can assert the exact
+ * TEST-ONLY fetch seam for the service call. When set, the service client uses
+ * this instead of the global `fetch`, so the route test can assert the exact
  * request shape sent to the service and map a mocked response back — fully
  * hermetic (no live service). Mirrors the sql-generate route's seam.
  */
@@ -147,9 +131,9 @@ export function __setServiceFetchForTest(fetchImpl: typeof fetch | null): void {
 }
 
 /**
- * The engine-agnostic execution result both paths produce. `columns` here carry
- * the engine's `{ name, type }`; the route maps them onto the client's
- * `{ key, label, type }` shape once, downstream of the runtime branch.
+ * The engine-agnostic execution result the service returns. `columns` carry the
+ * engine's `{ name, type }`; the route maps them onto the client's
+ * `{ key, label, type }` shape once.
  */
 interface QueryExecutionResult {
   columns: Array<{ name: string; type: string }>
