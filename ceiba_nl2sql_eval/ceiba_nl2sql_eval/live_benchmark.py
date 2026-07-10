@@ -108,6 +108,10 @@ class QueryStats:
     completion_tok: list[int] = field(default_factory=list)
     cost: list[float] = field(default_factory=list)
     llm_calls: list[int] = field(default_factory=list)
+    # sql-only mode: per-run generated SQL + structural checks
+    binds: list[bool] = field(default_factory=list)
+    joins_ok: list[bool] = field(default_factory=list)
+    sqls: list[str] = field(default_factory=list)
 
     @property
     def pass_rate(self) -> float:
@@ -129,43 +133,76 @@ def _build_stack(bundle_dir: str, model: str, password: str):
     return retriever, engine, llm
 
 
-async def run_cell(bundle_dir: str, strict_prompt: bool, model: str, runs: int, password: str) -> dict:
-    """Run all 10 queries `runs` times against one (bundle, prompt, model) cell."""
+def _load_edges(bundle_dir: str) -> list[dict]:
+    import json
+    with open(f"{bundle_dir}/joingraph.json") as f:
+        return json.load(f).get("edges", [])
+
+
+async def run_cell(bundle_dir: str, strict_prompt: bool, model: str, runs: int, password: str,
+                   *, sql_only: bool = True) -> dict:
+    """Run all 10 queries `runs` times against one (bundle, prompt, model) cell.
+
+    sql_only=True (default, exploratory): score the GENERATED SQL without
+    executing — pass = EXPLAIN binds AND every join predicate is a declared FK
+    edge. Fast (no data scan) and captures the failure modes (invalid SQL /
+    invented joins). The generated SQL is recorded for qualitative comparison.
+    sql_only=False: execute the generated SQL and compare its result to the
+    reference result (slower; needs bounded deadlines).
+    """
+    from prep.enrich.join_check import join_predicates_are_declared
+
     retriever, engine, llm = _build_stack(bundle_dir, model, password)
-    sa_engine = sa.create_engine(_sa_dsn(password),
-                                 connect_args={"options": "-c default_transaction_read_only=on"})
+    edges = _load_edges(bundle_dir)
+    dialect = engine.dialect()
+    sa_engine = None
+    if not sql_only:
+        sa_engine = sa.create_engine(_sa_dsn(password),
+                                     connect_args={"options": "-c default_transaction_read_only=on"})
     options = GenerateOptions(strict_join_steering=strict_prompt)
     stats: list[QueryStats] = []
     for q in QUERIES:
         s = QueryStats(query_id=q.id)
         for _ in range(runs):
             s.runs += 1
-            # reference result, same moment
-            with sa_engine.connect() as c:
-                ref_rows = c.exec_driver_sql(q.reference_sql).fetchall()
             try:
                 t0 = time.monotonic()
                 retriever.retrieve(q.question, RetrieveOptions(token_budget=2500, max_tables=6))
                 s.retrieve_ms.append(int((time.monotonic() - t0) * 1000))
                 tg = time.monotonic()
-                resp = await generate_sql(question=q.question, engine=engine,
-                                          retriever=retriever, llm=llm, options=options)
+                resp = await asyncio.wait_for(
+                    generate_sql(question=q.question, engine=engine,
+                                 retriever=retriever, llm=llm, options=options),
+                    timeout=90,
+                )
                 s.gen_ms.append(int((time.monotonic() - tg) * 1000))
                 u = resp.usage
                 s.prompt_tok.append(getattr(u, "prompt_tokens", 0))
                 s.completion_tok.append(getattr(u, "completion_tokens", 0))
                 s.cost.append(getattr(u, "estimated_cost_usd", 0.0))
                 s.llm_calls.append(getattr(u, "llm_calls", 0))
-                te = time.monotonic()
-                got_rows = engine.execute(resp.sql, ExecuteOptions(max_rows=1000)).rows
-                s.execute_ms.append(int((time.monotonic() - te) * 1000))
-                if compare(q.compare_mode, got_rows, ref_rows):
-                    s.passes += 1
+                s.sqls.append(resp.sql)
+                if sql_only:
+                    binds = bool(getattr(engine.explain(resp.sql), "ok", False))
+                    joins_ok = join_predicates_are_declared(resp.sql, edges, dialect=dialect)[0]
+                    s.binds.append(binds)
+                    s.joins_ok.append(joins_ok)
+                    if binds and joins_ok:
+                        s.passes += 1
+                else:
+                    with sa_engine.connect() as c:
+                        ref_rows = c.exec_driver_sql(q.reference_sql).fetchall()
+                    te = time.monotonic()
+                    got_rows = engine.execute(resp.sql, ExecuteOptions(max_rows=1000, deadline_ms=12_000)).rows
+                    s.execute_ms.append(int((time.monotonic() - te) * 1000))
+                    if compare(q.compare_mode, got_rows, ref_rows):
+                        s.passes += 1
             except (GenerationError, Exception):  # noqa: BLE001 - a failed run is a non-pass, not fatal
                 pass
         stats.append(s)
     engine.dispose()
-    sa_engine.dispose()
+    if sa_engine is not None:
+        sa_engine.dispose()
     return {"model": model, "strict_prompt": strict_prompt, "bundle_dir": bundle_dir, "stats": stats}
 
 
