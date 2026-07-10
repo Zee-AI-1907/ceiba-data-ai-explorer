@@ -568,13 +568,17 @@ def assemble_prompt(
     across questions and the provider's prompt cache prices them at the
     discounted cached-input rate.
 
-    `strict_join_steering` (Task 2, opt-in): appends three imperative
-    preamble lines that forbid inventing join predicates or filters not
-    grounded in the declared JOIN GRAPH / user request. Gated behind a flag
+    `strict_join_steering` (Task 2, opt-in): appends four imperative preamble
+    lines. The FIRST is a completeness obligation — answer the whole question,
+    using every needed table/join/GROUP BY — which deliberately dominates the
+    "don't invent joins" rule so it cannot collapse into "don't join at all"
+    (the observed strong-model under-answer failure). The others forbid
+    inventing join predicates (keeping the anti-Id=Id protection) or filters
+    not grounded in the declared JOIN GRAPH / user request. Gated behind a flag
     (default off) so a benchmark can A/B it against the permissive baseline.
-    The three lines are CONSTANT strings — no question or per-request value
-    is interpolated into them — so they stay inside the always-present
-    preamble and do not break the R2 cache-prefix property above.
+    The four lines are CONSTANT strings — no question or per-request value is
+    interpolated into them — so they stay inside the always-present preamble
+    and do not break the R2 cache-prefix property above.
 
     `exemplars` (Task 9): few-shot exemplars recalled per-question by the
     retriever (BM25 against the question text). Rendered UNCONDITIONALLY in
@@ -607,16 +611,34 @@ def assemble_prompt(
                 # strings only (no per-question interpolation) so they stay in
                 # the always-present prefix and preserve R2 prompt-caching.
                 *([
-                    "JOINS: use ONLY the equality join predicates declared in the JOIN GRAPH section below. "
-                    "Every join in your SQL MUST copy a declared FK edge verbatim (FK-side column = PK-side column), "
-                    "or follow a declared multi-hop path through its bridge table. NEVER invent a join predicate: "
-                    "two columns sharing a NAME do NOT imply a join, and never join Id = Id unless an edge says so. "
-                    "If the tables you need are not linked by a declared edge or path, return fewer tables rather than fabricate a link.",
+                    # 1. COMPLETENESS — load-bearing; must dominate the "don't
+                    #    invent" rule so it can never collapse into "don't join
+                    #    at all" (the observed luna+strict under-answer failure).
+                    "ANSWER THE WHOLE QUESTION. Include every table, join, GROUP BY, and aggregate needed to "
+                    "compute exactly what was asked. If the question asks for something PER or BY an entity "
+                    "(e.g. per hospital, by department, for each patient), you MUST join through to that entity's "
+                    "table and GROUP BY it. Omitting a required join or grouping — for example collapsing a "
+                    "multi-table question into a single-table COUNT — is a WRONG answer, not a safe simplification. "
+                    "Returning fewer tables is NOT a goal; answering completely is.",
+                    # 2. JOINS — declared-only AND use-all-you-need. Keeps the
+                    #    anti-Id=Id protection; removes the "return fewer tables"
+                    #    escape hatch that triggered the collapse.
+                    "USE ONLY DECLARED JOINS, BUT USE ALL THAT YOUR ANSWER NEEDS. Every join predicate in your SQL "
+                    "must copy a declared FK edge from the JOIN GRAPH below verbatim (FK-side column = PK-side column), "
+                    "or follow a declared multi-hop path through its bridge tables — and you must include ALL such "
+                    "joins the answer requires, traversing the full path end to end. NEVER invent a predicate: two "
+                    "columns sharing a NAME do not imply a join, and never join Id = Id unless an edge declares "
+                    "exactly that. The declared edges are always sufficient to connect the tables you need; if a "
+                    "path is long, follow every hop rather than stopping short or dropping a table.",
+                    # 3. FILTERS — unchanged from the prior wording (never implicated).
                     "FILTERS: add a WHERE condition ONLY if the user's request asks for it, or if it is a soft-delete "
                     "rule explicitly rendered on a table below. Add NO other filter (e.g. IsActive, a status, a default "
                     "date window) the user did not request — an unrequested filter silently drops rows.",
-                    "Before writing SQL, trace the join path in the JOIN GRAPH below: list the tables you need, then "
-                    "connect them using only the declared edges/paths. Prefer PK/FK equality joins.",
+                    # 4. TRACE — reworked: drops "prefer fewer" minimization,
+                    #    keeps "prefer equality joins" (a how-to-join rule).
+                    "Before writing SQL, trace the FULL path in the JOIN GRAPH below: list every table your answer "
+                    "needs, connect them using only the declared edges/paths (all hops, no shortcuts), then add the "
+                    "required GROUP BY and aggregates. Prefer PK/FK equality joins over any other way of relating tables.",
                 ] if strict_join_steering else []),
                 *_dialect_note(dialect),
                 "Respond with the SQL only.",

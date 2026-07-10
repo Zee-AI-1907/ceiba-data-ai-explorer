@@ -279,7 +279,13 @@ def test_assemble_repair_prompt_strict_join_steering_lines_present_only_when_ena
 
     off = _build(False)  # default-off path
     on = _build(True)
-    for needle in ("use ONLY the equality join predicates", "add a WHERE condition ONLY if", "trace the join path"):
+    for needle in (
+        "ANSWER THE WHOLE QUESTION",
+        "USE ONLY DECLARED JOINS, BUT USE ALL",
+        "never join Id = Id unless an edge declares",
+        "add a WHERE condition ONLY if",
+        "trace the FULL path",
+    ):
         assert needle not in off
         assert needle in on
 
@@ -295,7 +301,13 @@ def test_preamble_includes_distinct_fanout_rule():
 def test_strict_join_steering_lines_present_only_when_enabled():
     off = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb")
     on = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb", strict_join_steering=True)
-    for needle in ("use ONLY the equality join predicates", "add a WHERE condition ONLY if", "trace the join path"):
+    for needle in (
+        "ANSWER THE WHOLE QUESTION",
+        "USE ONLY DECLARED JOINS, BUT USE ALL",
+        "never join Id = Id unless an edge declares",
+        "add a WHERE condition ONLY if",
+        "trace the FULL path",
+    ):
         assert needle not in off
         assert needle in on
     # R2 cache-prefix property: the added lines are constant (no per-question
@@ -304,6 +316,21 @@ def test_strict_join_steering_lines_present_only_when_enabled():
     on_a = assemble_prompt([_measurements_table()], [], "question alpha", CAPS, "duckdb", strict_join_steering=True)
     on_b = assemble_prompt([_measurements_table()], [], "question beta", CAPS, "duckdb", strict_join_steering=True)
     assert on_a.split("question alpha")[0] == on_b.split("question beta")[0]
+
+
+def test_strict_join_steering_forbids_undeclared_but_requires_all_needed_joins():
+    # The "don't collapse" invariant: the strict block must carry BOTH the
+    # completeness obligation (so "don't invent joins" cannot degrade into
+    # "don't join at all") AND the anti-Id=Id protection (so cheap models still
+    # don't fabricate joins). Neither may be dropped without the other.
+    on = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb", strict_join_steering=True)
+    # completeness obligation names under-answering as WRONG
+    assert "is a WRONG answer, not a safe simplification" in on
+    assert "Returning fewer tables is NOT a goal" in on
+    # anti-fabrication protection retained
+    assert "never join Id = Id unless an edge declares" in on
+    # the old collapse-triggering escape hatch is GONE
+    assert "return fewer tables rather than fabricate a link" not in on
 
 
 # ── cardinality-guard remediation: multi-hop chain clarity + dialect note ──
