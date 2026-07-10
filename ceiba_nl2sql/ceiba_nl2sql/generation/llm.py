@@ -33,6 +33,7 @@ only via `__cause__` for server-side logging.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Protocol
@@ -175,6 +176,89 @@ async def call_llm(llm: LlmClient, prompt: str, egress_class: LlmEgressClass) ->
         if not decision.allowed:
             raise EgressBlockedError(decision.message)
     return await llm.complete(prompt)
+
+
+DEFAULT_MAX_TOOL_ROUNDS = 3
+
+
+async def call_llm_with_tools(
+    llm,
+    messages: list[dict],
+    *,
+    tools: list[dict],
+    handlers: dict,
+    egress_class: LlmEgressClass,
+    max_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
+    response_format=None,
+) -> LlmCompletion:
+    """Tool-calling choke point (P1). Loops `complete_messages` up to `max_rounds`
+    times: each round it enforces the egress gate BEFORE the outbound call (every
+    round, not just the first), sends the growing message list, dispatches any
+    requested tool_calls to `handlers[name](parsed_args)`, and appends the
+    assistant tool-call message + one `role=tool` result per call. Returns a
+    collapsed LlmCompletion whose `usage` is the SUM across every round, so the
+    pipeline meters the whole exchange. When the model stops calling tools it
+    returns that final turn's text; if `max_rounds` is exhausted it returns the
+    text gathered so far (the caller then proceeds to its generation turn).
+
+    Handlers must be pure/deterministic and their results are LLM egress too —
+    for the join-subgraph tool they are schema-only, so `egress_class` stays
+    'schema-metadata'; the gate still runs each round regardless.
+    """
+    conversation = list(messages)
+    total_usage = TokenUsage()
+    last_model = ""
+    last_text = ""
+    result_cache: dict[tuple[str, str], str] = {}
+    for _round in range(max_rounds):
+        if egress_class == "patient-derived":
+            decision = assert_egress_allowed()
+            if not decision.allowed:
+                raise EgressBlockedError(decision.message)
+        turn = await llm.complete_messages(
+            conversation, tools=tools, tool_choice="auto", response_format=response_format
+        )
+        if turn.usage is not None:
+            total_usage = total_usage + turn.usage
+        last_model = turn.model or last_model
+        last_text = turn.text or last_text
+        # A length-truncated turn that produced no tool call is a stall: the
+        # model ran out of budget mid-reasoning. Fail loud rather than loop.
+        if turn.finish_reason == "length" and not turn.tool_calls:
+            raise LlmUpstreamError(
+                "The planning turn was truncated (finish_reason=length) before completing a tool call."
+            )
+        if not turn.tool_calls:
+            return LlmCompletion(text=turn.text or "", usage=total_usage, model=last_model)
+        conversation.append(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}}
+                    for tc in turn.tool_calls
+                ],
+            }
+        )
+        for tool_call in turn.tool_calls:
+            try:
+                arguments = json.loads(tool_call.arguments) if tool_call.arguments else {}
+            except json.JSONDecodeError:
+                arguments = {}
+            # Duplicate-call short-circuit: a model that re-requests the same
+            # tool with the same args gets the cached result without re-running
+            # the handler (deterministic anyway) — bounds cost/latency.
+            cache_key = (tool_call.name, json.dumps(arguments, sort_keys=True, default=str))
+            if cache_key in result_cache:
+                result = result_cache[cache_key]
+            else:
+                handler = handlers.get(tool_call.name)
+                result = handler(arguments) if handler else f"unknown tool: {tool_call.name}"
+                result_cache[cache_key] = result
+            conversation.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+    # max_rounds exhausted while the model kept calling tools: stop and return
+    # what was gathered; the pipeline proceeds to generation with the captured
+    # subgraph rather than looping unbounded.
+    return LlmCompletion(text=last_text, usage=total_usage, model=last_model)
 
 
 # ── stub / recorded implementations (hermetic tests) ─────────────────────────

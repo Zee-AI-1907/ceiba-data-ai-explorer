@@ -215,3 +215,130 @@ async def test_stub_scripts_tool_call_turn():
     stub = StubLlmClient([], turns=[scripted])
     turn = await stub.complete_messages([{"role": "user", "content": "q"}])
     assert turn.tool_calls[0].name == "get_join_subgraph"
+
+
+# ── P1 T3: call_llm_with_tools egress choke point ─────────────────────────────
+
+
+def _usage(p):
+    from ceiba_nl2sql.generation.llm import TokenUsage
+    return TokenUsage(prompt_tokens=p, completion_tokens=1, total_tokens=p + 1)
+
+
+def _tool_turn(call_id, name, arguments, *, usage=None):
+    return LlmTurn(
+        text=None, tool_calls=[ToolCall(id=call_id, name=name, arguments=arguments)],
+        finish_reason="tool_calls", usage=usage, model="stub",
+    )
+
+
+def _final_turn(text, *, usage=None):
+    return LlmTurn(text=text, tool_calls=[], finish_reason="stop", usage=usage, model="stub")
+
+
+async def test_call_llm_with_tools_dispatches_handler_and_loops():
+    from ceiba_nl2sql.generation.llm import call_llm_with_tools
+
+    stub = StubLlmClient([], turns=[
+        _tool_turn("c1", "get_join_subgraph", '{"tables": ["Patients"]}'),
+        _final_turn('{"sql": "SELECT 1"}'),
+    ])
+    dispatched = []
+
+    def handler(args):
+        dispatched.append(args)
+        return "RENDERED SUBGRAPH"
+
+    completion = await call_llm_with_tools(
+        stub, [{"role": "user", "content": "q"}], tools=[{"type": "function"}],
+        handlers={"get_join_subgraph": handler}, egress_class="schema-metadata",
+    )
+    assert completion.text == '{"sql": "SELECT 1"}'
+    assert dispatched == [{"tables": ["Patients"]}]
+    # the tool result was appended as a role=tool message before the final turn
+    tool_messages = [m for batch in stub.message_batches for m in batch if m.get("role") == "tool"]
+    assert any(m["content"] == "RENDERED SUBGRAPH" and m["tool_call_id"] == "c1" for m in tool_messages)
+
+
+async def test_call_llm_with_tools_asserts_egress_every_round(monkeypatch):
+    from ceiba_nl2sql.generation.llm import call_llm_with_tools, EgressBlockedError
+
+    gate_calls = {"n": 0}
+
+    def fake_gate():
+        gate_calls["n"] += 1
+        return SimpleNamespace(allowed=(gate_calls["n"] == 1), message="egress blocked")
+
+    monkeypatch.setattr("ceiba_nl2sql.generation.llm.assert_egress_allowed", fake_gate)
+
+    stub = StubLlmClient([], turns=[_tool_turn("c1", "get_join_subgraph", "{}")])
+    with pytest.raises(EgressBlockedError):
+        await call_llm_with_tools(
+            stub, [{"role": "user", "content": "q"}], tools=[{"type": "function"}],
+            handlers={"get_join_subgraph": lambda a: "x"}, egress_class="patient-derived",
+        )
+    # gated on round 1 (allowed) AND round 2 (blocked) — not just the first
+    assert gate_calls["n"] == 2
+
+
+async def test_call_llm_with_tools_sums_usage_across_rounds():
+    from ceiba_nl2sql.generation.llm import call_llm_with_tools
+
+    stub = StubLlmClient([], turns=[
+        _tool_turn("c1", "get_join_subgraph", "{}", usage=_usage(10)),
+        _final_turn("done", usage=_usage(20)),
+    ])
+    completion = await call_llm_with_tools(
+        stub, [{"role": "user", "content": "q"}], tools=[{"type": "function"}],
+        handlers={"get_join_subgraph": lambda a: "x"}, egress_class="schema-metadata",
+    )
+    assert completion.usage.prompt_tokens == 30  # 10 + 20 across both rounds
+
+
+# ── P1 T4: loop bounding ──────────────────────────────────────────────────────
+
+
+async def test_tool_loop_stops_at_max_rounds():
+    from ceiba_nl2sql.generation.llm import call_llm_with_tools
+
+    # Model keeps calling tools forever; the loop must terminate at max_rounds.
+    stub = StubLlmClient([], turns=[_tool_turn(f"c{i}", "get_join_subgraph", '{"tables": ["T%d"]}' % i) for i in range(10)])
+    completion = await call_llm_with_tools(
+        stub, [{"role": "user", "content": "q"}], tools=[{"type": "function"}],
+        handlers={"get_join_subgraph": lambda a: "x"}, egress_class="schema-metadata", max_rounds=2,
+    )
+    assert completion is not None
+    assert len(stub.message_batches) == 2  # exactly max_rounds outbound turns
+
+
+async def test_tool_loop_duplicate_call_short_circuits():
+    from ceiba_nl2sql.generation.llm import call_llm_with_tools
+
+    stub = StubLlmClient([], turns=[
+        _tool_turn("c1", "get_join_subgraph", '{"tables": ["Patients"]}'),
+        _tool_turn("c2", "get_join_subgraph", '{"tables": ["Patients"]}'),  # identical args
+        _final_turn("done"),
+    ])
+    invocations = []
+
+    def handler(args):
+        invocations.append(args)
+        return "SUBGRAPH"
+
+    await call_llm_with_tools(
+        stub, [{"role": "user", "content": "q"}], tools=[{"type": "function"}],
+        handlers={"get_join_subgraph": handler}, egress_class="schema-metadata",
+    )
+    assert len(invocations) == 1  # second identical call served from cache
+
+
+async def test_tool_loop_length_finish_reason_fails_loud():
+    from ceiba_nl2sql.generation.llm import call_llm_with_tools, LlmUpstreamError
+
+    truncated = LlmTurn(text="partial", tool_calls=[], finish_reason="length", usage=None, model="stub")
+    stub = StubLlmClient([], turns=[truncated])
+    with pytest.raises(LlmUpstreamError):
+        await call_llm_with_tools(
+            stub, [{"role": "user", "content": "q"}], tools=[{"type": "function"}],
+            handlers={"get_join_subgraph": lambda a: "x"}, egress_class="schema-metadata",
+        )
