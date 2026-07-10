@@ -81,7 +81,7 @@ and embeds them. New module `prep/prep/enrich/exemplar_gen.py`; CLI flag
 
 ```yaml
 generation:
-  model: gpt-5.4              # CAPABLE model for one-time generation (configurable)
+  model: gpt-5.6-terra       # CAPABLE model for one-time generation (configurable; confirmed callable)
   perCategoryCount: 3        # target VALID exemplars per category
   maxAttemptsPerExemplar: 3  # regenerate on validation failure, up to this
   sampleRows: 5              # rows in the scrubbed data sample
@@ -210,7 +210,8 @@ the new luna entry), repair rounds.
 ### Pricing addition
 
 Add to `DEFAULT_MODEL_PRICES` (`pricing.py`), verified with the user 2026-07:
-`"gpt-5.6-luna": {"input": 1.00, "cached_input": 0.10, "output": 6.00}`.
+- `"gpt-5.6-luna":  {"input": 1.00, "cached_input": 0.10, "output": 6.00}` (runtime axis)
+- `"gpt-5.6-terra": {"input": 2.50, "cached_input": 0.25, "output": 15.00}` (one-time generation model — so its build cost is metered)
 
 ## Testing
 
