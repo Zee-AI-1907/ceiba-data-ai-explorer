@@ -262,6 +262,23 @@ class TestJoinSubgraphToolPhase:
             retriever.dispose()
 
 
+class TestDefaultTimeWindow:
+    async def test_named_window_hint_reaches_repair_prompt_without_injection(self, engine):
+        retriever = _build_retriever()
+        try:
+            llm = StubLlmClient([UNBOUNDED_HEART_RATE_SQL, GOOD_HEART_RATE_SQL])
+            options = GenerateOptions(default_time_window="24 hours")
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+            )
+            assert response.repair is not None  # unbounded first draft rejected
+            assert "24 hours" in llm.prompts[1]  # the named window reached the repair prompt
+            # the guard did not inject the window itself — the model's repair supplies it
+            assert response.sql
+        finally:
+            retriever.dispose()
+
+
 class TestSelfRepairLoop:
     async def test_recovers_unbounded_first_draft_records_repair_rounds(self, engine):
         retriever = _build_retriever()

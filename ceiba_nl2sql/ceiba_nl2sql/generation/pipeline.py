@@ -205,6 +205,11 @@ class GenerateOptions:
     # byte-identical. max_tool_rounds bounds the plan loop.
     get_join_subgraph_tool: bool = False
     max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS
+    # P2 Task 4 (opt-in, clinical): when set (e.g. "24 hours"), an unbounded
+    # large-table query is REJECTED with a hint naming this window so the model
+    # writes it explicitly — the guard never injects it silently. Off => today's
+    # behavior (reject with a generic hint; the model must supply the bound).
+    default_time_window: str | None = None
 
 
 def extract_sql(raw: str) -> tuple[str, str]:
@@ -267,6 +272,7 @@ def _validate_candidate(
     source_dsn: str | None = None,
     pg_explain_runner: ExplainRunner | None = None,
     enforce_default_limit: bool = True,
+    default_time_window: str | None = None,
 ) -> tuple[bool, str | None, _AttemptFailure | None]:
     """Runs the guard_sql -> cardinality_guard -> EXPLAIN-estimate -> explain
     chain on one candidate SQL. Returns `(ok, accepted_sql, failure)`. Mirrors
@@ -321,7 +327,9 @@ def _validate_candidate(
         }
         for t in context.tables
     ]
-    card_verdict = cardinality_guard_from_context(candidate_sql, tables_as_dicts, default_limit, dialect=dialect)
+    card_verdict = cardinality_guard_from_context(
+        candidate_sql, tables_as_dicts, default_limit, dialect=dialect, default_time_window=default_time_window
+    )
     sql_for_explain = candidate_sql
     if card_verdict.action == "reject":
         return (
@@ -639,6 +647,7 @@ async def generate_sql(
         source_dsn=options.source_dsn,
         pg_explain_runner=options.pg_explain_runner,
         enforce_default_limit=options.enforce_default_limit,
+        default_time_window=options.default_time_window,
     )
 
     while not ok and rounds < max_repair_rounds:
@@ -696,6 +705,7 @@ async def generate_sql(
             source_dsn=options.source_dsn,
             pg_explain_runner=options.pg_explain_runner,
             enforce_default_limit=options.enforce_default_limit,
+            default_time_window=options.default_time_window,
         )
 
     if not ok:

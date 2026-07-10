@@ -65,6 +65,29 @@ def test_grouped_bounded_large_table_with_order_by_repairs_limit():
     assert "LIMIT 500" in verdict.repaired_sql
 
 
+def test_default_time_window_unset_rejects_with_generic_hint():
+    # Unbounded large table, no default window configured -> today's behavior:
+    # a plain reject whose hint does NOT name a specific window.
+    sql = 'SELECT * FROM "MeasurementsMock"'
+    verdict = cardinality_guard(sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN)
+    assert verdict.action == "reject"
+    assert "24 hours" not in (verdict.repair_hint or "")
+
+
+def test_default_time_window_set_rejects_with_named_window_hint_and_never_injects():
+    # With a default window configured, the reject HINT names it so the MODEL
+    # writes it explicitly — the guard NEVER mutates the SQL (no repaired_sql),
+    # so the clinical semantics change is always visible/auditable.
+    sql = 'SELECT * FROM "MeasurementsMock"'
+    verdict = cardinality_guard(
+        sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN,
+        default_time_window="24 hours",
+    )
+    assert verdict.action == "reject"
+    assert verdict.repaired_sql is None  # never silently injects a window
+    assert "24 hours" in (verdict.repair_hint or "")
+
+
 def test_reject_when_wholly_unbounded_no_time_predicate_at_all():
     sql = 'SELECT * FROM "MeasurementsMock" WHERE "Value" > 120'
     verdict = cardinality_guard(sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN)

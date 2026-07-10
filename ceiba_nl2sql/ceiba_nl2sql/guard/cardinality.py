@@ -441,6 +441,7 @@ def cardinality_guard(
     required_time_column_by_table: dict[str, str],
     default_limit: int = 1000,
     dialect: str | None = None,
+    default_time_window: str | None = None,
 ) -> CardinalityVerdict:
     """Checks a candidate SQL statement against the large-table bounding
     policy and either passes it, repairs it (LIMIT-only gap), or rejects it
@@ -510,6 +511,16 @@ def cardinality_guard(
         hints = " ".join(
             _repair_hint_for(t, required_time_column_by_table.get(t.table_name)) for t in unbounded_tables
         )
+        # Task 4 (default-time-window): when configured, NAME a fallback window in
+        # the hint so the model writes it EXPLICITLY. The guard never mutates the
+        # AST — it only ever rejects — so an unrequested clinical window can never
+        # be applied silently (it must appear in the model's repaired SQL).
+        if default_time_window:
+            hints += (
+                f" If the user gave no time range, a default window of {default_time_window} is acceptable — "
+                f"add it EXPLICITLY to the SQL (e.g. a WHERE predicate like the time column "
+                f">= now() - INTERVAL '{default_time_window}'); it will NOT be added for you."
+            )
         return CardinalityVerdict(
             ok=False,
             action="reject",
@@ -674,7 +685,12 @@ def build_cardinality_guard_options(
 
 
 def cardinality_guard_from_context(
-    sql: str, tables: list[dict], default_limit: int = 1000, *, dialect: str | None = None
+    sql: str,
+    tables: list[dict],
+    default_limit: int = 1000,
+    *,
+    dialect: str | None = None,
+    default_time_window: str | None = None,
 ) -> CardinalityVerdict:
     """The SPEC §5.4 signature `cardinalityGuard(sql, ctx)`. Thin adapter
     that derives the policy from the retrieved SchemaContext's tables and
@@ -688,4 +704,5 @@ def cardinality_guard_from_context(
         required_time_column_by_table=required_time_column_by_table,
         default_limit=default_limit,
         dialect=dialect,
+        default_time_window=default_time_window,
     )
