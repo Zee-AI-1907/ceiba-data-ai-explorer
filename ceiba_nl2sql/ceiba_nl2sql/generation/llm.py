@@ -122,6 +122,32 @@ class LlmCompletion:
     model: str
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    """One tool call the model requested on a turn: the provider's call id, the
+    tool name, and the raw (unparsed) JSON arguments string.
+    """
+
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class LlmTurn:
+    """One turn of a tool-calling exchange (P1). Unlike LlmCompletion (which is
+    always a final text answer), a turn may instead carry `tool_calls` with
+    `text=None` — the model asking to run a tool before answering. `finish_reason`
+    lets the loop detect a `length`-truncated stall.
+    """
+
+    text: str | None
+    tool_calls: list[ToolCall]
+    finish_reason: str
+    usage: TokenUsage | None
+    model: str
+
+
 class LlmClient(Protocol):
     """The ONLY seam to a driving LLM. `complete(prompt) -> LlmCompletion`."""
 
@@ -182,10 +208,16 @@ class StubLlmClient:
     tests; override via `model=`.
     """
 
-    def __init__(self, completions: list[str], *, model: str = DEFAULT_LLM_MODEL) -> None:
+    def __init__(
+        self, completions: list[str], *, model: str = DEFAULT_LLM_MODEL, turns: list["LlmTurn"] | None = None
+    ) -> None:
         self._queue = list(completions)
         self._model = model
         self.prompts: list[str] = []
+        # P1: scripted tool-call turns for hermetic tool-loop tests, popped by
+        # complete_messages in order. Left None for the common single-shot case.
+        self._turns = list(turns) if turns is not None else None
+        self.message_batches: list[list[dict]] = []
 
     async def complete(self, prompt: str) -> LlmCompletion:
         self.prompts.append(prompt)
@@ -193,6 +225,20 @@ class StubLlmClient:
             raise RuntimeError("StubLlmClient: no more queued completions")
         text = self._queue.pop(0)
         return LlmCompletion(text=text, usage=_synthetic_usage(prompt, text), model=self._model)
+
+    async def complete_messages(
+        self, messages: list[dict], *, tools=None, tool_choice: str = "auto", response_format=None
+    ) -> "LlmTurn":
+        self.message_batches.append(messages)
+        if self._turns:
+            return self._turns.pop(0)
+        # No scripted turns left: emit a final content turn from the string
+        # queue so a stub configured only with `completions` still terminates a
+        # tool loop after its tool turns are exhausted.
+        if not self._queue:
+            raise RuntimeError("StubLlmClient: no more queued turns or completions")
+        text = self._queue.pop(0)
+        return LlmTurn(text=text, tool_calls=[], finish_reason="stop", usage=_synthetic_usage("", text), model=self._model)
 
 
 class RecordedLlmClient:
@@ -312,21 +358,80 @@ class OpenAiLlmClient:
         if not content:
             raise LlmUpstreamError("The driving language model returned an empty completion.")
 
+        usage = self._extract_usage(response)
+        # OpenAI echoes the resolved model (e.g. a dated snapshot) — record it
+        # verbatim so cost pricing + audit reflect exactly what ran.
+        resolved_model = getattr(response, "model", None) or self._model
+        return LlmCompletion(text=content, usage=usage, model=resolved_model)
+
+    @staticmethod
+    def _extract_usage(response) -> TokenUsage:
+        """Maps an OpenAI response's `usage` object to TokenUsage. Shared by
+        complete() and complete_messages(). prompt_tokens_details.cached_tokens
+        is the discounted cache-hit portion; absent on older models/SDKs -> 0.
+        """
         usage_obj = getattr(response, "usage", None)
-        # prompt_tokens_details.cached_tokens = the prompt-prefix cache-hit
-        # portion, billed at the discounted cached-input rate. Absent on older
-        # models/SDKs -> 0.
         prompt_details = getattr(usage_obj, "prompt_tokens_details", None)
-        usage = TokenUsage(
+        return TokenUsage(
             prompt_tokens=getattr(usage_obj, "prompt_tokens", 0) or 0,
             completion_tokens=getattr(usage_obj, "completion_tokens", 0) or 0,
             total_tokens=getattr(usage_obj, "total_tokens", 0) or 0,
             cached_prompt_tokens=getattr(prompt_details, "cached_tokens", 0) or 0,
         )
-        # OpenAI echoes the resolved model (e.g. a dated snapshot) — record it
-        # verbatim so cost pricing + audit reflect exactly what ran.
-        resolved_model = getattr(response, "model", None) or self._model
-        return LlmCompletion(text=content, usage=usage, model=resolved_model)
+
+    def _build_tool_params(self, messages: list[dict], tools, tool_choice: str, response_format) -> dict:
+        """Param builder for the tool path — the model-family branch mirrors
+        _build_params but attaches tools/tool_choice and response_format only
+        when passed (planning turns omit response_format; the final generation
+        turn attaches it). Deliberately separate from _build_params so the tool
+        path never inherits the R3 structured-output fallback.
+        """
+        params: dict = {"model": self._model, "messages": messages}
+        model_id = self._model.lower()
+        if model_id.startswith(("gpt-5", "o1", "o3", "o4")):
+            params["max_completion_tokens"] = LLM_MAX_COMPLETION_TOKENS_REASONING
+        else:
+            params["max_tokens"] = LLM_MAX_TOKENS
+            params["temperature"] = LLM_TEMPERATURE
+        if tools is not None:
+            params["tools"] = tools
+            params["tool_choice"] = tool_choice
+        if response_format is not None:
+            params["response_format"] = response_format
+        return params
+
+    async def complete_messages(
+        self, messages: list[dict], *, tools=None, tool_choice: str = "auto", response_format=None
+    ) -> LlmTurn:
+        """Tool-enabled turn (P1). Sends a full message list (+ optional tools),
+        reads tool_calls FIRST so a null-content tool turn is valid, and returns
+        an LlmTurn. Deliberately does NOT reuse complete()/_build_params: the R3
+        response_format-substring fallback there would misfire on a tools-related
+        400, and complete()'s empty-content guard would raise on every tool turn.
+        """
+        params = self._build_tool_params(messages, tools, tool_choice, response_format)
+        try:
+            response = await self._client.chat.completions.create(**params)
+        except Exception as exc:  # noqa: BLE001 - scrub any SDK error before surfacing
+            logger.error("OpenAI tool-call completion failed: %s", exc)
+            raise LlmUpstreamError("The driving language model is temporarily unavailable.") from exc
+
+        choice = response.choices[0] if response.choices else None
+        message = getattr(choice, "message", None) if choice else None
+        raw_tool_calls = getattr(message, "tool_calls", None) or []
+        tool_calls = [
+            ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments) for tc in raw_tool_calls
+        ]
+        content = getattr(message, "content", None) if message else None
+        if not tool_calls and not content:
+            raise LlmUpstreamError("The driving language model returned an empty completion.")
+        return LlmTurn(
+            text=content,
+            tool_calls=tool_calls,
+            finish_reason=getattr(choice, "finish_reason", "") or "",
+            usage=self._extract_usage(response),
+            model=getattr(response, "model", None) or self._model,
+        )
 
 
 def build_llm_client(

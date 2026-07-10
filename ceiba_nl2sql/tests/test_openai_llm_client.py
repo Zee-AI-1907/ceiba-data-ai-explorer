@@ -13,8 +13,11 @@ from ceiba_nl2sql.generation.llm import (
     LLM_MAX_COMPLETION_TOKENS_REASONING,
     LLM_MAX_TOKENS,
     SQL_GENERATION_RESPONSE_FORMAT,
+    LlmTurn,
     LlmUpstreamError,
     OpenAiLlmClient,
+    StubLlmClient,
+    ToolCall,
 )
 
 
@@ -120,3 +123,95 @@ async def test_build_llm_client_threads_structured_output_flag():
         client._client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
         await client.complete("prompt")
         assert ("response_format" in fake.calls[0]) is expect
+
+
+# ── P1 T2: tool-enabled surface (complete_messages / ToolCall / LlmTurn) ──────
+
+
+def _tc(call_id: str, name: str, arguments: str):
+    return SimpleNamespace(id=call_id, type="function", function=SimpleNamespace(name=name, arguments=arguments))
+
+
+def _turn_response(*, content=None, tool_calls=None, finish_reason="stop", model="gpt-5.4-mini"):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=tool_calls), finish_reason=finish_reason)],
+        usage=SimpleNamespace(
+            prompt_tokens=10, completion_tokens=5, total_tokens=15,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=2),
+        ),
+        model=model,
+    )
+
+
+async def test_complete_messages_tool_call_turn_null_content_ok():
+    # A tool-call turn has content=None + populated tool_calls; must NOT raise.
+    fake = _FakeCompletions(responses=[
+        _turn_response(tool_calls=[_tc("c1", "get_join_subgraph", '{"tables": ["Patients"]}')], finish_reason="tool_calls")
+    ])
+    client = _client_with(fake, model="gpt-5.4-mini")
+    turn = await client.complete_messages([{"role": "user", "content": "q"}], tools=[{"type": "function"}])
+    assert isinstance(turn, LlmTurn)
+    assert turn.text is None
+    assert turn.tool_calls == [ToolCall(id="c1", name="get_join_subgraph", arguments='{"tables": ["Patients"]}')]
+    assert turn.finish_reason == "tool_calls"
+    assert turn.usage.prompt_tokens == 10 and turn.usage.cached_prompt_tokens == 2
+
+
+async def test_complete_messages_final_content_turn():
+    fake = _FakeCompletions(responses=[_turn_response(content='{"sql": "SELECT 1"}', finish_reason="stop")])
+    client = _client_with(fake, model="gpt-5.4-mini")
+    turn = await client.complete_messages([{"role": "user", "content": "q"}])
+    assert turn.text == '{"sql": "SELECT 1"}'
+    assert turn.tool_calls == []
+
+
+async def test_complete_messages_empty_raises_only_when_no_tools_and_no_content():
+    fake = _FakeCompletions(responses=[_turn_response(content=None, tool_calls=None)])
+    client = _client_with(fake, model="gpt-5.4-mini")
+    with pytest.raises(LlmUpstreamError):
+        await client.complete_messages([{"role": "user", "content": "q"}])
+
+
+async def test_build_tool_params_reasoning_model_omits_temperature_and_response_format():
+    client = _client_with(_FakeCompletions(), model="gpt-5.4-mini")
+    params = client._build_tool_params(
+        [{"role": "user", "content": "q"}], tools=[{"type": "function"}], tool_choice="auto", response_format=None
+    )
+    assert params["max_completion_tokens"] == LLM_MAX_COMPLETION_TOKENS_REASONING
+    assert "temperature" not in params
+    assert params["tools"] == [{"type": "function"}]
+    assert params["tool_choice"] == "auto"
+    assert "response_format" not in params  # omitted on a planning turn
+
+
+async def test_build_tool_params_non_reasoning_model_uses_max_tokens_and_attaches_response_format():
+    client = _client_with(_FakeCompletions(), model="gpt-4o-mini")
+    params = client._build_tool_params(
+        [{"role": "user", "content": "q"}], tools=None, tool_choice="auto", response_format=SQL_GENERATION_RESPONSE_FORMAT
+    )
+    assert params["max_tokens"] == LLM_MAX_TOKENS
+    assert "temperature" in params
+    assert "tools" not in params  # omitted when None
+    assert params["response_format"] == SQL_GENERATION_RESPONSE_FORMAT
+
+
+async def test_complete_single_shot_path_unaffected_by_tool_additions():
+    # The existing complete() path must still work unchanged.
+    fake = _FakeCompletions()
+    client = _client_with(fake, model="gpt-4o-mini")
+    completion = await client.complete("prompt")
+    assert completion.text
+    assert fake.calls[0]["response_format"] == SQL_GENERATION_RESPONSE_FORMAT
+
+
+async def test_stub_scripts_tool_call_turn():
+    scripted = LlmTurn(
+        text=None,
+        tool_calls=[ToolCall(id="c1", name="get_join_subgraph", arguments='{"tables": []}')],
+        finish_reason="tool_calls",
+        usage=None,
+        model="stub",
+    )
+    stub = StubLlmClient([], turns=[scripted])
+    turn = await stub.complete_messages([{"role": "user", "content": "q"}])
+    assert turn.tool_calls[0].name == "get_join_subgraph"
