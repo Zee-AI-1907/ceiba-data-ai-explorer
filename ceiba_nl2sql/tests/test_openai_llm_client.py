@@ -195,6 +195,33 @@ async def test_build_tool_params_non_reasoning_model_uses_max_tokens_and_attache
     assert params["response_format"] == SQL_GENERATION_RESPONSE_FORMAT
 
 
+async def test_build_tool_params_reasoning_model_sets_effort_none_with_tools():
+    # gpt-5.x rejects function tools with a non-none reasoning_effort on
+    # chat.completions; the plan/tool turn is a routing decision -> effort none.
+    client = _client_with(_FakeCompletions(), model="gpt-5.6-luna")
+    params = client._build_tool_params(
+        [{"role": "user", "content": "q"}], tools=[{"type": "function"}], tool_choice="auto", response_format=None
+    )
+    assert params.get("reasoning_effort") == "none"
+
+
+async def test_build_tool_params_reasoning_model_no_effort_override_without_tools():
+    # A generation turn (no tools) must keep full reasoning — no effort override.
+    client = _client_with(_FakeCompletions(), model="gpt-5.6-luna")
+    params = client._build_tool_params(
+        [{"role": "user", "content": "q"}], tools=None, tool_choice="auto", response_format=SQL_GENERATION_RESPONSE_FORMAT
+    )
+    assert "reasoning_effort" not in params
+
+
+async def test_build_tool_params_non_reasoning_model_no_reasoning_effort():
+    client = _client_with(_FakeCompletions(), model="gpt-4o-mini")
+    params = client._build_tool_params(
+        [{"role": "user", "content": "q"}], tools=[{"type": "function"}], tool_choice="auto", response_format=None
+    )
+    assert "reasoning_effort" not in params
+
+
 async def test_complete_single_shot_path_unaffected_by_tool_additions():
     # The existing complete() path must still work unchanged.
     fake = _FakeCompletions()

@@ -472,8 +472,16 @@ class OpenAiLlmClient:
         """
         params: dict = {"model": self._model, "messages": messages}
         model_id = self._model.lower()
-        if model_id.startswith(("gpt-5", "o1", "o3", "o4")):
+        is_reasoning_model = model_id.startswith(("gpt-5", "o1", "o3", "o4"))
+        if is_reasoning_model:
             params["max_completion_tokens"] = LLM_MAX_COMPLETION_TOKENS_REASONING
+            if tools is not None:
+                # gpt-5.x rejects function tools with a non-none reasoning_effort
+                # on chat.completions (e.g. gpt-5.6-luna returns a 400). The plan/
+                # tool turn is a table-selection routing decision that does not
+                # need hidden reasoning, so run it at effort 'none'. Generation
+                # turns (no tools) keep full reasoning.
+                params["reasoning_effort"] = "none"
         else:
             params["max_tokens"] = LLM_MAX_TOKENS
             params["temperature"] = LLM_TEMPERATURE
