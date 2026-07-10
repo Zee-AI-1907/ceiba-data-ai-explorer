@@ -466,6 +466,200 @@ def bridge_expand(
     return bridge_nodes, admitted
 
 
+# ── P1: get_join_subgraph tool helper (pure, deterministic) ──────────────────
+#
+# Unlike bridge_expand (which BFSes each disconnected SURVIVOR pair
+# independently — correct when the retriever also recalled the intermediates),
+# build_join_subgraph receives the MODEL's declared table set, where only the
+# endpoints of a long chain may be named. It therefore builds a CONNECTED
+# subgraph over the whole named set (iterative component merge — no single
+# anchor, so an isolated table cannot fragment the rest), pulling in every
+# bridge table the chain needs, and reports declared tables that don't resolve
+# (unknown) or can't be connected (unreachable) so the model can self-correct
+# rather than silently receiving a disconnected graph. Hop cap defaults to 6
+# (the 14-table staging diameter), NOT bridge_expand's MAX_BRIDGE_HOPS=3, so a
+# 4-5-hop endpoint pair reconnects.
+
+
+@dataclass(frozen=True)
+class JoinSubgraph:
+    resolved_ids: list[str]  # declared tables that resolved, in request order
+    join_hints: list[JoinHint]  # edges among (named UNION bridge) tables
+    join_paths: list[JoinPath]  # multi-hop connectors, one per bridged link
+    bridge_nodes: set[str]  # intermediate tables pulled in to connect the set
+    unknown_tables: list[str]  # raw inputs that resolved to no known table
+    unreachable_pairs: list[tuple[str, str]]  # named tables in separate components
+
+
+def bfs_to_targets(
+    adjacency: JoinAdjacency, start: str, targets: set[str], max_hops: int
+) -> list[tuple[str, str, dict]] | None:
+    """BFS shortest path from `start` to ANY node in `targets` (a growing
+    connected component), <= max_hops edges. Returns the hop list (empty if
+    `start` is already in `targets`), or None if no target is reachable.
+    """
+    if start in targets:
+        return []
+    visited = {start}
+    queue: deque[tuple[str, list[tuple[str, str, dict]]]] = deque([(start, [])])
+    while queue:
+        node, path = queue.popleft()
+        if len(path) >= max_hops:
+            continue
+        for neighbor, edge in adjacency.get(node, []):
+            if neighbor in visited:
+                continue
+            new_path = path + [(node, neighbor, edge)]
+            if neighbor in targets:
+                return new_path
+            visited.add(neighbor)
+            queue.append((neighbor, new_path))
+    return None
+
+
+def _join_hint_from_edge(edge: dict, get_table_ref: Callable[[str], str | None]) -> JoinHint:
+    """Builds a JoinHint from a joingraph edge, preserving the edge's own
+    declared FK-side -> PK-side direction (JOINGRAPH_SURFACING.md §4).
+    """
+    return JoinHint(
+        from_ref=get_table_ref(edge["from"]) or edge["from"],
+        from_columns=edge["fromColumns"],
+        to_ref=get_table_ref(edge["to"]) or edge["to"],
+        to_columns=edge["toColumns"],
+        join_cardinality=edge["joinCardinality"],
+        cross_source=edge["crossSource"],
+    )
+
+
+def _resolve_table_id(
+    raw: str, *, known_table_ids: set[str], bare_index: dict[str, list[str]], ref_index: dict[str, str]
+) -> str | None:
+    """Resolves a model-declared table reference (canonical tableId, quotedRef,
+    or bare name) to a canonical tableId, or None if it does not resolve or is
+    ambiguous (a bare name shared by >1 table).
+    """
+    if raw in known_table_ids:
+        return raw
+    if raw in ref_index:
+        return ref_index[raw]
+    bare = raw.split(".")[-1].strip('"').lower()
+    matches = bare_index.get(bare, [])
+    return matches[0] if len(matches) == 1 else None
+
+
+def build_join_subgraph(
+    requested_tables: list[str],
+    *,
+    adjacency: JoinAdjacency,
+    known_table_ids: set[str],
+    get_table_ref: Callable[[str], str | None],
+    max_hops: int = 6,
+) -> JoinSubgraph:
+    """Given the model's declared table set, return the FK subgraph connecting
+    them: edges among the named tables + the bridge tables/paths needed to make
+    them one connected component, plus explicit unknown/unreachable feedback.
+    Pure and deterministic — no LLM, no bundle instance (the caller passes a
+    `get_table_ref` closure over a LoadedBundle).
+    """
+    bare_index: dict[str, list[str]] = {}
+    ref_index: dict[str, str] = {}
+    for table_id in sorted(known_table_ids):
+        bare_index.setdefault(table_id.split(".")[-1].strip('"').lower(), []).append(table_id)
+        ref = get_table_ref(table_id)
+        if ref:
+            ref_index[ref] = table_id
+
+    resolved_ids: list[str] = []
+    unknown_tables: list[str] = []
+    seen: set[str] = set()
+    for raw in requested_tables:
+        resolved = _resolve_table_id(
+            raw, known_table_ids=known_table_ids, bare_index=bare_index, ref_index=ref_index
+        )
+        if resolved is None:
+            unknown_tables.append(raw)
+        elif resolved not in seen:
+            seen.add(resolved)
+            resolved_ids.append(resolved)
+
+    named_set = set(resolved_ids)
+
+    # Iterative connected-component build: each named table either joins the
+    # component(s) it can reach (merging them, so two components later bridged
+    # by a third table become one) or starts its own. No single anchor, so an
+    # isolated table cannot strand the rest.
+    components: list[dict] = []
+    for table_id in sorted(resolved_ids):
+        reached: list[tuple[dict, list]] = []
+        for component in components:
+            path = bfs_to_targets(adjacency, table_id, component["nodes"], max_hops)
+            if path is not None:
+                reached.append((component, path))
+        if not reached:
+            components.append({"nodes": {table_id}, "hops": [], "named": {table_id}})
+            continue
+        merged: dict = {"nodes": {table_id}, "hops": [], "named": {table_id}}
+        for component, path in reached:
+            merged["nodes"] |= component["nodes"]
+            merged["hops"] += component["hops"]
+            merged["named"] |= component["named"]
+            if path:
+                merged["hops"].append(path)
+                for from_node, to_node, _edge in path:
+                    merged["nodes"].add(from_node)
+                    merged["nodes"].add(to_node)
+        for component, _path in reached:
+            components.remove(component)
+        components.append(merged)
+
+    bridge_nodes: set[str] = set()
+    all_hops: list[list] = []
+    for component in components:
+        bridge_nodes |= component["nodes"] - named_set
+        all_hops += component["hops"]
+
+    # Multi-hop connectors become JoinPaths (1-hop links are direct edges,
+    # already covered by join_hints below). Sorted for deterministic output.
+    all_hops.sort(key=lambda hops: (len(hops), [to_node for _f, to_node, _e in hops]))
+    join_paths: list[JoinPath] = []
+    for hops in all_hops:
+        if len(hops) < 2:
+            continue
+        nodes = [hops[0][0]] + [to_node for _f, to_node, _e in hops]
+        edges = [_join_hint_from_edge(edge, get_table_ref) for _f, _t, edge in hops]
+        join_paths.append(JoinPath(nodes=nodes, edges=edges, hop_count=len(hops)))
+
+    # Tier-1 edges among (named UNION bridges), deduped (adjacency stores each
+    # edge object twice, once per direction — dedupe by identity).
+    scope = named_set | bridge_nodes
+    join_hints: list[JoinHint] = []
+    seen_edges: set[int] = set()
+    for node in sorted(scope):
+        for neighbor, edge in adjacency.get(node, []):
+            if neighbor in scope and id(edge) not in seen_edges:
+                seen_edges.add(id(edge))
+                join_hints.append(_join_hint_from_edge(edge, get_table_ref))
+
+    # A named table in its own component (couldn't reach any other) is
+    # unreachable from the rest — report one representative pair per component
+    # pair so the model can drop a table or reconsider.
+    component_reps = sorted(min(c["named"]) for c in components if c["named"])
+    unreachable_pairs: list[tuple[str, str]] = [
+        (component_reps[i], component_reps[j])
+        for i in range(len(component_reps))
+        for j in range(i + 1, len(component_reps))
+    ]
+
+    return JoinSubgraph(
+        resolved_ids=resolved_ids,
+        join_hints=join_hints,
+        join_paths=join_paths,
+        bridge_nodes=bridge_nodes,
+        unknown_tables=unknown_tables,
+        unreachable_pairs=unreachable_pairs,
+    )
+
+
 class HybridRetriever:
     """The SPEC §4 `Retriever` implementation. Coarse-to-fine: glossary-expand
     -> table recall (hybrid dense+BM25 RRF, importance-biased) -> column
