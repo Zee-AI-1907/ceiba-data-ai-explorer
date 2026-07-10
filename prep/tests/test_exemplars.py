@@ -56,7 +56,17 @@ def test_build_exemplars_json_shape():
     assert "exemplars" in doc
     assert len(doc["exemplars"]) == 2
     for ex in doc["exemplars"]:
-        assert set(ex.keys()) == {"id", "question", "sql", "dialect", "tables", "tags", "validated"}
+        assert set(ex.keys()) == {
+            "id",
+            "question",
+            "sql",
+            "dialect",
+            "tables",
+            "tags",
+            "validated",
+            "sample",
+            "category",
+        }
 
 
 def test_load_additional_exemplars_shape():

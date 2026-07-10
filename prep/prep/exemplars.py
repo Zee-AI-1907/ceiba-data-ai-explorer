@@ -41,6 +41,14 @@ class Exemplar:
     tables: tuple[str, ...]
     tags: tuple[str, ...]
     validated: bool
+    # Task 7 (exemplar-generation orchestrator): a scrubbed sample of the
+    # exemplar SQL's own executed output (already PHI-scrubbed by
+    # `output_scrub.scrub_output_sample`, safe to embed/ship) and the
+    # generation category id it was produced for. Both default so every
+    # existing caller (seed exemplars, the P4 golden-set factory) keeps
+    # constructing `Exemplar` unchanged.
+    sample: tuple[dict, ...] = ()
+    category: str | None = None
 
     def to_json(self) -> dict:
         return {
@@ -51,6 +59,8 @@ class Exemplar:
             "tables": list(self.tables),
             "tags": list(self.tags),
             "validated": self.validated,
+            "sample": list(self.sample),
+            "category": self.category,
         }
 
 
