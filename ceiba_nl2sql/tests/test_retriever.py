@@ -8,6 +8,9 @@ no network, no real fastembed model download.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -66,6 +69,59 @@ def test_render_respects_max_tables_cap(retriever: HybridRetriever):
 def test_exemplars_recalled_for_heart_rate_question(retriever: HybridRetriever):
     ctx = retriever.retrieve("heart rate over 120 in the last 3 hours", RetrieveOptions(token_budget=2500, max_tables=6, exemplar_k=3))
     assert any("heart_rate" in e.id for e in ctx.exemplars)
+
+
+# ── Task 9: Exemplar.sample threading ───────────────────────────────────────
+
+
+def test_recalled_exemplar_sample_defaults_to_empty_when_absent_from_bundle(retriever: HybridRetriever):
+    """The committed fixture bundle's exemplars.json (lib/rag/__tests__/
+    fixtures/bundles/mock-v1/exemplars.json) predates the `sample` field
+    (Task 7's prep-side exemplar generator). Every recalled exemplar must
+    still default to `sample=[]` rather than erroring or being omitted.
+    """
+    ctx = retriever.retrieve(
+        "heart rate over 120 in the last 3 hours", RetrieveOptions(token_budget=2500, max_tables=6, exemplar_k=3)
+    )
+    assert ctx.exemplars  # sanity: something was recalled
+    for exemplar in ctx.exemplars:
+        assert exemplar.sample == []
+
+
+def test_recalled_exemplar_carries_sample_when_present_in_bundle(tmp_path: Path):
+    """A newer bundle (Task 6/7 exemplar generator output) carries a `sample`
+    per exemplar entry — `_recall_exemplars` must thread it onto the
+    recalled `Exemplar.sample` field verbatim.
+    """
+    bundle_dir = tmp_path / "mock-v1-with-sample"
+    shutil.copytree(FIXTURE_BUNDLE_DIR, bundle_dir)
+
+    exemplars_path = bundle_dir / "exemplars.json"
+    exemplars_data = json.loads(exemplars_path.read_text())
+    for entry in exemplars_data["exemplars"]:
+        if entry["id"] == "ex_heart_rate_over_120_last_3h":
+            entry["sample"] = [{"patientRef": 7, "Value": 132.0}]
+    exemplars_path.write_text(json.dumps(exemplars_data))
+
+    # The loader verifies every bundle file's sha256 against manifest.json
+    # (BundleIntegrityError otherwise) — recompute the hash for the edited
+    # exemplars.json so this hand-tampered copy still passes that check.
+    manifest_path = bundle_dir / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text())
+    manifest_data["files"]["exemplars.json"] = hashlib.sha256(exemplars_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest_data))
+
+    r = HybridRetriever(embed_query=_embed_query_factory(), dialect="duckdb", expected_embedding_model_id=TEST_FALLBACK_EMBEDDING_MODEL_ID)
+    r.load(bundle_dir)
+    try:
+        ctx = r.retrieve(
+            "heart rate over 120 in the last 3 hours", RetrieveOptions(token_budget=2500, max_tables=6, exemplar_k=3)
+        )
+        by_id = {e.id: e for e in ctx.exemplars}
+        assert "ex_heart_rate_over_120_last_3h" in by_id
+        assert by_id["ex_heart_rate_over_120_last_3h"].sample == [{"patientRef": 7, "Value": 132.0}]
+    finally:
+        r.dispose()
 
 
 def test_retrieve_embeds_the_question_exactly_once():

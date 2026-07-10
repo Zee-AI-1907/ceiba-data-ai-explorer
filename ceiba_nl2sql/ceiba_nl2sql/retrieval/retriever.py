@@ -208,6 +208,10 @@ class Exemplar:
     dialect: str
     tables: list[str]
     tags: list[str]
+    # PHI-scrubbed sample rows from the exemplar's generation-time query
+    # output (prep-side `prep.exemplars.Exemplar.to_json`). Older/seed
+    # exemplars predate this field, so it defaults to empty.
+    sample: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -946,7 +950,15 @@ class HybridRetriever:
         by_id = {e["id"]: e for e in exemplars}
         picked = [by_id[h.doc_id] for h in hits if h.doc_id in by_id] if hits else exemplars[:exemplar_k]
         return [
-            Exemplar(id=e["id"], question=e["question"], sql=e["sql"], dialect=e["dialect"], tables=e["tables"], tags=e["tags"])
+            Exemplar(
+                id=e["id"],
+                question=e["question"],
+                sql=e["sql"],
+                dialect=e["dialect"],
+                tables=e["tables"],
+                tags=e["tags"],
+                sample=e.get("sample", []),
+            )
             for e in picked
         ]
 

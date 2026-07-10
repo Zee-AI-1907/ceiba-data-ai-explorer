@@ -503,6 +503,11 @@ async def generate_sql(
         # schema/join-graph prefix is byte-identical across questions.
         semantic_hints_last=getattr(context, "static_context", False),
         strict_join_steering=options.strict_join_steering,
+        # Task 9: render the recalled few-shot exemplars (Q + SQL + scrubbed
+        # sample) into the prompt tail. Previously context.exemplars was
+        # recalled but never rendered — only its ids were logged as
+        # `exemplars_used`, so the mechanism had zero effect on generation.
+        exemplars=context.exemplars,
     )
     # R1 routing: the cheap tier drives ONLY when retrieval proves the
     # question join-free; anything that could join uses the strong model.
@@ -563,6 +568,9 @@ async def generate_sql(
             token_budget=context.token_estimate or None,
             semantic_hints_last=getattr(context, "static_context", False),
             strict_join_steering=options.strict_join_steering,
+            # Task 9: mirror the initial round so a repair round still sees
+            # the same few-shot exemplars.
+            exemplars=context.exemplars,
         )
         # R1 escalation: never retry the model that just failed — repair
         # rounds run on the escalation model (or the strong default).

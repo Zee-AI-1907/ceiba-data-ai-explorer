@@ -22,6 +22,7 @@ import re
 from ceiba_nl2sql.engine.base import EngineCapabilities, SqlDialect
 from ceiba_nl2sql.retrieval.retriever import (
     CardinalityWarning,
+    Exemplar,
     GlossaryHit,
     JoinHint,
     JoinPath,
@@ -495,6 +496,43 @@ def _dialect_note(dialect: SqlDialect) -> list[str]:
     ]
 
 
+# ── Task 9: EXAMPLES section (few-shot exemplar rendering) ─────────────────
+
+
+def _render_exemplar_sample(sample: list[dict]) -> str | None:
+    """Compact repr of the exemplar's PHI-scrubbed sample rows, or None when
+    there is no sample to show (older/seed exemplars carry `sample=[]`).
+    """
+    if not sample:
+        return None
+    return f"sample: {sample!r}"
+
+
+def _render_exemplars(exemplars: list[Exemplar]) -> str:
+    """Renders the EXAMPLES section: one block per recalled exemplar with its
+    question, SQL, and (if present) its PHI-scrubbed sample rows. This is the
+    missing last mile of the exemplar mechanism — `context.exemplars` is
+    recalled per-question by the retriever but, until this fix, was never
+    rendered into the prompt (only `exemplars_used` ids were recorded). Must
+    be called from the QUESTION-VARYING TAIL, never the cached stable prefix
+    — exemplars are recalled per-question via BM25 against the question text,
+    so caching them into the prefix would either go stale or break the R2
+    byte-identical-prefix property.
+    """
+    lines: list[str] = [
+        "EXAMPLES (similar prior questions and their SQL; match this style, never copy literal values verbatim):"
+    ]
+    for ex in exemplars:
+        lines.append("")
+        lines.append("EXAMPLE")
+        lines.append(f"Q: {ex.question}")
+        lines.append(f"SQL: {ex.sql}")
+        sample_line = _render_exemplar_sample(ex.sample)
+        if sample_line:
+            lines.append(sample_line)
+    return "\n".join(lines)
+
+
 def assemble_prompt(
     tables: list[RenderedTable],
     cardinality_warnings: list[CardinalityWarning],
@@ -509,6 +547,7 @@ def assemble_prompt(
     token_budget: int | None = None,
     semantic_hints_last: bool = False,
     strict_join_steering: bool = False,
+    exemplars: list[Exemplar] | None = None,
 ) -> str:
     """Builds the full NL->SQL generation prompt. Mirrors
     lib/rag/promptAssembly.ts `assemblePrompt` line-for-line.
@@ -519,7 +558,9 @@ def assemble_prompt(
       3. SEMANTIC HINTS (Fix D) — term -> coded value -> hosting table.
       4. JOIN GRAPH (Fix A) — edges among survivors + bridge paths + bridge stubs.
       5. Cardinality warnings (verbatim, one per large/time-series survivor).
-      6. The untrusted NL question, delimited and marked as data-not-instructions.
+      6. EXAMPLES (Task 9) — recalled few-shot exemplars (Q + SQL + scrubbed
+         sample), always in the question-varying tail (see below).
+      7. The untrusted NL question, delimited and marked as data-not-instructions.
 
     `semantic_hints_last` (R2 static-context mode): moves SEMANTIC HINTS (the
     only question-VARYING section besides the question itself) after the
@@ -534,6 +575,12 @@ def assemble_prompt(
     The three lines are CONSTANT strings — no question or per-request value
     is interpolated into them — so they stay inside the always-present
     preamble and do not break the R2 cache-prefix property above.
+
+    `exemplars` (Task 9): few-shot exemplars recalled per-question by the
+    retriever (BM25 against the question text). Rendered UNCONDITIONALLY in
+    the question-varying tail, immediately before the final untrusted-question
+    block — NEVER in the cached stable prefix, regardless of
+    `semantic_hints_last`, since the recalled set itself varies per question.
     """
     warnings = cardinality_warnings if cardinality_warnings else derive_cardinality_warnings(tables)
     join_hints = join_hints or []
@@ -605,6 +652,11 @@ def assemble_prompt(
     if meaningful_hits and semantic_hints_last:
         sections.append(_render_semantic_hints(glossary_hits, tables))
 
+    # Task 9: EXAMPLES — always in the question-varying tail (never the cached
+    # stable prefix), since the recalled exemplar set varies per question.
+    if exemplars:
+        sections.append(_render_exemplars(exemplars))
+
     sections.append(
         "\n".join(
             [
@@ -642,14 +694,20 @@ def assemble_repair_prompt(
     token_budget: int | None = None,
     semantic_hints_last: bool = False,
     strict_join_steering: bool = False,
+    exemplars: list[Exemplar] | None = None,
 ) -> str:
     """Builds the SELF-REPAIR round prompt. Mirrors
     lib/rag/promptAssembly.ts `assembleRepairPrompt`. Inherits the JOIN GRAPH
-    / SEMANTIC HINTS sections for free since it delegates to `assemble_prompt`.
+    / SEMANTIC HINTS / EXAMPLES sections for free since it delegates to
+    `assemble_prompt`.
 
     `strict_join_steering` (Task 2, opt-in) is forwarded verbatim to the
     delegated `assemble_prompt`, so a repair round carries the same imperative
     join/filter steering as the initial round (default off).
+
+    `exemplars` (Task 9) is forwarded verbatim to the delegated
+    `assemble_prompt`, so a repair round still sees the same few-shot
+    exemplars as the initial round.
     """
     base_prompt = assemble_prompt(
         tables,
@@ -664,6 +722,7 @@ def assemble_repair_prompt(
         token_budget=token_budget,
         semantic_hints_last=semantic_hints_last,
         strict_join_steering=strict_join_steering,
+        exemplars=exemplars,
     )
 
     repair_lines = [

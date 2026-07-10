@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from ceiba_nl2sql.engine.base import EngineCapabilities
 from ceiba_nl2sql.generation.prompt import (
+    USER_REQUEST_OPEN,
     _render_join_graph,
     _render_semantic_hints,
     _source_qualified_ref,
@@ -18,6 +19,7 @@ from ceiba_nl2sql.generation.prompt import (
 )
 from ceiba_nl2sql.retrieval.retriever import (
     CardinalityWarning,
+    Exemplar,
     GlossaryHit,
     JoinHint,
     JoinPath,
@@ -671,3 +673,95 @@ def test_soft_delete_flag_and_active_flag_rendered():
 def test_no_soft_delete_renders_nothing():
     prompt = assemble_prompt([_measurements_table()], [], "heart rate", CAPS, "duckdb")
     assert "soft delete:" not in prompt
+
+
+# ── Task 9: EXAMPLES section (few-shot exemplar rendering) ─────────────────
+
+
+def _hr_exemplar() -> Exemplar:
+    return Exemplar(
+        id="ex_heart_rate_over_120_last_3h",
+        question="heart rate > 120 in the last 3 hours",
+        sql='SELECT DISTINCT m."patientRef" FROM public."MeasurementsMock" m WHERE m."Value" > 120 LIMIT 1000',
+        dialect="duckdb",
+        tables=["mock.public.MeasurementsMock"],
+        tags=["temporal"],
+        sample=[{"patientRef": 42}],
+    )
+
+
+def test_assemble_prompt_with_exemplars_renders_examples_section_with_q_sql_and_sample():
+    exemplar = _hr_exemplar()
+    prompt = assemble_prompt(
+        [_measurements_table()], [], "heart rate over 130", CAPS, "duckdb", exemplars=[exemplar]
+    )
+    assert "EXAMPLES" in prompt
+    assert exemplar.question in prompt
+    assert exemplar.sql in prompt
+    assert "42" in prompt  # sample row value present
+
+
+def test_assemble_prompt_without_exemplars_omits_examples_section():
+    prompt_none = assemble_prompt([_measurements_table()], [], "heart rate over 130", CAPS, "duckdb", exemplars=None)
+    prompt_empty = assemble_prompt([_measurements_table()], [], "heart rate over 130", CAPS, "duckdb", exemplars=[])
+    assert "EXAMPLES" not in prompt_none
+    assert "EXAMPLES" not in prompt_empty
+
+
+def test_assemble_prompt_exemplar_with_no_sample_omits_sample_line():
+    exemplar_no_sample = Exemplar(
+        id="ex_no_sample",
+        question="patients admitted yesterday",
+        sql='SELECT * FROM "VisitMock"',
+        dialect="duckdb",
+        tables=["mock.public.VisitMock"],
+        tags=[],
+        sample=[],
+    )
+    prompt = assemble_prompt(
+        [_measurements_table()], [], "q", CAPS, "duckdb", exemplars=[exemplar_no_sample]
+    )
+    assert "EXAMPLES" in prompt
+    assert "sample:" not in prompt
+
+
+def test_assemble_prompt_exemplars_do_not_perturb_the_cached_prefix():
+    """R2 cache-prefix property: EXAMPLES must live in the question-varying
+    tail, not the cached stable prefix — so the substring of the prompt
+    BEFORE the question-varying tail is byte-identical whether or not
+    exemplars are recalled for this question.
+    """
+    exemplar = _hr_exemplar()
+    question = "heart rate over 130"
+    without = assemble_prompt([_measurements_table()], [], question, CAPS, "duckdb", exemplars=None)
+    with_exemplars = assemble_prompt(
+        [_measurements_table()], [], question, CAPS, "duckdb", exemplars=[exemplar]
+    )
+    # Both prompts' question-varying tail begins right after the same stable
+    # content (preamble + schema + cardinality warnings); "without" starts its
+    # tail with the final question block's fixed intro text, "with_exemplars"
+    # starts its tail one section earlier, with EXAMPLES. Anchoring on each
+    # prompt's own tail-start marker isolates the identical stable prefix.
+    prefix_without = without.split("The text between the delimiters")[0]
+    prefix_with = with_exemplars.split("EXAMPLES")[0]
+    assert prefix_without == prefix_with
+    assert USER_REQUEST_OPEN in without and USER_REQUEST_OPEN in with_exemplars
+
+
+def test_assemble_repair_prompt_renders_examples_section_when_exemplars_present():
+    from ceiba_nl2sql.generation.prompt import assemble_repair_prompt
+
+    exemplar = _hr_exemplar()
+    prompt = assemble_repair_prompt(
+        [_measurements_table()],
+        [],
+        "heart rate over 130",
+        CAPS,
+        "duckdb",
+        failed_sql="SELECT 1",
+        error="bad join",
+        exemplars=[exemplar],
+    )
+    assert "EXAMPLES" in prompt
+    assert exemplar.question in prompt
+    assert "REPAIR REQUIRED" in prompt
