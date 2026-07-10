@@ -268,6 +268,20 @@ def test_preamble_includes_distinct_fanout_rule():
     assert "COUNT(DISTINCT" in prompt
 
 
+def test_strict_join_steering_lines_present_only_when_enabled():
+    off = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb")
+    on = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb", strict_join_steering=True)
+    for needle in ("use ONLY the equality join predicates", "add a WHERE condition ONLY if", "trace the join path"):
+        assert needle not in off
+        assert needle in on
+    # R2 cache-prefix property: the added lines are constant (no per-question
+    # interpolation), so the prefix before the question text is byte-identical
+    # across two different questions.
+    on_a = assemble_prompt([_measurements_table()], [], "question alpha", CAPS, "duckdb", strict_join_steering=True)
+    on_b = assemble_prompt([_measurements_table()], [], "question beta", CAPS, "duckdb", strict_join_steering=True)
+    assert on_a.split("question alpha")[0] == on_b.split("question beta")[0]
+
+
 # ── cardinality-guard remediation: multi-hop chain clarity + dialect note ──
 
 

@@ -171,6 +171,12 @@ class GenerateOptions:
     # remains the gate), so existing callers/tests are unaffected.
     source_dsn: str | None = None
     pg_explain_runner: ExplainRunner | None = None
+    # Task 2 (opt-in, A/B benchmark flag): adds three imperative preamble
+    # lines forbidding invented join predicates / unrequested filters. The
+    # lines are constant strings (no per-question interpolation), so turning
+    # this on does not affect R2 prompt-caching. Default off => unchanged
+    # behavior for existing callers.
+    strict_join_steering: bool = False
 
 
 def extract_sql(raw: str) -> tuple[str, str]:
@@ -496,6 +502,7 @@ async def generate_sql(
         # R2: static context orders question-varying sections last so the
         # schema/join-graph prefix is byte-identical across questions.
         semantic_hints_last=getattr(context, "static_context", False),
+        strict_join_steering=options.strict_join_steering,
     )
     # R1 routing: the cheap tier drives ONLY when retrieval proves the
     # question join-free; anything that could join uses the strong model.
@@ -555,6 +562,7 @@ async def generate_sql(
             glossary_hits=context.glossary_hits,
             token_budget=context.token_estimate or None,
             semantic_hints_last=getattr(context, "static_context", False),
+            strict_join_steering=options.strict_join_steering,
         )
         # R1 escalation: never retry the model that just failed — repair
         # rounds run on the escalation model (or the strong default).

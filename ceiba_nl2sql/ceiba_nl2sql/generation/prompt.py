@@ -508,6 +508,7 @@ def assemble_prompt(
     glossary_hits: list[GlossaryHit] | None = None,
     token_budget: int | None = None,
     semantic_hints_last: bool = False,
+    strict_join_steering: bool = False,
 ) -> str:
     """Builds the full NL->SQL generation prompt. Mirrors
     lib/rag/promptAssembly.ts `assemblePrompt` line-for-line.
@@ -525,6 +526,14 @@ def assemble_prompt(
     cardinality warnings, so sections 1-2-4-5 form a byte-identical prefix
     across questions and the provider's prompt cache prices them at the
     discounted cached-input rate.
+
+    `strict_join_steering` (Task 2, opt-in): appends three imperative
+    preamble lines that forbid inventing join predicates or filters not
+    grounded in the declared JOIN GRAPH / user request. Gated behind a flag
+    (default off) so a benchmark can A/B it against the permissive baseline.
+    The three lines are CONSTANT strings — no question or per-request value
+    is interpolated into them — so they stay inside the always-present
+    preamble and do not break the R2 cache-prefix property above.
     """
     warnings = cardinality_warnings if cardinality_warnings else derive_cardinality_warnings(tables)
     join_hints = join_hints or []
@@ -546,6 +555,22 @@ def assemble_prompt(
                 f"If no explicit row limit is requested, include LIMIT {default_limit}.",
                 # Fix A §4/§5: fan-out/wrong-grain preamble rule.
                 "When a join is 1:N or N:1 and you aggregate the 'one' side, use COUNT(DISTINCT ...) / guard against row fan-out.",
+                # Task 2 (opt-in, GenerateOptions.strict_join_steering): constant
+                # imperative lines forbidding invented joins/filters. Constant
+                # strings only (no per-question interpolation) so they stay in
+                # the always-present prefix and preserve R2 prompt-caching.
+                *([
+                    "JOINS: use ONLY the equality join predicates declared in the JOIN GRAPH section below. "
+                    "Every join in your SQL MUST copy a declared FK edge verbatim (FK-side column = PK-side column), "
+                    "or follow a declared multi-hop path through its bridge table. NEVER invent a join predicate: "
+                    "two columns sharing a NAME do NOT imply a join, and never join Id = Id unless an edge says so. "
+                    "If the tables you need are not linked by a declared edge or path, return fewer tables rather than fabricate a link.",
+                    "FILTERS: add a WHERE condition ONLY if the user's request asks for it, or if it is a soft-delete "
+                    "rule explicitly rendered on a table below. Add NO other filter (e.g. IsActive, a status, a default "
+                    "date window) the user did not request — an unrequested filter silently drops rows.",
+                    "Before writing SQL, trace the join path in the JOIN GRAPH below: list the tables you need, then "
+                    "connect them using only the declared edges/paths. Prefer PK/FK equality joins.",
+                ] if strict_join_steering else []),
                 *_dialect_note(dialect),
                 "Respond with the SQL only.",
             ]
@@ -616,6 +641,7 @@ def assemble_repair_prompt(
     glossary_hits: list[GlossaryHit] | None = None,
     token_budget: int | None = None,
     semantic_hints_last: bool = False,
+    strict_join_steering: bool = False,
 ) -> str:
     """Builds the SELF-REPAIR round prompt. Mirrors
     lib/rag/promptAssembly.ts `assembleRepairPrompt`. Inherits the JOIN GRAPH
@@ -633,6 +659,7 @@ def assemble_repair_prompt(
         glossary_hits=glossary_hits,
         token_budget=token_budget,
         semantic_hints_last=semantic_hints_last,
+        strict_join_steering=strict_join_steering,
     )
 
     repair_lines = [
