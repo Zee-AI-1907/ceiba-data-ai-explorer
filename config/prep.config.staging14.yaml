@@ -1,0 +1,56 @@
+# prep.config.staging14.yaml — 14-table staging scope for the 2026-07 exemplar-gen
+# + prompt-steering benchmark (docs/superpowers/specs/2026-07-10-*). Covers the
+# clinical entities the benchmark's 10 queries touch: org hierarchy
+# (Hospitals/Units/Departments/Organizations), admissions (Patients/Acceptances),
+# beds (Beds/BedHistories), monitoring (Monitors/MonitorMeasurements[/Types]),
+# and ventilation (Ventilators/VentilatorMeasurements[/Types]). All 14 verified
+# present in the Shared schema. Credentials are env-only (STAGING_DSN).
+
+bundleFormatVersion: "1.0.0"
+
+embedding:
+  provider: local
+  modelId: bge-small-en-v1.5
+  dimension: 384
+
+sources:
+  - sourceId: staging
+    engine: postgres
+    dsnEnv: STAGING_DSN
+    readOnly: true
+    introspect:
+      includeSchemas: ["Shared"]
+      excludeSchemas: ["hangfire", "repack"]
+      includeTables:
+        - "Shared.Hospitals"
+        - "Shared.Units"
+        - "Shared.Departments"
+        - "Shared.Organizations"
+        - "Shared.Patients"
+        - "Shared.Acceptances"
+        - "Shared.Beds"
+        - "Shared.BedHistories"
+        - "Shared.Monitors"
+        - "Shared.MonitorMeasurements"
+        - "Shared.MonitorMeasurementTypes"
+        - "Shared.Ventilators"
+        - "Shared.VentilatorMeasurements"
+        - "Shared.VentilatorMeasurementTypes"
+      excludeTables: []
+    profile:
+      sampleRowsPerTable: 5000
+      largeTableRowThreshold: 10000000
+      timeWindowedSampleFor:
+        - "Shared.MonitorMeasurements"
+        - "Shared.VentilatorMeasurements"
+
+enrich:
+  glossary: config/glossary.seed.yaml
+  inferJoinEdges:
+    enabled: true
+    minConfidence: 0.8
+    nameMatchStrategy: "col-eq-pk"
+
+phiGate:
+  phiColumnset: reuse-phiScrubber
+  failOnViolation: true
