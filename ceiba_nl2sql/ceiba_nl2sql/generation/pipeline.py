@@ -210,6 +210,11 @@ class GenerateOptions:
     # writes it explicitly — the guard never injects it silently. Off => today's
     # behavior (reject with a generic hint; the model must supply the bound).
     default_time_window: str | None = None
+    # P2 Task 5 (opt-in, A/B): adds a constant WINDOWING steering block teaching
+    # date_trunc bucketing + GROUP BY grain for trend/time-series questions.
+    # Constant strings => R2 prompt-caching preserved. Default off; intended to
+    # flip on after the staging A/B confirms it helps the windowed queries.
+    window_steering: bool = False
 
 
 def extract_sql(raw: str) -> tuple[str, str]:
@@ -609,6 +614,7 @@ async def generate_sql(
         # schema/join-graph prefix is byte-identical across questions.
         semantic_hints_last=getattr(context, "static_context", False),
         strict_join_steering=options.strict_join_steering,
+        window_steering=options.window_steering,
         # Task 9: render the recalled few-shot exemplars (Q + SQL + scrubbed
         # sample) into the prompt tail. Previously context.exemplars was
         # recalled but never rendered — only its ids were logged as
@@ -675,6 +681,7 @@ async def generate_sql(
             token_budget=context.token_estimate or None,
             semantic_hints_last=getattr(context, "static_context", False),
             strict_join_steering=options.strict_join_steering,
+            window_steering=options.window_steering,
             # Task 9: mirror the initial round so a repair round still sees
             # the same few-shot exemplars.
             exemplars=context.exemplars,

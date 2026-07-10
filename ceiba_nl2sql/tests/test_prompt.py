@@ -333,6 +333,28 @@ def test_strict_join_steering_forbids_undeclared_but_requires_all_needed_joins()
     assert "return fewer tables rather than fabricate a link" not in on
 
 
+def test_windowing_steering_block_present_only_when_enabled():
+    off = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb")
+    on = assemble_prompt([_measurements_table()], [], "q", CAPS, "duckdb", window_steering=True)
+    assert "date_trunc" in on and "WINDOWED" in on
+    assert "date_trunc" not in off  # the windowing block is gated off by default
+    # R2 cache-prefix property: constant strings -> byte-identical prefix across questions.
+    on_a = assemble_prompt([_measurements_table()], [], "question alpha", CAPS, "duckdb", window_steering=True)
+    on_b = assemble_prompt([_measurements_table()], [], "question beta", CAPS, "duckdb", window_steering=True)
+    assert on_a.split("question alpha")[0] == on_b.split("question beta")[0]
+
+
+def test_windowing_steering_forwarded_to_repair_prompt():
+    from ceiba_nl2sql.generation.prompt import assemble_repair_prompt
+
+    on = assemble_repair_prompt(
+        [_measurements_table()], [], "q", CAPS, "duckdb", failed_sql="SELECT 1", error="x", window_steering=True
+    )
+    off = assemble_repair_prompt([_measurements_table()], [], "q", CAPS, "duckdb", failed_sql="SELECT 1", error="x")
+    assert "date_trunc" in on
+    assert "date_trunc" not in off
+
+
 def test_assemble_plan_prompt_omits_sql_response_format_and_survivor_join_graph():
     from ceiba_nl2sql.generation.prompt import assemble_plan_prompt
 

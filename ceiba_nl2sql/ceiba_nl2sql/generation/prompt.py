@@ -581,6 +581,7 @@ def assemble_prompt(
     token_budget: int | None = None,
     semantic_hints_last: bool = False,
     strict_join_steering: bool = False,
+    window_steering: bool = False,
     exemplars: list[Exemplar] | None = None,
 ) -> str:
     """Builds the full NL->SQL generation prompt. Mirrors
@@ -674,6 +675,19 @@ def assemble_prompt(
                     "needs, connect them using only the declared edges/paths (all hops, no shortcuts), then add the "
                     "required GROUP BY and aggregates. Prefer PK/FK equality joins over any other way of relating tables.",
                 ] if strict_join_steering else []),
+                # P2 Task 5 (opt-in, GenerateOptions.window_steering): constant
+                # imperative lines teaching windowed/time-series grain. Constant
+                # strings only (no per-question interpolation) so they stay in the
+                # always-present prefix and preserve R2 prompt-caching.
+                *([
+                    "WINDOWED / TIME-SERIES: when the question asks for a trend or a per-time-bucket rollup "
+                    "(per hour, per day, hourly, daily, over time), bucket the time column with "
+                    "date_trunc('hour', <time_column>) or date_trunc('day', <time_column>), put that bucket "
+                    "in SELECT, GROUP BY the SAME bucket expression, and ORDER BY it. Do NOT collapse a "
+                    "trend into a single aggregate row. When the time column lives on a PARENT table (a "
+                    "'time via' note below), bucket on the PARENT's time column and join to it first. Never "
+                    "put the time threshold on a type/code column.",
+                ] if window_steering else []),
                 *_dialect_note(dialect),
                 "Respond with the SQL only.",
             ]
@@ -750,6 +764,7 @@ def assemble_repair_prompt(
     token_budget: int | None = None,
     semantic_hints_last: bool = False,
     strict_join_steering: bool = False,
+    window_steering: bool = False,
     exemplars: list[Exemplar] | None = None,
 ) -> str:
     """Builds the SELF-REPAIR round prompt. Mirrors
@@ -778,6 +793,7 @@ def assemble_repair_prompt(
         token_budget=token_budget,
         semantic_hints_last=semantic_hints_last,
         strict_join_steering=strict_join_steering,
+        window_steering=window_steering,
         exemplars=exemplars,
     )
 

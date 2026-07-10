@@ -3,10 +3,11 @@ from ceiba_nl2sql_eval.live_bench_queries import QUERIES, BenchQuery
 _VALID_MODES = {"scalar", "value", "group_top", "topk_keys"}
 
 
-def test_ten_queries_well_formed():
-    assert len(QUERIES) == 10
+def test_reference_queries_well_formed():
+    # 10 original + the P2 Task 6 windowed-trend query.
+    assert len(QUERIES) == 11
     ids = [q.id for q in QUERIES]
-    assert len(set(ids)) == 10, "duplicate query ids"
+    assert len(set(ids)) == len(ids), "duplicate query ids"
     for q in QUERIES:
         assert isinstance(q, BenchQuery)
         assert q.question.strip()

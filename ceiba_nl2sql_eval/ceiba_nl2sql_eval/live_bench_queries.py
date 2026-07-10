@@ -145,4 +145,19 @@ QUERIES: list[BenchQuery] = [
         compare_mode="group_top",
         interpretation="count of Acceptances per department (via unit) in the last 7 days",
     ),
+    BenchQuery(
+        id="hourly_hr_trend_last_day",
+        question="show me the hourly average heart rate trend over the last day",
+        category="vitals_windowed",
+        # Windowed/time-series: bucket on the PARENT time column (Monitors.MeasuredDate,
+        # reached via MonitorMeasurements.DeviceId -> Monitors.Id) since
+        # MonitorMeasurements has no own time column. The compare set is the hour buckets.
+        reference_sql='''SELECT date_trunc('hour', m."MeasuredDate") AS hr_bucket, avg(mm."Value") AS avg_hr
+            FROM "Shared"."MonitorMeasurements" mm
+            JOIN "Shared"."Monitors" m ON mm."DeviceId"=m."Id"
+            WHERE mm."MeasurementTypeId"=2 AND m."MeasuredDate" >= now() - interval '1 day'
+            GROUP BY date_trunc('hour', m."MeasuredDate") ORDER BY hr_bucket''',
+        compare_mode="group_top",
+        interpretation="hourly-bucketed average HR (type 2) over the last 24h, keyed by hour bucket",
+    ),
 ]

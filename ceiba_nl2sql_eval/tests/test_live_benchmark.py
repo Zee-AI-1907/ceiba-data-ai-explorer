@@ -55,6 +55,17 @@ def test_coverage_guard_fails_anti_join_collapsed_to_single_table():
     assert sql_coverage_ok(gen, ref, dialect="duckdb") is False
 
 
+def test_windowed_trend_reference_query_present_and_self_covers():
+    # The P2 Task 6 windowed query must parse (date_trunc/bucketing) and, as its
+    # own reference, satisfy the coverage guard.
+    from ceiba_nl2sql_eval.live_bench_queries import QUERIES
+
+    windowed = next((q for q in QUERIES if q.id == "hourly_hr_trend_last_day"), None)
+    assert windowed is not None
+    assert "date_trunc" in windowed.reference_sql
+    assert sql_coverage_ok(windowed.reference_sql, windowed.reference_sql, dialect="duckdb") is True
+
+
 def test_coverage_guard_unparseable_generation_fails_closed():
     # A generation the parser cannot read cannot be confirmed complete → False,
     # and must not raise (run_cell records binds/joins around it).
