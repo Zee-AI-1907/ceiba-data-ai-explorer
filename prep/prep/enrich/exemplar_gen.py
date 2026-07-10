@@ -90,6 +90,13 @@ def build_generation_prompt(
             "statement that answers it, using ONLY the declared joins and the "
             "tables/columns given in the schema.",
             "",
+            "IDENTIFIER QUOTING (critical — the database is CASE-SENSITIVE): quote "
+            "EVERY identifier — schema, table, and column — with double quotes "
+            'EXACTLY as written in the SCHEMA and DECLARED JOINS above, e.g. '
+            'staging."Shared"."Patients"."Id". Unquoted identifiers are folded to '
+            "lowercase and will FAIL to bind. Alias tables with a short unquoted "
+            "alias, but always quote the real column names (e.g. p.\"Id\").",
+            "",
             "Respond with STRICT JSON only, shaped exactly:",
             '{"exemplars": [{"question": "...", "sql": "..."}]}',
         ]
@@ -167,10 +174,16 @@ def _render_schema_text(catalog: dict) -> str:
     raising, since a bad prompt is still better than a failed build."""
     lines: list[str] = []
     for table in catalog.get("tables", []) or []:
-        table_id = table.get("tableId") or table.get("name") or ""
-        lines.append(f"table {table_id}:")
+        # Render the QUOTED, source-qualified ref (e.g. staging."Shared"."Patients")
+        # and QUOTED column names — the staging DB is case-sensitive PascalCase,
+        # so unquoted identifiers bind to a lowercased name that does not exist
+        # (DuckDB folds unquoted idents), and generated SQL fails at execute.
+        source_id = table.get("sourceId") or ""
+        quoted_ref = table.get("quotedRef") or ""
+        ref = f"{source_id}.{quoted_ref}" if source_id and quoted_ref else (table.get("tableId") or "")
+        lines.append(f"table {ref}:")
         for column in table.get("columns", []) or []:
-            column_name = column.get("name", "")
+            column_name = column.get("quotedName") or column.get("name", "")
             data_type = column.get("dataType", "")
             lines.append(f"  - {column_name} ({data_type})")
     return "\n".join(lines) if lines else "(no tables)"
@@ -182,16 +195,26 @@ def _render_join_hints_text(edges: list[dict]) -> str:
     arg): one `<from> -> <to> ON <fromCol>=<toCol>[, ...]` line per edge."""
     lines: list[str] = []
     for edge in edges or []:
-        from_table = edge.get("from", "")
-        to_table = edge.get("to", "")
+        from_table = _quote_table_id(edge.get("from", ""))
+        to_table = _quote_table_id(edge.get("to", ""))
         from_columns = edge.get("fromColumns") or []
         to_columns = edge.get("toColumns") or []
         column_pairs = ", ".join(
-            f"{from_column}={to_column}"
+            f'"{from_column}"="{to_column}"'
             for from_column, to_column in zip(from_columns, to_columns)
         )
         lines.append(f"{from_table} -> {to_table} ON {column_pairs}")
     return "\n".join(lines) if lines else "(no declared joins)"
+
+
+def _quote_table_id(table_id: str) -> str:
+    """`sourceId.schema.table` -> `sourceId."schema"."table"` (quoted, case-safe).
+    A non-3-part id passes through unchanged (best-effort)."""
+    parts = table_id.split(".")
+    if len(parts) != 3:
+        return table_id
+    source, schema, table = parts
+    return f'{source}."{schema}"."{table}"'
 
 
 def _build_phi_columns(phi_columns_json: list[dict]) -> dict[str, str]:
