@@ -1,6 +1,6 @@
 # FK Join-Subgraph Tool + Extensible Tool-Calling Surface — Design
 
-**Status:** approved design (brainstormed 2026-07-10); feeds a multi-agent review + implementation plan.
+**Status:** approved design (brainstormed 2026-07-10); HARDENED by a 4-dimension adversarial review — see the implementation plan `docs/superpowers/plans/2026-07-10-p1-join-subgraph-tool-implementation.md`, which supersedes §4/§8.3 (tools+response_format DO coexist — the loop, not a split, is what's required), §3 (the reused BFS is hop-capped at 3 and computes pairwise-not-connected paths; more work than "factor out"), and §5 (self-repair must thread the declared subgraph, not stay unchanged). The PHI/egress and toggle claims here are confirmed correct.
 **Branch:** `remediation/phase-0-foundation`.
 **Priority:** P1 (top-of-list next-session priority — join errors on 4–5-hop queries are the #1 failure mode).
 
