@@ -1,6 +1,6 @@
 # P2 — Windowed/time-series queries + enforced row/time limits (implementation plan)
 
-**Status:** ready to implement (Tasks 1–3 & 5–6 safe; Task 4 needs user sign-off).
+**Status:** ready to implement (Tasks 1–3 & 5–6 safe; Task 4 approved 2026-07-10 as the reject-with-hint variant, flag-gated default off — NOT silent AST injection).
 **Branch base:** `remediation/phase-0-foundation`.
 **Non-negotiable:** Task 1 (universal LIMIT) MUST NOT ship without Task 2 (rollup-safe guard). A LIMIT appended to a `GROUP BY` with no `ORDER BY` silently drops groups — shipping 1 alone converts a scan-cost fix into a silent-wrong-answer bug.
 
@@ -24,7 +24,7 @@ Correctness beats convenience here. Silently appending `LIMIT 1000` to `SELECT d
 - No GROUP BY, non-aggregate, no LIMIT: auto-append → `repair`.
 
 **Q3 — Default-time-window fallback (Stage 4). → OFF by default, flag-gated, and even when ON it REJECTS rather than injects. Clinically load-bearing.**
-Injecting an unrequested `MeasuredDate >= now() - INTERVAL '24h'` silently changes the clinical answer (a "highest HR ever recorded" question becomes "highest in last 24h" with no signal to the user) — unacceptable as a default. Recommendation: do **not** implement silent window injection at all. Keep today's behavior (unbounded large table with no bound → `reject` → self-repair, `cardinality.py:508-519`), which already forces the model to supply a window, and improve only the *hint* so repair succeeds more often. If the user later wants a convenience default, gate it behind `GenerateOptions.default_time_window: str | None = None` (off), and when set have the guard **reject with a hint naming that suggested window** so the *model* writes it explicitly into the SQL (visible, auditable) instead of the guard mutating the AST invisibly. Guardrail: the injected/suggested window is never applied silently — it always appears in the returned SQL the user can inspect. → **Task 4 is DEFERRED pending user sign-off; not in the safe batch.**
+Injecting an unrequested `MeasuredDate >= now() - INTERVAL '24h'` silently changes the clinical answer (a "highest HR ever recorded" question becomes "highest in last 24h" with no signal to the user) — unacceptable as a default. Recommendation: do **not** implement silent window injection at all. Keep today's behavior (unbounded large table with no bound → `reject` → self-repair, `cardinality.py:508-519`), which already forces the model to supply a window, and improve only the *hint* so repair succeeds more often. If the user later wants a convenience default, gate it behind `GenerateOptions.default_time_window: str | None = None` (off), and when set have the guard **reject with a hint naming that suggested window** so the *model* writes it explicitly into the SQL (visible, auditable) instead of the guard mutating the AST invisibly. Guardrail: the injected/suggested window is never applied silently — it always appears in the returned SQL the user can inspect. → **DECISION 2026-07-10: build the reject-with-hint variant (flag-gated `default_time_window`, default off); NEVER silent AST injection. Approved for implementation, sequenced after PR A.**
 
 **Q4 — Windowing steering. → default ON, but land it behind a flag first and flip the default only after the live benchmark confirms no regression.**
 Unlike join steering (which risked over-constraining), windowing steering is additive guidance that maps directly onto real user intent ("per hour/day trend"). Ship as `GenerateOptions.window_steering: bool = True`, but merge with it **off in the same PR** and turn it on in a follow-up commit once `live_benchmark.py` shows the windowed cases (`avg_spo2_per_patient`, `longest_ventilated`, plus the new hourly-trend query from Task 6) improve or hold. This mirrors the `strict_join_steering` A/B precedent (`pipeline.py:174-179`) while defaulting to the better behavior. *Assumption (flag if wrong): benchmark harness can be run before merge to validate; if not, keep default OFF until it can.*
@@ -60,8 +60,13 @@ Unlike join steering (which risked over-constraining), windowing steering is add
 **Tests — `ceiba_nl2sql/tests/test_generate_pipeline.py`:** end-to-end — model returns unlimited plain SELECT → response `sql` carries `LIMIT 1000`; model returns unordered GROUP BY → pipeline self-repairs (assert repair round recorded, `RepairInfo`).
 **Review gate:** confirm service default matches library default.
 
-### Task 4 — Default-time-window fallback (DEFERRED — needs user sign-off; clinical)
-**Do not implement in the safe batch.** Per Q3: if approved, add `GenerateOptions.default_time_window: str | None = None`; when set, the large-table unbounded case (`cardinality.py:508-519`) rejects with a hint that names the suggested window so the *model* writes it explicitly. Guardrail: never mutate the AST to inject a window silently. **Blocked on user decision.**
+### Task 4 — Default-time-window fallback, reject-with-hint (APPROVED 2026-07-10; flag-gated default off)
+**Files/functions:** add `GenerateOptions.default_time_window: str | None = None` (`pipeline.py:153-179`); in the large-table unbounded case (`cardinality.py:508-519`), when `default_time_window` is set, `reject` with a hint that NAMES the suggested window (e.g. `MeasuredDate >= now() - INTERVAL '24 hours'`) so the *model* writes it explicitly into the returned SQL. When unset (default), behavior is exactly today's reject-with-generic-hint.
+**Approach:** never mutate the AST to inject a window silently — the guard only ever produces a `reject` verdict whose hint text names the window; the model's repaired SQL carries the window visibly and auditably. This preserves the "no silent clinical-semantics change" guarantee.
+**Tests — extend `ceiba_nl2sql/tests/test_cardinality_guard.py`:**
+- `test_default_time_window_unset_rejects_with_generic_hint` (today's behavior preserved)
+- `test_default_time_window_set_rejects_with_named_window_hint` (hint text contains the configured window; no AST mutation — verdict is `reject`, `repaired_sql` is None)
+**Review gate:** confirm the guard NEVER emits a `repair`/`repaired_sql` that silently adds a window; the window only ever reaches SQL via a model repair round. Clinical-safety review that the hint cannot be misread as a hard default.
 
 ### Task 5 — Windowing prompt steering (SAFE; default per Q4)
 **Files/functions:** `prompt.py:assemble_prompt` — add a constant WINDOWING block alongside the `strict_join_steering` block (`prompt.py:609-620`), gated by new param `window_steering: bool` threaded from `GenerateOptions.window_steering` (`pipeline.py`) via `pipeline.py:485-511` (initial) and `553-574` (repair); forward through `assemble_repair_prompt` (`prompt.py:680-744`). Extend `_dialect_note` (`prompt.py:480-496`) with DuckDB `date_trunc('hour'|'day', ts)` guidance. **Constant strings only** — no per-question interpolation — to preserve the R2 cache-prefix property (`prompt.py:577`).
@@ -82,7 +87,7 @@ Unlike join steering (which risked over-constraining), windowing steering is add
 ## Ship order
 1. **PR A (safe):** Tasks 1 + 2 + 3 together (universal LIMIT + rollup-safety + plumbing). This is the safety fix; 1 never lands without 2.
 2. **PR B (safe):** Tasks 5 + 6 (windowing steering behind flag OFF, exemplar, benchmark), then flip `window_steering` default ON after benchmark green.
-3. **PR C (blocked):** Task 4 only after user signs off on clinical semantics.
+3. **PR C:** Task 4 (reject-with-hint default-time-window, flag-gated default off) — approved 2026-07-10; sequence after PR A.
 
 ## Assumptions that change the plan if wrong
 - **A1:** `defaultLimit` is an acceptable ceiling on generated SQL for all callers (Q1). If a downstream consumer needs full result sets for its own aggregation, Task 1 must exempt those callers via the flag.
