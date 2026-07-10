@@ -18,6 +18,8 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 import sqlalchemy as sa
+import sqlglot
+from sqlglot import exp
 
 from ceiba_nl2sql.engine.base import AttachSpec, ExecuteOptions
 from ceiba_nl2sql.engine.duckdb_engine import DuckDbEngine
@@ -84,6 +86,50 @@ def compare(mode: str, got_rows, ref_rows, *, tol_frac: float = 0.02) -> bool:
     raise ValueError(f"unknown compare mode: {mode!r}")
 
 
+# ── coverage guard (hermetic; unit-tested) ────────────────────────────────────
+# The sql_only scorer's `joins_ok` check is blind to UNDER-answering: a
+# zero-join `SELECT count(*) FROM Patients` has no Join nodes, so it trivially
+# satisfies "every join ⊆ declared edges" and scores as a PASS — the exact
+# failure luna+strict exhibits. The coverage guard closes that blind spot by
+# requiring the generated SQL's STRUCTURAL SHAPE to match or exceed the
+# reference query's shape (join count / grouping / table count), derived
+# automatically from `reference_sql` so there is no hand-maintained metadata to
+# drift. It does NOT touch prep/join_check.py (whose "joins ⊆ declared" contract
+# is correct and stays narrow) — this is a benchmark-scorer change only.
+
+def _sql_shape(sql: str, *, dialect: str) -> tuple[int, bool, int]:
+    """(join_count, has_group_by, distinct_table_count) over the WHOLE parse
+    tree, so joins/groups nested in subqueries or CTEs (the anti-join's NOT
+    EXISTS, the avg-SpO2 wrapped aggregate) are counted too.
+    """
+    parsed = sqlglot.parse_one(sql, read=dialect)
+    join_count = len(list(parsed.find_all(exp.Join)))
+    has_group_by = parsed.find(exp.Group) is not None
+    table_count = len({t.name.lower() for t in parsed.find_all(exp.Table) if t.name})
+    return join_count, has_group_by, table_count
+
+
+def sql_coverage_ok(gen_sql: str, ref_sql: str, *, dialect: str) -> bool:
+    """True iff the generated SQL is structurally at least as complete as the
+    reference: at least as many joins, a GROUP BY whenever the reference groups,
+    and at least as many distinct base tables. Catches under-answering that
+    `joins_ok` cannot see.
+    """
+    try:
+        gen_joins, gen_group, gen_tables = _sql_shape(gen_sql, dialect=dialect)
+    except sqlglot.errors.SqlglotError:
+        # An unparseable generation cannot be confirmed structurally complete —
+        # fail closed. (It has almost certainly already failed the EXPLAIN-binds
+        # check too; this just guarantees we never raise out of the scorer.)
+        return False
+    ref_joins, ref_group, ref_tables = _sql_shape(ref_sql, dialect=dialect)
+    return (
+        gen_joins >= ref_joins
+        and (gen_group or not ref_group)
+        and gen_tables >= ref_tables
+    )
+
+
 # ── staging stack + cell runner (needs network/DB) ────────────────────────────
 
 def _duckdb_dsn(password: str) -> str:
@@ -111,6 +157,12 @@ class QueryStats:
     # sql-only mode: per-run generated SQL + structural checks
     binds: list[bool] = field(default_factory=list)
     joins_ok: list[bool] = field(default_factory=list)
+    # coverage guard: does the generated SQL's shape match/exceed the reference
+    # (catches under-answering that joins_ok is blind to). gen_join_count is
+    # kept alongside so the report can separate "invented join" (joins_ok False)
+    # from "under-answered" (coverage_ok False).
+    coverage_ok: list[bool] = field(default_factory=list)
+    gen_join_count: list[int] = field(default_factory=list)
     sqls: list[str] = field(default_factory=list)
 
     @property
@@ -185,9 +237,17 @@ async def run_cell(bundle_dir: str, strict_prompt: bool, model: str, runs: int, 
                 if sql_only:
                     binds = bool(getattr(engine.explain(resp.sql), "ok", False))
                     joins_ok = join_predicates_are_declared(resp.sql, edges, dialect=dialect)[0]
+                    coverage = sql_coverage_ok(resp.sql, q.reference_sql, dialect=dialect)
                     s.binds.append(binds)
                     s.joins_ok.append(joins_ok)
-                    if binds and joins_ok:
+                    s.coverage_ok.append(coverage)
+                    try:
+                        s.gen_join_count.append(_sql_shape(resp.sql, dialect=dialect)[0])
+                    except sqlglot.errors.SqlglotError:
+                        s.gen_join_count.append(0)
+                    # coverage closes the joins_ok blind spot: a zero-join
+                    # under-answer no longer scores as a pass.
+                    if binds and joins_ok and coverage:
                         s.passes += 1
                 else:
                     with sa_engine.connect() as c:
