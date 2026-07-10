@@ -169,17 +169,22 @@ async def run_cell(bundle_dir: str, strict_prompt: bool, model: str, runs: int, 
     return {"model": model, "strict_prompt": strict_prompt, "bundle_dir": bundle_dir, "stats": stats}
 
 
-def probe_model(model: str) -> bool:
-    """True iff the configured key can call `model` (cheap 1-token probe)."""
-    async def _probe():
-        llm = OpenAiLlmClient(api_key=os.environ["OPENAI_API_KEY"], model=model)
-        from ceiba_nl2sql.generation.llm import call_llm
-        await call_llm(llm, "reply: ok", "schema-metadata")
+async def probe_model_async(model: str) -> bool:
+    """True iff the configured key can call `model` (cheap 1-token probe).
+    Async so it can be awaited from inside `run_matrix`'s event loop (calling
+    `asyncio.run` there would raise 'cannot be called from a running loop')."""
+    from ceiba_nl2sql.generation.llm import call_llm
     try:
-        asyncio.run(_probe())
+        llm = OpenAiLlmClient(api_key=os.environ["OPENAI_API_KEY"], model=model)
+        await call_llm(llm, "reply: ok", "schema-metadata")
         return True
     except Exception:
         return False
+
+
+def probe_model(model: str) -> bool:
+    """Synchronous wrapper for standalone use (NOT from within an event loop)."""
+    return asyncio.run(probe_model_async(model))
 
 
 async def run_matrix(base_bundle: str, enriched_bundle: str, runs: int, password: str,
@@ -188,7 +193,7 @@ async def run_matrix(base_bundle: str, enriched_bundle: str, runs: int, password
     first and SKIPS (logs) any cell whose model the key cannot call.
     """
     models = models or RUNTIME_MODELS
-    available = [m for m in models if probe_model(m)]
+    available = [m for m in models if await probe_model_async(m)]
     skipped = [m for m in models if m not in available]
     if skipped:
         print(f"[skip] models not callable by this key: {skipped}")
