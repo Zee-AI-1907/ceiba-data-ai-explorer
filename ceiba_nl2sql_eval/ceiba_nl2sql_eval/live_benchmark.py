@@ -192,7 +192,8 @@ def _load_edges(bundle_dir: str) -> list[dict]:
 
 
 async def run_cell(bundle_dir: str, strict_prompt: bool, model: str, runs: int, password: str,
-                   *, sql_only: bool = True, use_tool: bool = False) -> dict:
+                   *, sql_only: bool = True, use_tool: bool = False,
+                   window_steering: bool = False, default_time_window: str | None = None) -> dict:
     """Run all 10 queries `runs` times against one (bundle, prompt, model) cell.
 
     sql_only=True (default, exploratory): score the GENERATED SQL without
@@ -211,7 +212,12 @@ async def run_cell(bundle_dir: str, strict_prompt: bool, model: str, runs: int, 
     if not sql_only:
         sa_engine = sa.create_engine(_sa_dsn(password),
                                      connect_args={"options": "-c default_transaction_read_only=on"})
-    options = GenerateOptions(strict_join_steering=strict_prompt, get_join_subgraph_tool=use_tool)
+    options = GenerateOptions(
+        strict_join_steering=strict_prompt,
+        get_join_subgraph_tool=use_tool,
+        window_steering=window_steering,
+        default_time_window=default_time_window,
+    )
     stats: list[QueryStats] = []
     for q in QUERIES:
         s = QueryStats(query_id=q.id)
@@ -318,9 +324,16 @@ async def probe_model_supports_tools_async(model: str) -> bool:
 
 
 async def run_matrix(base_bundle: str, enriched_bundle: str, runs: int, password: str,
-                     models: list[str] | None = None) -> list[dict]:
-    """Drive the full prompt × enrichment × model matrix. Probes each model
-    first and SKIPS (logs) any cell whose model the key cannot call.
+                     models: list[str] | None = None,
+                     *,
+                     window_steering_values: tuple[bool, ...] = (False,),
+                     default_time_window_values: tuple[str | None, ...] = (None,)) -> list[dict]:
+    """Drive the prompt × enrichment × model × tool (× window × time-window)
+    matrix. Probes each model first and SKIPS (logs) any cell whose model the
+    key cannot call, and the tool-on cells for models that do not honor tools.
+
+    The window_steering / default_time_window axes default to a single value
+    (off) so the core matrix stays lean; pass the pairs to A/B them.
     """
     models = models or RUNTIME_MODELS
     available = [m for m in models if await probe_model_async(m)]
@@ -341,14 +354,22 @@ async def run_matrix(base_bundle: str, enriched_bundle: str, runs: int, password
                 for use_tool in (False, True):
                     if use_tool and not tool_capable[model]:
                         continue
-                    label = (
-                        f"{model} | {enrich_label} | prompt={'strict' if strict else 'baseline'} "
-                        f"| tool={'on' if use_tool else 'off'}"
-                    )
-                    print(f"[run] {label}")
-                    cell = await run_cell(bundle, strict, model, runs, password, use_tool=use_tool)
-                    cell["enrich_label"] = enrich_label
-                    cell["label"] = label
-                    cell["use_tool"] = use_tool
-                    cells.append(cell)
+                    for window in window_steering_values:
+                        for time_window in default_time_window_values:
+                            label = (
+                                f"{model} | {enrich_label} | prompt={'strict' if strict else 'baseline'} "
+                                f"| tool={'on' if use_tool else 'off'} | window={'on' if window else 'off'} "
+                                f"| timewin={time_window or 'off'}"
+                            )
+                            print(f"[run] {label}")
+                            cell = await run_cell(
+                                bundle, strict, model, runs, password,
+                                use_tool=use_tool, window_steering=window, default_time_window=time_window,
+                            )
+                            cell["enrich_label"] = enrich_label
+                            cell["label"] = label
+                            cell["use_tool"] = use_tool
+                            cell["window_steering"] = window
+                            cell["default_time_window"] = time_window
+                            cells.append(cell)
     return cells
