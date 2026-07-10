@@ -1,0 +1,23 @@
+generation:
+  model: gpt-5.6-terra       # CAPABLE model for one-time generation (configurable; confirmed callable)
+  perCategoryCount: 3        # target VALID exemplars per category
+  maxAttemptsPerExemplar: 3  # regenerate on validation failure, up to this
+  sampleRows: 5              # rows in the scrubbed data sample
+categories:                  # configurable/promptable taxonomy
+  - id: admissions
+    intent: "When patients were admitted; admissions over time windows."
+  - id: length_of_stay
+    intent: "How long patients have been admitted; still-admitted vs discharged."
+  - id: vitals_extreme
+    intent: "Highest/lowest vital values (HR, SpO2, ...) over a window, per patient."
+  - id: ventilation_status
+    intent: "Which patients are/were on a ventilator; ventilation duration."
+  - id: bed_occupancy
+    intent: "Bed occupancy per unit/ward; currently occupied beds."
+  - id: org_rollup
+    intent: "Counts rolled up per hospital/unit/department/organization."
+seeds:                        # user-provided anchor questions (style + coverage)
+  - "can you bring me patients admitted in the last day?"
+  - "give me list of patients that have admitted more than 3 days"
+  - "get me the patient and vitals whose heart rate was worst in the last day"
+  - "can you get me list of ventilated patients?"
