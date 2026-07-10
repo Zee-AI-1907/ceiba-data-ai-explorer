@@ -607,6 +607,74 @@ def _row_counts_by_table_id(models: list[dict]) -> dict[str, int]:
     return counts
 
 
+def _run_exemplar_generation_stage(
+    *,
+    catalog: dict,
+    joingraph: dict,
+    phi: dict,
+    engine,
+    config_path: Path,
+    api_key: str,
+    out_path: Path,
+) -> list:
+    """W3 (opt-in, --generate-exemplars): generate LLM few-shot exemplars,
+    validate them against `engine` (EXPLAIN + a real EXECUTE for a non-empty
+    sample, the structural join-declared gate), PHI-scrub their sample rows,
+    and persist the survivors to `out_path` as one JSON line per exemplar
+    (the file is OVERWRITTEN on every call — it always reflects this build).
+
+    Extracted from `_run_build_pipeline_p3b` so it is unit-testable without a
+    real build/DB/network (see `prep/tests/test_cli_generate_exemplars.py`):
+    callers pass a FAKE `engine` (`.explain`/`.execute`/`.dialect`) and a
+    stub `LlmClient` to exercise this without touching OpenAI or a real
+    database — the only I/O this function itself performs beyond `engine` is
+    writing `out_path`.
+
+    `use_structured_output=False` on the LLM client is REQUIRED (same
+    discipline as `--llm-enrich`; see `enrich/llm_enrich.py`'s module
+    docstring and `exemplar_gen.py`'s): the generation prompt has its OWN
+    JSON contract (`{"exemplars": [...]}`), not R3's `{sql, description}`
+    json_schema response_format, which would otherwise force every
+    completion into the wrong shape and silently yield zero exemplars.
+
+    Returns the validated `Exemplar` list (possibly empty — a category that
+    never validates enough candidates contributes however many it DID, per
+    `run_exemplar_generation`'s own fail-open discipline). Does NOT catch
+    exceptions itself: callers get "never fail the build" behavior by
+    wrapping this call in their own try/except, matching every other opt-in
+    enrichment stage in this module (see the `--llm-enrich` block above and
+    the golden-exemplar-factory block in `_run_build_pipeline_p3b`).
+    """
+    import asyncio
+
+    from ceiba_nl2sql.generation.llm import build_llm_client
+
+    from prep.enrich.exemplar_gen import run_exemplar_generation
+    from prep.enrich.exemplar_gen_config import load_exemplar_gen_config
+
+    config = load_exemplar_gen_config(config_path)
+    llm = build_llm_client(api_key=api_key, model=config.model, use_structured_output=False)
+
+    generated_exemplars = asyncio.run(
+        run_exemplar_generation(
+            catalog=catalog,
+            edges=joingraph["edges"],
+            phi_columns_json=phi["columns"],
+            engine=engine,
+            llm=llm,
+            config=config,
+        )
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as handle:
+        for exemplar in generated_exemplars:
+            handle.write(json.dumps(exemplar.to_json()))
+            handle.write("\n")
+
+    return generated_exemplars
+
+
 def _run_build_pipeline_p3b(
     *,
     args: argparse.Namespace,
@@ -825,6 +893,7 @@ def _run_build_pipeline_p3b(
     from prep.exemplars import build_golden_exemplars, seed_exemplars
 
     golden_exemplars: list = []
+    generated_exemplars: list = []
     validation_engine = None
     try:
         from ceiba_nl2sql.engine.base import AttachSpec as _AttachSpec
@@ -853,13 +922,42 @@ def _run_build_pipeline_p3b(
             validator=_explain_ok,
             exclude_questions={e.question for e in seed_exemplars(include_staging_exemplars)},
         )
+
+        # W3 (opt-in, --generate-exemplars): LLM-generated few-shot exemplars,
+        # EXPLAIN+EXECUTE-validated and PHI-scrubbed against THIS build's real
+        # topology, REUSING the validation_engine already attached above (it
+        # is disposed in the `finally` below, same lifecycle as the golden
+        # exemplar factory). Nested try/except so a generation failure logs
+        # its OWN warning rather than being mislabeled as "golden exemplar
+        # factory skipped" by the outer handler — fail-open either way, the
+        # build always ships with at least the seed + golden exemplars.
+        if getattr(args, "generate_exemplars", False) and os.environ.get("OPENAI_API_KEY"):
+            try:
+                generated_exemplars = _run_exemplar_generation_stage(
+                    catalog=catalog,
+                    joingraph=joingraph,
+                    phi=phi,
+                    engine=validation_engine,
+                    config_path=REPO_ROOT / "config" / "exemplar_gen.yaml",
+                    api_key=os.environ.get("OPENAI_API_KEY"),
+                    out_path=REPO_ROOT / "config" / "exemplars.generated.jsonl",
+                )
+                logger.info(
+                    "generate-exemplars: %d validated exemplars written to config/exemplars.generated.jsonl",
+                    len(generated_exemplars),
+                )
+            except Exception as exc:  # noqa: BLE001 - exemplar generation must never fail the build
+                logger.warning("exemplar generation skipped: %s", exc)
     except Exception as exc:  # noqa: BLE001 - exemplar enrichment must never fail the build
         logger.warning("golden exemplar factory skipped (engine unavailable): %s", exc)
     finally:
         if validation_engine is not None:
             validation_engine.dispose()
 
-    exemplars = build_exemplars_json(include_staging=include_staging_exemplars, extra=golden_exemplars)
+    exemplars = build_exemplars_json(
+        include_staging=include_staging_exemplars,
+        extra=golden_exemplars + generated_exemplars,
+    )
 
     # Stage [3] PROFILE's synthetic-descriptor extension (SPEC §2.4 stage[3]
     # "-> profiles.json, synthetic.json descriptors", §1.8): built here, after
@@ -881,6 +979,7 @@ def _run_build_pipeline_p3b(
                 "autoSynonyms": len(glossary.get("autoSynonyms", [])),
                 "syntheticTables": len(synthetic["tables"]),
                 "goldenExemplars": len(golden_exemplars),
+                "generatedExemplars": len(generated_exemplars),
                 # P3 audit trail: what the LLM pass filled + what it cost.
                 "llmEnrichment": llm_enrich_report_json,
             },
@@ -1293,6 +1392,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "sampled cell). Requires OPENAI_API_KEY; model from "
             "NL2SQL_LLM_MODEL (default gpt-4o-mini). Fills empty slots only; "
             "everything applied is recorded in BUILD_REPORT.json."
+        ),
+    )
+    build_parser.add_argument(
+        "--generate-exemplars",
+        action="store_true",
+        dest="generate_exemplars",
+        help=(
+            "W3 (opt-in): LLM-generated few-shot NL->SQL exemplars, EXPLAIN+"
+            "EXECUTE-validated and PHI-scrubbed against this build's real "
+            "topology (config/exemplar_gen.yaml). Requires OPENAI_API_KEY. "
+            "Persisted to config/exemplars.generated.jsonl and folded into "
+            "exemplars.json alongside the seed and golden exemplars."
         ),
     )
     build_parser.set_defaults(func=cmd_build)
