@@ -99,3 +99,38 @@ def test_unknown_mode_raises():
     import pytest
     with pytest.raises(ValueError):
         compare("bogus", [(1,)], [(1,)])
+
+
+# ── T9: tool-capability probe (hermetic core) ─────────────────────────────────
+
+
+def test_client_supports_tools_true_on_tool_call():
+    import asyncio
+    from ceiba_nl2sql.generation.llm import LlmTurn, StubLlmClient, ToolCall
+    from ceiba_nl2sql_eval.live_benchmark import _client_supports_tools
+
+    stub = StubLlmClient([], turns=[
+        LlmTurn(text=None, tool_calls=[ToolCall(id="c1", name="ping", arguments="{}")],
+                finish_reason="tool_calls", usage=None, model="m")
+    ])
+    assert asyncio.run(_client_supports_tools(stub)) is True
+
+
+def test_client_supports_tools_false_when_model_ignores_tools():
+    import asyncio
+    from ceiba_nl2sql.generation.llm import LlmTurn, StubLlmClient
+    from ceiba_nl2sql_eval.live_benchmark import _client_supports_tools
+
+    stub = StubLlmClient([], turns=[LlmTurn(text="hi", tool_calls=[], finish_reason="stop", usage=None, model="m")])
+    assert asyncio.run(_client_supports_tools(stub)) is False
+
+
+def test_client_supports_tools_false_on_error():
+    import asyncio
+    from ceiba_nl2sql_eval.live_benchmark import _client_supports_tools
+
+    class _Boom:
+        async def complete_messages(self, *args, **kwargs):
+            raise RuntimeError("this model does not support tools")
+
+    assert asyncio.run(_client_supports_tools(_Boom())) is False

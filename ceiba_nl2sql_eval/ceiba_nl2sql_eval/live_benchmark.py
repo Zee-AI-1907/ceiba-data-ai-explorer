@@ -192,7 +192,7 @@ def _load_edges(bundle_dir: str) -> list[dict]:
 
 
 async def run_cell(bundle_dir: str, strict_prompt: bool, model: str, runs: int, password: str,
-                   *, sql_only: bool = True) -> dict:
+                   *, sql_only: bool = True, use_tool: bool = False) -> dict:
     """Run all 10 queries `runs` times against one (bundle, prompt, model) cell.
 
     sql_only=True (default, exploratory): score the GENERATED SQL without
@@ -211,7 +211,7 @@ async def run_cell(bundle_dir: str, strict_prompt: bool, model: str, runs: int, 
     if not sql_only:
         sa_engine = sa.create_engine(_sa_dsn(password),
                                      connect_args={"options": "-c default_transaction_read_only=on"})
-    options = GenerateOptions(strict_join_steering=strict_prompt)
+    options = GenerateOptions(strict_join_steering=strict_prompt, get_join_subgraph_tool=use_tool)
     stats: list[QueryStats] = []
     for q in QUERIES:
         s = QueryStats(query_id=q.id)
@@ -284,6 +284,39 @@ def probe_model(model: str) -> bool:
     return asyncio.run(probe_model_async(model))
 
 
+_PROBE_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "ping",
+        "description": "Reply by calling this tool with no arguments.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+
+async def _client_supports_tools(llm) -> bool:
+    """True iff the client honors tools=/tool_choice='required' by returning a
+    tool_calls response. Hermetic core of probe_model_supports_tools_async."""
+    try:
+        turn = await llm.complete_messages(
+            [{"role": "user", "content": "Call the ping tool."}], tools=[_PROBE_TOOL], tool_choice="required"
+        )
+        return bool(turn.tool_calls)
+    except Exception:
+        return False
+
+
+async def probe_model_supports_tools_async(model: str) -> bool:
+    """True iff `model` honors function-calling — a REAL tool_call probe, not
+    just callability (probe_model_async only checks the latter, so it would run
+    a tool-on cell against a model that silently ignores tools). Used to skip
+    the tool-on A/B cells for models that do not support tools. Note (blocker
+    B1): the gpt-5.x snapshots post-date the knowledge cutoff, so tool support
+    can only be confirmed at runtime against the real key — this is that check."""
+    llm = OpenAiLlmClient(api_key=os.environ["OPENAI_API_KEY"], model=model)
+    return await _client_supports_tools(llm)
+
+
 async def run_matrix(base_bundle: str, enriched_bundle: str, runs: int, password: str,
                      models: list[str] | None = None) -> list[dict]:
     """Drive the full prompt × enrichment × model matrix. Probes each model
@@ -294,15 +327,28 @@ async def run_matrix(base_bundle: str, enriched_bundle: str, runs: int, password
     skipped = [m for m in models if m not in available]
     if skipped:
         print(f"[skip] models not callable by this key: {skipped}")
+    # P1: the tool-on cells only run against models that actually honor tools —
+    # a real tool_call probe, skip-and-log otherwise (blocker B1).
+    tool_capable = {m: await probe_model_supports_tools_async(m) for m in available}
+    for model, ok in tool_capable.items():
+        if not ok:
+            print(f"[skip] model does not support tools; tool-on cells skipped: {model}")
     cells: list[dict] = []
     bundles = [("non_enriched", base_bundle), ("enriched", enriched_bundle)]
     for model in available:
         for enrich_label, bundle in bundles:
             for strict in (False, True):
-                label = f"{model} | {enrich_label} | prompt={'strict' if strict else 'baseline'}"
-                print(f"[run] {label}")
-                cell = await run_cell(bundle, strict, model, runs, password)
-                cell["enrich_label"] = enrich_label
-                cell["label"] = label
-                cells.append(cell)
+                for use_tool in (False, True):
+                    if use_tool and not tool_capable[model]:
+                        continue
+                    label = (
+                        f"{model} | {enrich_label} | prompt={'strict' if strict else 'baseline'} "
+                        f"| tool={'on' if use_tool else 'off'}"
+                    )
+                    print(f"[run] {label}")
+                    cell = await run_cell(bundle, strict, model, runs, password, use_tool=use_tool)
+                    cell["enrich_label"] = enrich_label
+                    cell["label"] = label
+                    cell["use_tool"] = use_tool
+                    cells.append(cell)
     return cells
