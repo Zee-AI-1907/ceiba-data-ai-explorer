@@ -72,10 +72,16 @@ def join_predicates_are_declared(
     for join in tree.find_all(exp.Join):
         on_condition = join.args.get("on")
         if on_condition is None:
+            # A JOIN with no ON clause at all (e.g. CROSS JOIN) asserts no FK
+            # relationship — reject it.
+            violations.append(f"<cross join {join.this.sql()}>")
             continue
+
+        declared_matches_in_join = 0
+        per_conjunct_violation_added = False
         for conjunct in _flatten_and_conjuncts(on_condition):
             if not isinstance(conjunct, exp.EQ):
-                continue  # non-equality ON condition — not this validator's concern
+                continue  # non-equality conjunct (filter / range) — not a join predicate
             left, right = conjunct.left, conjunct.right
             if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
                 continue  # equality involving a literal/expression — a filter, not a join
@@ -87,6 +93,7 @@ def join_predicates_are_declared(
             if left_table is None or right_table is None:
                 # Unresolvable qualifier: fail closed rather than silently accept.
                 violations.append(conjunct.sql())
+                per_conjunct_violation_added = True
                 continue
             if left_table.lower() == right_table.lower():
                 continue  # self-column comparison — not a cross-table join
@@ -97,8 +104,21 @@ def join_predicates_are_declared(
                     (right_table.lower(), right.name.lower()),
                 }
             )
-            if predicate_pair not in declared_column_pairs:
+            if predicate_pair in declared_column_pairs:
+                declared_matches_in_join += 1
+            else:
                 violations.append(conjunct.sql())
+                per_conjunct_violation_added = True
+
+        if declared_matches_in_join == 0 and not per_conjunct_violation_added:
+            # The join is not backed by ANY declared FK equality AND had no
+            # column=column equality to flag individually — a theta-join
+            # (`ON a.x > b.y`) or a `1=1` cross-join disguise. Reject the whole
+            # join so an unbacked join can never slip through as accepted. (When
+            # a per-conjunct violation was already recorded, that offending
+            # equality is the specific, actionable report — no need to also emit
+            # the whole ON clause.)
+            violations.append(on_condition.sql())
 
     return (len(violations) == 0, violations)
 

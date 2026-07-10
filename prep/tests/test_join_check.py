@@ -49,6 +49,67 @@ def test_invented_name_match_join_rejected():
     assert not ok and bad
 
 
+def test_fk_join_with_nonequality_filter_accepted():
+    """An FK-equality join PLUS a non-equality filter conjunct on the ON
+    clause is still a valid declared join — the filter is not a violation."""
+    edges = [
+        {
+            "from": "s.Shared.Measurements",
+            "fromColumns": ["DeviceId"],
+            "to": "s.Shared.Devices",
+            "toColumns": ["Id"],
+        }
+    ]
+    sql = (
+        'SELECT 1 FROM "Shared"."Measurements" a '
+        'JOIN "Shared"."Devices" b '
+        "ON a.\"DeviceId\"=b.\"Id\" AND b.\"MeasuredDate\" > '2020-01-01'"
+    )
+    ok, bad = join_predicates_are_declared(sql, edges)
+    assert ok is True
+    assert bad == []
+
+
+def test_pure_nonequality_join_rejected():
+    """A theta-join whose ON clause has NO column=column equality at all is
+    not backed by any FK edge and must be rejected."""
+    edges = [
+        {
+            "from": "s.Shared.Measurements",
+            "fromColumns": ["DeviceId"],
+            "to": "s.Shared.Devices",
+            "toColumns": ["Id"],
+        }
+    ]
+    sql = (
+        'SELECT 1 FROM "Shared"."Measurements" a '
+        'JOIN "Shared"."Devices" b ON a."x" > b."y"'
+    )
+    ok, bad = join_predicates_are_declared(sql, edges)
+    assert ok is False
+    assert bad
+
+
+def test_cross_join_disguise_rejected():
+    """`ON 1=1` (a disguised cross-join) has no declared FK equality and must
+    be rejected."""
+    edges = [
+        {
+            "from": "s.Shared.Measurements",
+            "fromColumns": ["DeviceId"],
+            "to": "s.Shared.Devices",
+            "toColumns": ["Id"],
+        }
+    ]
+    sql = (
+        'SELECT 1 FROM "Shared"."Measurements" a '
+        'JOIN "Shared"."Devices" b ON 1=1'
+    )
+    ok, bad = join_predicates_are_declared(sql, edges)
+    assert ok is False
+    assert bad
+
+
 def test_multi_join_flags_only_the_invented_one():
     edges = [
         {
