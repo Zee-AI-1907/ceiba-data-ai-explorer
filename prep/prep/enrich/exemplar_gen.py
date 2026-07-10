@@ -297,6 +297,14 @@ async def run_exemplar_generation(
     join_hints_text = _render_join_hints_text(edges)
     phi_columns = _build_phi_columns(phi_columns_json)
     qualify_schema = _build_qualify_schema(catalog)
+    # Single source of truth for the SQL dialect: the engine that actually
+    # binds/executes these candidates decides how their SQL is parsed. Every
+    # sqlglot-backed gate below (join check, PHI scrub, table extraction) and
+    # the emitted Exemplar's `dialect` field all key off this one value —
+    # parsing a DuckDB candidate as postgres would raise `ParseError` on a
+    # DuckDB-only construct (`**`, `//`, POSITIONAL JOIN) and, before this,
+    # crash the entire run.
+    dialect = engine.dialect()
 
     all_exemplars: list[Exemplar] = []
     for category in config.categories:
@@ -344,7 +352,21 @@ async def run_exemplar_generation(
                     )
                     continue
 
-                join_ok, violations = join_predicates_are_declared(sql, edges)
+                try:
+                    join_ok, violations = join_predicates_are_declared(
+                        sql, edges, dialect=dialect
+                    )
+                except Exception as exc:  # noqa: BLE001 - a parse failure must never abort the run
+                    # Defense in depth: even under the correct dialect a
+                    # candidate's SQL can be unparseable (or hit a sqlglot
+                    # edge case). Degrade to a dropped candidate, never a crash.
+                    logger.info(
+                        "exemplar-gen[%s]: dropped %r (join check raised: %s)",
+                        category.id,
+                        question,
+                        exc,
+                    )
+                    continue
                 if not join_ok:
                     logger.info(
                         "exemplar-gen[%s]: dropped %r (invented join: %s)",
@@ -376,7 +398,12 @@ async def run_exemplar_generation(
                     continue
 
                 scrubbed_sample = scrub_output_sample(
-                    sql, rows, phi_columns, qualify_schema, sample_rows=config.sample_rows
+                    sql,
+                    rows,
+                    phi_columns,
+                    qualify_schema,
+                    sample_rows=config.sample_rows,
+                    dialect=dialect,
                 )
                 exemplar_ordinal += 1
                 kept.append(
@@ -384,8 +411,8 @@ async def run_exemplar_generation(
                         id=f"gen:{category.id}:{exemplar_ordinal}",
                         question=question,
                         sql=sql,
-                        dialect="duckdb",
-                        tables=_tables_referenced(sql),
+                        dialect=dialect,
+                        tables=_tables_referenced(sql, dialect=dialect),
                         tags=(category.id, "difficulty:generated"),
                         validated=True,
                         sample=tuple(scrubbed_sample),

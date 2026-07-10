@@ -101,8 +101,12 @@ class _FakeEngine:
     not engine fussiness — a real engine's EXPLAIN/EXECUTE behavior is
     covered by the engine's own tests, not this orchestrator's."""
 
-    def __init__(self, rows: list[dict]):
+    def __init__(self, rows: list[dict], dialect: str = "duckdb"):
         self._rows = rows
+        self._dialect = dialect
+
+    def dialect(self) -> str:
+        return self._dialect
 
     def explain(self, sql: str, **kwargs) -> SimpleNamespace:
         return SimpleNamespace(ok=True)
@@ -276,3 +280,43 @@ def test_run_exemplar_generation_gives_up_after_max_attempts_without_raising():
 
     assert exemplars == []
     assert llm.calls == 2  # exhausted max_attempts, never more
+
+
+def test_run_exemplar_generation_survives_unparseable_and_dialect_specific_sql():
+    # Regression (Task 7 review Critical): a DuckDB-only construct (`**`
+    # power) parses fine under dialect="duckdb" but raised sqlglot.ParseError
+    # under the old hardcoded postgres default, crashing the ENTIRE run across
+    # all categories. A genuinely unparseable candidate raises under ANY
+    # dialect. Neither may abort the run: the DuckDB-only candidate is
+    # legitimately KEPT (proving engine.dialect() is threaded into the parse),
+    # and the unparseable one degrades to a dropped candidate (proving the
+    # join-check call is wrapped in the same per-candidate try/except).
+    duckdb_power_sql = 'SELECT v."Id" AS visit_id FROM "Visits" v WHERE v."Id" ** 2 > 4'
+    unparseable_sql = "SELECT SELECT FROM WHERE ((("
+    payload = {
+        "exemplars": [
+            {"question": "duckdb power op", "sql": duckdb_power_sql},
+            {"question": "garbage sql", "sql": unparseable_sql},
+            {"question": "declared-join question", "sql": _DECLARED_JOIN_SQL},
+        ]
+    }
+    llm = _FakeLlm(payload)
+    engine = _FakeEngine(rows=[{"visit_id": 42, "patient_name": "Jane Doe"}], dialect="duckdb")
+    config = _orch_config(per_category_count=3, max_attempts=1)
+
+    # The whole point: this call COMPLETES WITHOUT RAISING despite the
+    # unparseable candidate and the DuckDB-only construct.
+    exemplars = asyncio.run(
+        run_exemplar_generation(
+            _ORCH_CATALOG, _ORCH_EDGES, _ORCH_PHI_COLUMNS_JSON, engine, llm, config
+        )
+    )
+
+    kept_sqls = {ex.sql for ex in exemplars}
+    # The unparseable candidate was dropped, not fatal.
+    assert unparseable_sql not in kept_sqls
+    # Both genuinely-valid candidates (incl. the DuckDB-only `**`) survived —
+    # under the old postgres default the `**` one would have crashed the run.
+    assert duckdb_power_sql in kept_sqls
+    assert _DECLARED_JOIN_SQL in kept_sqls
+    assert all(ex.dialect == "duckdb" for ex in exemplars)  # engine.dialect(), not hardcoded
