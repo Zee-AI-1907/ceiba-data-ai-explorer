@@ -646,6 +646,10 @@ def assemble_repair_prompt(
     """Builds the SELF-REPAIR round prompt. Mirrors
     lib/rag/promptAssembly.ts `assembleRepairPrompt`. Inherits the JOIN GRAPH
     / SEMANTIC HINTS sections for free since it delegates to `assemble_prompt`.
+
+    `strict_join_steering` (Task 2, opt-in) is forwarded verbatim to the
+    delegated `assemble_prompt`, so a repair round carries the same imperative
+    join/filter steering as the initial round (default off).
     """
     base_prompt = assemble_prompt(
         tables,

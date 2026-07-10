@@ -260,6 +260,28 @@ def test_assemble_repair_prompt_inherits_join_graph_and_semantic_hints():
     assert "REPAIR REQUIRED" in prompt
 
 
+def test_assemble_repair_prompt_strict_join_steering_lines_present_only_when_enabled():
+    from ceiba_nl2sql.generation.prompt import assemble_repair_prompt
+
+    def _build(strict: bool) -> str:
+        return assemble_repair_prompt(
+            [_measurements_table(), _patients_table()],
+            [],
+            "heart rate over 120",
+            CAPS,
+            "duckdb",
+            failed_sql="SELECT 1",
+            error="bad join",
+            strict_join_steering=strict,
+        )
+
+    off = _build(False)  # default-off path
+    on = _build(True)
+    for needle in ("use ONLY the equality join predicates", "add a WHERE condition ONLY if", "trace the join path"):
+        assert needle not in off
+        assert needle in on
+
+
 # ── preamble rule ────────────────────────────────────────────────────────────
 
 
