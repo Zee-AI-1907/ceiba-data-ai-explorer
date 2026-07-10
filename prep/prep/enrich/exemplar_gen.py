@@ -46,6 +46,28 @@ from ceiba_nl2sql.engine.base import ExecuteOptions
 from prep.enrich.exemplar_gen_config import Category, ExemplarGenConfig
 from prep.enrich.join_check import join_predicates_are_declared
 from prep.enrich.output_scrub import scrub_output_sample
+
+
+def _json_safe(value):
+    """Convert a scrubbed sample value to a JSON-serializable form. Staging
+    non-PHI datetime/date columns pass the scrubber as real datetime objects,
+    and numeric columns can arrive as Decimal — both break json.dumps when the
+    exemplar is persisted (config/exemplars.generated.jsonl AND the bundle's
+    exemplars.json). Convert datetimes to ISO strings and Decimals to float;
+    recurse through row lists/tuples/dicts.
+    """
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    return value
 from prep.exemplars import Exemplar
 
 logger = logging.getLogger("prep.enrich.exemplar_gen")
@@ -420,13 +442,15 @@ async def run_exemplar_generation(
                     )
                     continue
 
-                scrubbed_sample = scrub_output_sample(
-                    sql,
-                    rows,
-                    phi_columns,
-                    qualify_schema,
-                    sample_rows=config.sample_rows,
-                    dialect=dialect,
+                scrubbed_sample = _json_safe(
+                    scrub_output_sample(
+                        sql,
+                        rows,
+                        phi_columns,
+                        qualify_schema,
+                        sample_rows=config.sample_rows,
+                        dialect=dialect,
+                    )
                 )
                 exemplar_ordinal += 1
                 kept.append(

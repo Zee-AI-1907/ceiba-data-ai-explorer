@@ -320,3 +320,22 @@ def test_run_exemplar_generation_survives_unparseable_and_dialect_specific_sql()
     assert duckdb_power_sql in kept_sqls
     assert _DECLARED_JOIN_SQL in kept_sqls
     assert all(ex.dialect == "duckdb" for ex in exemplars)  # engine.dialect(), not hardcoded
+
+
+def test_json_safe_converts_datetime_decimal_and_recurses():
+    """_json_safe makes a scrubbed sample JSON-serializable: staging non-PHI
+    datetime columns pass the scrubber as datetime objects (and numerics as
+    Decimal), which would break json.dumps into the bundle/jsonl."""
+    import json
+    from datetime import datetime
+    from decimal import Decimal
+
+    from prep.enrich.exemplar_gen import _json_safe
+
+    sample = [[datetime(2026, 7, 10, 13, 44, 14), Decimal("98.6"), "ok", 5, None]]
+    safe = _json_safe(sample)
+    # round-trips through json now
+    json.dumps(safe)
+    assert safe[0][0] == "2026-07-10T13:44:14"
+    assert safe[0][1] == 98.6
+    assert safe[0][2:] == ["ok", 5, None]
