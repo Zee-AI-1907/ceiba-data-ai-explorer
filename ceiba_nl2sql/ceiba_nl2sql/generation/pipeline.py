@@ -53,9 +53,17 @@ _T = TypeVar("_T")
 Offload = Callable[..., Awaitable]
 
 from ceiba_nl2sql.engine.base import EngineCapabilities, ExecuteOptions, PlanError, PlanOk, QueryEngine, SqlDialect
-from ceiba_nl2sql.generation.llm import DEFAULT_LLM_MODEL, LlmClient, TokenUsage, call_llm
+from ceiba_nl2sql.generation.llm import (
+    DEFAULT_LLM_MODEL,
+    DEFAULT_MAX_TOOL_ROUNDS,
+    LlmClient,
+    TokenUsage,
+    call_llm,
+    call_llm_with_tools,
+)
 from ceiba_nl2sql.generation.pricing import estimate_cost_usd
-from ceiba_nl2sql.generation.prompt import assemble_prompt, assemble_repair_prompt
+from ceiba_nl2sql.generation.prompt import assemble_plan_prompt, assemble_prompt, assemble_repair_prompt
+from ceiba_nl2sql.generation.tools import make_get_join_subgraph_tool
 from ceiba_nl2sql.guard.cardinality import cardinality_guard_from_context
 from ceiba_nl2sql.guard.limit import enforce_default_limit as _enforce_default_limit_guard
 from ceiba_nl2sql.guard.explain_estimate import (
@@ -64,7 +72,12 @@ from ceiba_nl2sql.guard.explain_estimate import (
     evaluate_plan_estimate,
     pg_explain_estimate,
 )
-from ceiba_nl2sql.retrieval.retriever import HybridRetriever, RetrieveOptions, SchemaContext
+from ceiba_nl2sql.retrieval.retriever import (
+    HybridRetriever,
+    RetrieveOptions,
+    SchemaContext,
+    build_bridge_stub_tables,
+)
 from ceiba_nl2sql.sqltools.guard import TableAllowlistCheck, guard_sql
 
 DEFAULT_TOKEN_BUDGET = 2500
@@ -184,6 +197,14 @@ class GenerateOptions:
     # where the cardinality guard only bounds large-time-series tables. Off =>
     # unchanged behavior for callers that manage limits themselves.
     enforce_default_limit: bool = True
+    # P1 (opt-in, A/B): gated tool-calling planning phase. When on, the model
+    # calls get_join_subgraph with the tables it declares and the returned FK
+    # subgraph (edges + bridge paths) drives BOTH the initial and repair prompts
+    # instead of the retriever-fed JOIN GRAPH. Skipped for single-table routes
+    # and clients without complete_messages, so the flag-off / non-tool path is
+    # byte-identical. max_tool_rounds bounds the plan loop.
+    get_join_subgraph_tool: bool = False
+    max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS
 
 
 def extract_sql(raw: str) -> tuple[str, str]:
@@ -509,24 +530,71 @@ async def generate_sql(
     # BLOCKING (embed + BM25): offload so it does not stall the event loop.
     context = await offload(retriever.retrieve, question, retrieve_options)
 
+    # R1 routing: the cheap tier drives ONLY when retrieval proves the question
+    # join-free; anything that could join uses the strong model. Computed here so
+    # the P1 plan phase runs on the SAME client that will generate.
+    initial_llm = simple_llm if (simple_llm is not None and route_is_simple(context)) else llm
+
+    # ── P1 plan phase (gated) — let the model declare the tables it needs via
+    # the get_join_subgraph tool; the returned FK subgraph (edges + bridge paths
+    # + bridge stubs) then drives BOTH the initial and repair prompts instead of
+    # the retriever-fed JOIN GRAPH. Skipped for single-table routes (no join to
+    # reconnect) and clients without complete_messages (-> byte-identical
+    # flag-off path). Egress stays schema-metadata: table/FK names only.
+    plan_tables = context.tables
+    plan_join_hints = context.join_hints
+    plan_join_paths = context.join_paths
+    if (
+        options.get_join_subgraph_tool
+        and not route_is_simple(context)
+        and hasattr(initial_llm, "complete_messages")
+    ):
+        captured: dict = {}
+        adjacency, known_table_ids, get_table_ref = retriever.join_subgraph_inputs()
+        subgraph_tool = make_get_join_subgraph_tool(
+            adjacency=adjacency,
+            known_table_ids=known_table_ids,
+            get_table_ref=get_table_ref,
+            on_subgraph=lambda declared: captured.__setitem__("subgraph", declared),
+        )
+        plan_prompt = assemble_plan_prompt(context.tables, question, capabilities, resolved_dialect)
+        plan_result = await call_llm_with_tools(
+            initial_llm,
+            [{"role": "user", "content": plan_prompt}],
+            tools=[subgraph_tool.schema],
+            handlers={subgraph_tool.name: subgraph_tool.handler},
+            egress_class="schema-metadata",
+            max_rounds=options.max_tool_rounds,
+        )
+        metered_calls.append((plan_result.model, plan_result.usage))
+        subgraph = captured.get("subgraph")
+        if subgraph is not None and (subgraph.join_hints or subgraph.join_paths):
+            stubs = build_bridge_stub_tables(
+                subgraph.bridge_nodes, adjacency=adjacency, get_table_ref=get_table_ref
+            )
+            existing_ids = {t.table_id for t in context.tables}
+            plan_tables = list(context.tables) + [s for s in stubs if s.table_id not in existing_ids]
+            plan_join_hints = subgraph.join_hints
+            plan_join_paths = subgraph.join_paths
+
     # [B]+[C] assemble prompt + first LLM call. Egress class is
     # schema-metadata: the prompt is BAA-safe by construction (no
     # patient-row values) — never gated by OPENAI_BAA_SIGNED.
     initial_prompt = assemble_prompt(
-        context.tables,
+        plan_tables,
         context.cardinality_warnings,
         question,
         capabilities,
         resolved_dialect,
         default_limit=default_limit,
-        # CRITICAL: forward the retrieved join graph + semantic hints. Without
-        # these, assemble_prompt silently omits the JOIN GRAPH and SEMANTIC
-        # HINTS sections (they default to empty), so the model never sees the
-        # FK edges (-> guesses wrong join columns like mm.Id=m.Id) or the coded
-        # value mapping (-> wrong MeasurementTypeId). This was the root cause of
-        # the multi-hop-query failures in staging benchmarking.
-        join_hints=context.join_hints,
-        join_paths=context.join_paths,
+        # CRITICAL: forward the join graph + semantic hints. Without these,
+        # assemble_prompt silently omits the JOIN GRAPH and SEMANTIC HINTS
+        # sections (they default to empty), so the model never sees the FK edges
+        # (-> guesses wrong join columns like mm.Id=m.Id) or the coded value
+        # mapping. plan_join_hints/plan_join_paths are the tool-declared subgraph
+        # when the P1 plan phase ran, else the retriever-fed graph.
+        join_hints=plan_join_hints,
+        join_paths=plan_join_paths,
         glossary_hits=context.glossary_hits,
         token_budget=context.token_estimate or None,
         # R2: static context orders question-varying sections last so the
@@ -539,9 +607,6 @@ async def generate_sql(
         # `exemplars_used`, so the mechanism had zero effect on generation.
         exemplars=context.exemplars,
     )
-    # R1 routing: the cheap tier drives ONLY when retrieval proves the
-    # question join-free; anything that could join uses the strong model.
-    initial_llm = simple_llm if (simple_llm is not None and route_is_simple(context)) else llm
     result = await call_llm(initial_llm, initial_prompt, "schema-metadata")
     metered_calls.append((result.model, result.usage))
     completion = result.text
@@ -582,7 +647,7 @@ async def generate_sql(
         last_error = failure.error
 
         repair_prompt = assemble_repair_prompt(
-            context.tables,
+            plan_tables,
             context.cardinality_warnings,
             question,
             capabilities,
@@ -592,9 +657,11 @@ async def generate_sql(
             hint=failure.hint,
             default_limit=default_limit,
             # same as the initial prompt: the repair round MUST also carry the
-            # join graph + semantic hints, or the model repairs blind.
-            join_hints=context.join_hints,
-            join_paths=context.join_paths,
+            # join graph + semantic hints, or the model repairs blind. When the
+            # P1 plan phase ran, this is the tool-declared subgraph (NOT the
+            # survivor-fed graph) so repair does not silently revert.
+            join_hints=plan_join_hints,
+            join_paths=plan_join_paths,
             glossary_hits=context.glossary_hits,
             token_budget=context.token_estimate or None,
             semantic_hints_last=getattr(context, "static_context", False),

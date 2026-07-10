@@ -789,6 +789,16 @@ class HybridRetriever:
             raise RuntimeError("HybridRetriever: load() must succeed before calling retrieve().")
         return self._bundle, self._vss, self._table_bm25, self._column_bm25
 
+    def join_subgraph_inputs(self) -> tuple[JoinAdjacency, set[str], Callable[[str], str | None]]:
+        """The three inputs build_join_subgraph / the get_join_subgraph tool need:
+        the precomputed join adjacency, the set of ALL bundle tableIds (for
+        resolution + unknown-detection), and a tableId -> quotedRef closure. Kept
+        here so callers do not reach into the retriever's private bundle state.
+        """
+        bundle, *_ = self._ensure_loaded()
+        known_table_ids = {t["tableId"] for t in bundle.catalog.get("tables", []) if t.get("tableId")}
+        return self._adjacency, known_table_ids, lambda table_id: (bundle.get_table(table_id) or {}).get("quotedRef")
+
     # ── stage 1: expand + normalize the question ────────────────────────────
 
     def _expand_question(self, question: str) -> tuple[str, list[GlossaryHit]]:

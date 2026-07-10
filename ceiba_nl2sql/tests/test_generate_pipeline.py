@@ -22,7 +22,7 @@ from ceiba_nl2sql.bundle.loader import TEST_FALLBACK_EMBEDDING_MODEL_ID
 from ceiba_nl2sql.embed.local_embedder import DeterministicHashEmbedder
 from ceiba_nl2sql.engine.base import AttachSpec
 from ceiba_nl2sql.engine.duckdb_engine import DuckDbEngine
-from ceiba_nl2sql.generation.llm import StubLlmClient
+from ceiba_nl2sql.generation.llm import LlmCompletion, LlmTurn, StubLlmClient, TokenUsage, ToolCall
 from ceiba_nl2sql.generation.pipeline import GenerateOptions, GenerationError, generate_sql
 from ceiba_nl2sql.retrieval.retriever import HybridRetriever
 
@@ -174,6 +174,90 @@ GROUP BY v."wardId" ORDER BY c DESC LIMIT 1000'''
             assert response.repair is not None
             assert response.repair.rounds == 1
             assert "order by" in (response.repair.last_error or "").lower() or "group" in (response.repair.last_error or "").lower()
+        finally:
+            retriever.dispose()
+
+
+def _plan_turns(tables_json: str):
+    # A tool-call turn (declaring tables) then a no-tool turn that ends the plan
+    # loop; the second turn's text is ignored (the captured subgraph is used).
+    return [
+        LlmTurn(
+            text=None, tool_calls=[ToolCall(id="c1", name="get_join_subgraph", arguments=tables_json)],
+            finish_reason="tool_calls", usage=None, model="gpt-4o-mini",
+        ),
+        LlmTurn(text="planned", tool_calls=[], finish_reason="stop", usage=None, model="gpt-4o-mini"),
+    ]
+
+
+class _OnlyCompleteClient:
+    """A minimal LlmClient with complete() but NO complete_messages, to prove the
+    plan phase is skipped (byte-identical fallback) for tool-incapable clients.
+    """
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.prompts: list[str] = []
+
+    async def complete(self, prompt: str) -> LlmCompletion:
+        self.prompts.append(prompt)
+        return LlmCompletion(text=self._text, usage=TokenUsage(prompt_tokens=5, completion_tokens=5, total_tokens=10), model="gpt-4o-mini")
+
+
+class TestJoinSubgraphToolPhase:
+    async def test_flag_off_runs_no_plan_turn(self, engine):
+        retriever = _build_retriever()
+        try:
+            llm = StubLlmClient([GOOD_HEART_RATE_SQL])
+            response = await generate_sql(question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm)
+            assert response.sql
+            assert llm.message_batches == []  # complete_messages never called
+            assert response.usage.llm_calls == 1
+        finally:
+            retriever.dispose()
+
+    async def test_flag_on_runs_plan_phase_then_generates(self, engine):
+        retriever = _build_retriever()
+        try:
+            llm = StubLlmClient(
+                [GOOD_HEART_RATE_SQL], turns=_plan_turns('{"tables": ["mock.public.MeasurementsMock"]}')
+            )
+            options = GenerateOptions(get_join_subgraph_tool=True)
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+            )
+            assert response.sql
+            assert len(llm.message_batches) >= 1  # the plan phase ran
+            assert response.usage.llm_calls == 2  # plan phase + generation both metered
+        finally:
+            retriever.dispose()
+
+    async def test_flag_on_falls_back_when_client_lacks_complete_messages(self, engine):
+        retriever = _build_retriever()
+        try:
+            llm = _OnlyCompleteClient(GOOD_HEART_RATE_SQL)
+            options = GenerateOptions(get_join_subgraph_tool=True)
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+            )
+            assert response.sql
+            assert response.usage.llm_calls == 1  # no plan phase without complete_messages
+        finally:
+            retriever.dispose()
+
+    async def test_flag_on_repair_round_still_completes(self, engine):
+        retriever = _build_retriever()
+        try:
+            llm = StubLlmClient(
+                [UNBOUNDED_HEART_RATE_SQL, GOOD_HEART_RATE_SQL],
+                turns=_plan_turns('{"tables": ["mock.public.MeasurementsMock"]}'),
+            )
+            options = GenerateOptions(get_join_subgraph_tool=True)
+            response = await generate_sql(
+                question=HEART_RATE_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+            )
+            assert response.repair is not None and response.repair.rounds == 1
+            assert response.sql
         finally:
             retriever.dispose()
 
