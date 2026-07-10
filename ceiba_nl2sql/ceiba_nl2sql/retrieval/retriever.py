@@ -660,6 +660,45 @@ def build_join_subgraph(
     )
 
 
+def build_bridge_stub_tables(
+    bridge_ids: set[str], *, adjacency: JoinAdjacency, get_table_ref: Callable[[str], str | None]
+) -> list[RenderedTable]:
+    """Minimal role='bridge' RenderedTable stubs for the join-subgraph tool, so
+    _render_join_graph can source-qualify each bridge and list its join columns
+    without the retriever's _render_table (which would pull table profiles /
+    sample values / the PHI machinery a schema-only tool must avoid). Each stub
+    carries ONLY the PK/FK columns the bridge is joined on — derived from the
+    join-graph edges touching it — never business columns or allowed_values.
+    """
+    stubs: list[RenderedTable] = []
+    for bridge_id in sorted(bridge_ids):
+        join_columns: set[str] = set()
+        for _neighbor, edge in adjacency.get(bridge_id, []):
+            if edge["from"] == bridge_id:
+                join_columns.update(edge["fromColumns"])
+            if edge["to"] == bridge_id:
+                join_columns.update(edge["toColumns"])
+        columns = [
+            RenderedColumn(
+                name=name, quoted_name=f'"{name}"', data_type="", unit=None, is_time_column=False,
+                is_foreign_key_or_primary_key=True,
+            )
+            for name in sorted(join_columns)
+        ]
+        stubs.append(
+            RenderedTable(
+                table_id=bridge_id,
+                quoted_ref=get_table_ref(bridge_id) or bridge_id.split(".")[-1],
+                grain="",
+                columns=columns,
+                approx_row_count=0,
+                is_large_time_series=False,
+                role="bridge",
+            )
+        )
+    return stubs
+
+
 class HybridRetriever:
     """The SPEC §4 `Retriever` implementation. Coarse-to-fine: glossary-expand
     -> table recall (hybrid dense+BM25 RRF, importance-biased) -> column

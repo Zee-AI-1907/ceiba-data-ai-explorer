@@ -3,7 +3,11 @@ get_join_subgraph tool calls with the model's declared table set. Exercised
 against a HAND-BUILT staging-like adjacency (mock-v1's longest chain is only 3
 hops, so a 4-5-hop reconnect cannot be written against that bundle).
 """
-from ceiba_nl2sql.retrieval.retriever import build_join_adjacency, build_join_subgraph
+from ceiba_nl2sql.retrieval.retriever import (
+    build_bridge_stub_tables,
+    build_join_adjacency,
+    build_join_subgraph,
+)
 
 
 def _edge(frm, fcol, to, tcol, card="many-to-one"):
@@ -104,3 +108,67 @@ def test_build_join_subgraph_hints_cover_bridge_edges():
     assert (REFS[MM], REFS[M]) in hint_pairs
     assert (REFS[M], REFS[A]) in hint_pairs
     assert (REFS[U], REFS[D]) in hint_pairs
+
+
+def _stubs(bridge_ids):
+    return build_bridge_stub_tables(
+        bridge_ids, adjacency=build_join_adjacency(EDGES), get_table_ref=lambda t: REFS.get(t)
+    )
+
+
+def test_build_bridge_stub_tables_are_pk_fk_only_bridges():
+    stubs = _stubs({M, A})
+    by_id = {s.table_id: s for s in stubs}
+    assert set(by_id) == {M, A}
+    assert all(s.role == "bridge" for s in stubs)
+    # Monitors' join cols = its FK (AcceptanceId -> Acceptances) + its PK (Id,
+    # referenced by MonitorMeasurements.DeviceId -> Monitors.Id).
+    m_cols = {c.name for c in by_id[M].columns}
+    assert {"AcceptanceId", "Id"} <= m_cols
+    # PK/FK-only: no business columns, no sample values leaked.
+    assert all(c.allowed_values is None for s in stubs for c in s.columns)
+
+
+def test_render_join_graph_includes_declared_bridge_stub_source_qualified():
+    from ceiba_nl2sql.generation.prompt import _render_join_graph
+
+    sub = _sub([MM, D])
+    text = _render_join_graph(sub.join_hints, sub.join_paths, _stubs(sub.bridge_nodes))
+    assert "JOIN GRAPH" in text
+    assert "staging." in text  # bridge/edge refs are source-qualified, not bare
+
+
+# ── T6: get_join_subgraph tool registry ──────────────────────────────────────
+
+
+def _tool(capture=None):
+    from ceiba_nl2sql.generation.tools import make_get_join_subgraph_tool
+    return make_get_join_subgraph_tool(
+        adjacency=build_join_adjacency(EDGES),
+        known_table_ids=KNOWN,
+        get_table_ref=lambda t: REFS.get(t),
+        on_subgraph=capture,
+    )
+
+
+def test_get_join_subgraph_tool_handler_renders_and_captures():
+    captured = []
+    tool = _tool(capture=captured.append)
+    result = tool.handler({"tables": [MM, D]})
+    assert "JOIN GRAPH" in result
+    assert "staging." in result
+    assert captured and captured[0].bridge_nodes == {M, A, U}  # subgraph captured for the pipeline
+
+
+def test_get_join_subgraph_tool_handler_reports_unknown_table():
+    result = _tool().handler({"tables": [P, "staging.Shared.Nope"]})
+    assert "staging.Shared.Nope" in result
+    assert "UNKNOWN" in result.upper()
+
+
+def test_get_join_subgraph_tool_schema_shape():
+    tool = _tool()
+    assert tool.name == "get_join_subgraph"
+    assert tool.schema["type"] == "function"
+    assert tool.schema["function"]["name"] == "get_join_subgraph"
+    assert tool.schema["function"]["parameters"]["properties"]["tables"]["type"] == "array"

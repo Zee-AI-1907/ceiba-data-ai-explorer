@@ -333,6 +333,17 @@ def test_strict_join_steering_forbids_undeclared_but_requires_all_needed_joins()
     assert "return fewer tables rather than fabricate a link" not in on
 
 
+def test_assemble_plan_prompt_omits_sql_response_format_and_survivor_join_graph():
+    from ceiba_nl2sql.generation.prompt import assemble_plan_prompt
+
+    prompt = assemble_plan_prompt([_measurements_table()], "heart rate over 120", CAPS, "duckdb")
+    assert "tableId:" in prompt  # tableId-bearing inventory so the model echoes canonical ids
+    assert "heart rate over 120" in prompt
+    assert "get_join_subgraph" in prompt  # instructs the tool call
+    assert "JOIN GRAPH" not in prompt  # no survivor-fed join graph pre-rendered
+    assert "Respond with the SQL only" not in prompt  # not a generation turn
+
+
 # ── cardinality-guard remediation: multi-hop chain clarity + dialect note ──
 
 
