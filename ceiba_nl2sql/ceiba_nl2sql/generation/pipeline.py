@@ -57,6 +57,7 @@ from ceiba_nl2sql.generation.llm import DEFAULT_LLM_MODEL, LlmClient, TokenUsage
 from ceiba_nl2sql.generation.pricing import estimate_cost_usd
 from ceiba_nl2sql.generation.prompt import assemble_prompt, assemble_repair_prompt
 from ceiba_nl2sql.guard.cardinality import cardinality_guard_from_context
+from ceiba_nl2sql.guard.limit import enforce_default_limit as _enforce_default_limit_guard
 from ceiba_nl2sql.guard.explain_estimate import (
     ExplainRunner,
     LargeTableStat,
@@ -177,6 +178,12 @@ class GenerateOptions:
     # this on does not affect R2 prompt-caching. Default off => unchanged
     # behavior for existing callers.
     strict_join_steering: bool = False
+    # P2: universal default-LIMIT guard. When on (default), a candidate whose
+    # OUTERMOST query has no LIMIT gets one appended (or is rejected if it is an
+    # unordered GROUP BY, to avoid silently dropping groups) — closing the gap
+    # where the cardinality guard only bounds large-time-series tables. Off =>
+    # unchanged behavior for callers that manage limits themselves.
+    enforce_default_limit: bool = True
 
 
 def extract_sql(raw: str) -> tuple[str, str]:
@@ -238,6 +245,7 @@ def _validate_candidate(
     dialect: SqlDialect,
     source_dsn: str | None = None,
     pg_explain_runner: ExplainRunner | None = None,
+    enforce_default_limit: bool = True,
 ) -> tuple[bool, str | None, _AttemptFailure | None]:
     """Runs the guard_sql -> cardinality_guard -> EXPLAIN-estimate -> explain
     chain on one candidate SQL. Returns `(ok, accepted_sql, failure)`. Mirrors
@@ -306,6 +314,28 @@ def _validate_candidate(
         )
     if card_verdict.action == "repair" and card_verdict.repaired_sql:
         sql_for_explain = card_verdict.repaired_sql
+
+    # ── Universal default-LIMIT guard (P2): bound any outer query the
+    # cardinality guard did not (non-large tables), or reject an unordered
+    # GROUP BY so the model repairs it into a deterministic top-N. Runs on the
+    # possibly-cardinality-repaired SQL so the two guards compose (an already
+    # numeric-LIMITed query no-ops here). Off => unchanged behavior.
+    if enforce_default_limit:
+        limit_verdict = _enforce_default_limit_guard(
+            sql_for_explain, default_limit=default_limit, dialect=dialect
+        )
+        if limit_verdict.action == "reject":
+            return (
+                False,
+                None,
+                _AttemptFailure(
+                    error=limit_verdict.reason or "Query would return an unbounded/ambiguous result set.",
+                    hint=limit_verdict.repair_hint,
+                    failed_sql=sql_for_explain,
+                ),
+            )
+        if limit_verdict.action == "repair" and limit_verdict.repaired_sql:
+            sql_for_explain = limit_verdict.repaired_sql
 
     # ── Postgres-side EXPLAIN-estimate guard (AUTHORITATIVE when available) ──
     # AUGMENTS the syntactic guard above (which already passed/repaired this
@@ -543,6 +573,7 @@ async def generate_sql(
         dialect=resolved_dialect,
         source_dsn=options.source_dsn,
         pg_explain_runner=options.pg_explain_runner,
+        enforce_default_limit=options.enforce_default_limit,
     )
 
     while not ok and rounds < max_repair_rounds:
@@ -597,6 +628,7 @@ async def generate_sql(
             dialect=resolved_dialect,
             source_dsn=options.source_dsn,
             pg_explain_runner=options.pg_explain_runner,
+            enforce_default_limit=options.enforce_default_limit,
         )
 
     if not ok:

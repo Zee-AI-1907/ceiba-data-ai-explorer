@@ -519,6 +519,22 @@ def cardinality_guard(
         )
 
     if not _has_limit_clause(root):
+        # Rollup-safety: appending a LIMIT to a GROUP BY with no ORDER BY would
+        # return an ARBITRARY subset of groups with no error — a silent wrong
+        # answer. Reject so the self-repair loop makes the model add an ORDER BY
+        # (a deterministic top-N) rather than truncating groups blindly.
+        if (
+            isinstance(root, exp.Select)
+            and root.args.get("group") is not None
+            and root.args.get("order") is None
+        ):
+            return CardinalityVerdict(
+                ok=False,
+                action="reject",
+                reason="Grouped query over a large table has no ORDER BY and no LIMIT; appending a LIMIT "
+                "would return an arbitrary subset of groups (silent wrong answer).",
+                repair_hint="Add an ORDER BY expressing the ranking you want, then a LIMIT (the top-N groups).",
+            )
         repaired_sql = _append_limit(sql, default_limit)
         return CardinalityVerdict(
             ok=True,

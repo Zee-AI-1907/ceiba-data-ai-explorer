@@ -44,6 +44,27 @@ def test_repair_appends_limit_when_time_bound_present_but_no_limit():
     assert "LIMIT 500" in verdict.repaired_sql
 
 
+def test_grouped_bounded_large_table_without_order_by_rejects():
+    # Rollup-safety (latent-bug fix): a time-bounded large-table rollup with no
+    # ORDER BY and no LIMIT must NOT get a silent LIMIT (which drops arbitrary
+    # groups) — reject so the model adds an ORDER BY + top-N.
+    sql = '''SELECT "DeviceId", count(*) FROM "MeasurementsMock"
+        WHERE "RecordedAt" >= now() - INTERVAL '3 hours' GROUP BY "DeviceId"'''
+    verdict = cardinality_guard(sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN)
+    assert verdict.action == "reject"
+    assert verdict.repaired_sql is None
+    assert verdict.repair_hint and "ORDER BY" in verdict.repair_hint
+
+
+def test_grouped_bounded_large_table_with_order_by_repairs_limit():
+    # With an ORDER BY the top-N is deterministic, so appending a LIMIT is safe.
+    sql = '''SELECT "DeviceId", count(*) AS c FROM "MeasurementsMock"
+        WHERE "RecordedAt" >= now() - INTERVAL '3 hours' GROUP BY "DeviceId" ORDER BY c DESC'''
+    verdict = cardinality_guard(sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN, default_limit=500)
+    assert verdict.action == "repair"
+    assert "LIMIT 500" in verdict.repaired_sql
+
+
 def test_reject_when_wholly_unbounded_no_time_predicate_at_all():
     sql = 'SELECT * FROM "MeasurementsMock" WHERE "Value" > 120'
     verdict = cardinality_guard(sql, large_tables=[LARGE_TABLE], required_time_column_by_table=REQUIRED_TIME_COLUMN)

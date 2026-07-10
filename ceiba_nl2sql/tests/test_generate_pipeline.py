@@ -23,7 +23,7 @@ from ceiba_nl2sql.embed.local_embedder import DeterministicHashEmbedder
 from ceiba_nl2sql.engine.base import AttachSpec
 from ceiba_nl2sql.engine.duckdb_engine import DuckDbEngine
 from ceiba_nl2sql.generation.llm import StubLlmClient
-from ceiba_nl2sql.generation.pipeline import GenerationError, generate_sql
+from ceiba_nl2sql.generation.pipeline import GenerateOptions, GenerationError, generate_sql
 from ceiba_nl2sql.retrieval.retriever import HybridRetriever
 
 FIXTURE_BUNDLE_DIR = Path(__file__).resolve().parents[2] / "lib" / "rag" / "__tests__" / "fixtures" / "bundles" / "mock-v1"
@@ -127,6 +127,53 @@ class TestCanonicalAdmittedQuestion:
             assert "VisitMock" in response.sql
             assert "LIMIT" in response.sql.upper()
             assert response.dialect == "duckdb"
+        finally:
+            retriever.dispose()
+
+
+class TestUniversalLimitGuard:
+    async def test_appends_default_limit_to_unlimited_non_large_table_query(self, engine):
+        # VisitMock is NOT a large-time-series table, so the cardinality guard
+        # leaves it alone; the universal limit guard must still bound it.
+        retriever = _build_retriever()
+        try:
+            unlimited = '''SELECT v."visitRef", v."patientRef" FROM mock.public."VisitMock" v
+WHERE v."admittedAt" >= now() - INTERVAL '1 day' '''
+            llm = StubLlmClient([unlimited])
+            response = await generate_sql(question=ADMITTED_QUESTION, engine=engine, retriever=retriever, llm=llm)
+            assert "LIMIT 1000" in response.sql
+            # repaired in-place by the guard (accepted), not via a model round
+            assert response.repair is None
+        finally:
+            retriever.dispose()
+
+    async def test_disabled_flag_leaves_unlimited_query_unbounded(self, engine):
+        retriever = _build_retriever()
+        try:
+            unlimited = '''SELECT v."visitRef", v."patientRef" FROM mock.public."VisitMock" v
+WHERE v."admittedAt" >= now() - INTERVAL '1 day' '''
+            llm = StubLlmClient([unlimited])
+            options = GenerateOptions(enforce_default_limit=False)
+            response = await generate_sql(
+                question=ADMITTED_QUESTION, engine=engine, retriever=retriever, llm=llm, options=options
+            )
+            assert "LIMIT" not in response.sql.upper()
+        finally:
+            retriever.dispose()
+
+    async def test_unordered_group_by_rejected_into_self_repair(self, engine):
+        # An unordered GROUP BY must NOT be silently LIMIT-truncated — it is
+        # rejected so the model repairs it into a deterministic top-N.
+        retriever = _build_retriever()
+        try:
+            grouped = '''SELECT v."wardId", count(*) FROM mock.public."VisitMock" v GROUP BY v."wardId"'''
+            fixed = '''SELECT v."wardId", count(*) AS c FROM mock.public."VisitMock" v
+GROUP BY v."wardId" ORDER BY c DESC LIMIT 1000'''
+            llm = StubLlmClient([grouped, fixed])
+            response = await generate_sql(question=ADMITTED_QUESTION, engine=engine, retriever=retriever, llm=llm)
+            assert response.repair is not None
+            assert response.repair.rounds == 1
+            assert "order by" in (response.repair.last_error or "").lower() or "group" in (response.repair.last_error or "").lower()
         finally:
             retriever.dispose()
 
