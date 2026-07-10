@@ -120,3 +120,16 @@ def test_malformed_env_override_is_ignored(monkeypatch: pytest.MonkeyPatch):
     # Falls back to defaults; no crash.
     result = estimate_cost_usd("gpt-4o-mini", 1_000_000, 0)
     assert result.estimated_cost_usd == pytest.approx(DEFAULT_MODEL_PRICES["gpt-4o-mini"]["input"])
+
+
+def test_gpt56_models_priced():
+    # gpt-5.6-luna and gpt-5.6-terra must be priced.
+    for model in ("gpt-5.6-luna", "gpt-5.6-terra"):
+        r = estimate_cost_usd(model, 1_000_000, 0)
+        assert r.priced is True, model
+    # gpt-5.6-luna: 1M prompt @ $1.00 + 1M completion @ $6.00 = $7.00
+    luna = estimate_cost_usd("gpt-5.6-luna", 1_000_000, 1_000_000)
+    assert abs(luna.estimated_cost_usd - (1.00 + 6.00)) < 1e-6
+    # gpt-5.6-terra: 1M prompt @ $2.50 + 1M completion @ $15.00 = $17.50
+    terra = estimate_cost_usd("gpt-5.6-terra", 1_000_000, 1_000_000)
+    assert abs(terra.estimated_cost_usd - (2.50 + 15.00)) < 1e-6
